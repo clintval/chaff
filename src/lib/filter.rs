@@ -678,20 +678,44 @@ pub fn run_filter_on<P: PileupSource>(args: &FilterArgs, engine: P) -> Result<()
     run_filter_with(args, &mut evidence)
 }
 
-/// Run the `filter` command on the BAM named by `args`.
-pub fn run_filter(args: &FilterArgs) -> Result<()> {
+/// Check the inputs `args` names before any molecule is read: the VCF/BCF
+/// header and sample, the reference, and the BAM's sort order.
+pub fn validate_inputs(args: &FilterArgs) -> Result<sam::Header> {
+    if args.input == Path::new("-") {
+        bail!("the input VCF/BCF is read twice, so it must be a file, not standard input");
+    }
+    let mut reader = VariantReader::open(&args.input)?;
+    let header = reader
+        .read_header()
+        .context("failed to read the VCF/BCF header")?;
+    resolve_sample(&header, args.options.sample.as_deref())?;
+    match &args.reference {
+        Some(path) => {
+            Reference::open(path)?;
+        }
+        None if args.options.enabled(FilterKind::LesionCopy) => {
+            bail!("the lesion copy filter needs a reference FASTA (--ref)")
+        }
+        None => {}
+    }
     let mut reader = noodles::bam::io::reader::Builder
         .build_from_path(&args.bam)
         .with_context(|| format!("failed to open BAM: {:?}", args.bam))?;
-    let header = reader
+    let bam_header = reader
         .read_header()
         .context("failed to read the BAM header")?;
-    if !is_coordinate_sorted(&header) {
+    if !is_coordinate_sorted(&bam_header) {
         bail!(
             "the BAM must be coordinate sorted (@HD SO:coordinate): {:?}",
             args.bam
         );
     }
+    Ok(bam_header)
+}
+
+/// Run the `filter` command on the BAM named by `args`.
+pub fn run_filter(args: &FilterArgs) -> Result<()> {
+    validate_inputs(args)?;
     bail!(
         "no streaming pileup engine is linked into this build of chaff, so it cannot read molecules from {:?}",
         args.bam

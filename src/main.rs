@@ -1,10 +1,19 @@
 //! Separate somatic variant calls from library-preparation damage artifacts.
 use std::process;
 
+use std::path::PathBuf;
+
 use anyhow::{Error, Result};
+use chaff::classes::{validate_classes, LesionClass};
+use chaff::filter::{run_filter, FilterArgs, FilterKind, FilterOptions};
+use chaff::lesion_copy::LesionCopy;
+use chaff::prior::PriorMode;
+use chaff::read_end::{ATailing, EndRepairFillIn};
+use chaff::template::ReadFilter;
 use clap::builder::styling::{AnsiColor, Effects, Style, Styles};
-use clap::{CommandFactory, FromArgMatches, Parser};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use env_logger::Env;
+use log::error;
 use mimalloc::MiMalloc;
 
 #[global_allocator]
@@ -51,7 +60,261 @@ pub(crate) const CARGO_STYLING: Styles = Styles::styled()
 #[derive(Debug, Parser)]
 #[command(author, version, color = clap::ColorChoice::Always, verbatim_doc_comment, arg_required_else_help = true)]
 #[clap(styles = CARGO_STYLING)]
-struct Cli {}
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    Filter(FilterCmd),
+}
+
+/// Score and filter somatic calls against library-preparation artifacts.
+///
+/// Reads a coordinate-sorted VCF/BCF of somatic calls and the coordinate-sorted
+/// BAM of one of its samples, merge-joins them without an index, and writes
+/// the calls with INFO annotations and, past a threshold, FILTERs.
+///
+/// MENTAL MODEL
+///
+///  1. Each template covering a call is one molecule; mates count once
+///  2. A molecule's position is its distance from a template end
+///  3. A true mutation's molecules sit where the reference molecules sit
+///  4. An artifact's molecules crowd the end that made the artifact
+///  5. Each call gets a likelihood ratio, artifact to mutation
+///  6. EM over all calls learns each stratum's artifact fraction (the prior)
+///  7. The posterior probability of a true mutation is written per call
+///
+/// FILTERS
+///
+///   lesion-copy          damage copied onto the other strand before strand
+///                        tagging: alternates crowd the lesion strand's 5' end
+///   end-repair-fill-in   damage copied into a filled-in recessed 3' end:
+///                        alternates crowd either template end (fgbio ERFAP)
+///   a-tailing            adenines added to an over-digested 3' end: a T near
+///                        the left end or an A near the right (fgbio ATAP)
+///
+/// EXAMPLES
+///
+///  1. Annotate every filter and write the per-sample metrics:
+///
+///   chaff filter -i calls.vcf.gz -b tumor.bam -r ref.fa -o out.vcf.gz \
+///       --metrics tumor.chaff.tsv
+///
+///  2. Apply the lesion copy FILTER at a posterior of 0.05 or below:
+///
+///   chaff filter -i calls.vcf.gz -b tumor.bam -r ref.fa -o out.vcf.gz \
+///       --lesion-copy-threshold 0.05
+///
+///  3. Reproduce fgbio FilterSomaticVcf, including its prior:
+///
+///   chaff filter -i calls.vcf -b tumor.bam -o out.vcf --prior fgbio \
+///       --filters end-repair-fill-in,a-tailing
+#[derive(Debug, Parser)]
+#[command(rename_all = "kebab-case", verbatim_doc_comment)]
+struct FilterCmd {
+    /// Input VCF/BCF of somatic calls, coordinate-sorted.
+    ///
+    /// Read twice (once to learn priors, once to write), so it must be a file.
+    #[arg(short = 'i', long, value_name = "VCF", verbatim_doc_comment)]
+    input: PathBuf,
+
+    /// Output VCF/BCF; the format follows the extension.
+    ///
+    ///   out.vcf      plain VCF
+    ///   out.vcf.gz   BGZF-compressed VCF
+    ///   out.bcf      BCF
+    ///   -            plain VCF to standard output
+    #[arg(short = 'o', long, value_name = "VCF", verbatim_doc_comment)]
+    output: PathBuf,
+
+    /// Coordinate-sorted BAM of the sample under test; no index needed.
+    #[arg(short = 'b', long, value_name = "BAM", verbatim_doc_comment)]
+    bam: PathBuf,
+
+    /// Indexed reference FASTA (`.fai` alongside) for CpG context.
+    ///
+    /// Required by the `lesion-copy` filter.
+    #[arg(short = 'r', long = "ref", value_name = "FASTA", verbatim_doc_comment)]
+    reference: Option<PathBuf>,
+
+    /// The sample whose reads are in the BAM.
+    ///
+    /// Required when the VCF has more than one sample.
+    #[arg(short = 's', long, value_name = "NAME", verbatim_doc_comment)]
+    sample: Option<String>,
+
+    /// Per-sample metrics TSV: one row per filter and stratum.
+    #[arg(long, value_name = "TSV", verbatim_doc_comment)]
+    metrics: Option<PathBuf>,
+
+    /// Minimum mapping quality of a read.
+    #[arg(
+        short = 'm',
+        long,
+        value_name = "MAPQ",
+        default_value_t = 20,
+        verbatim_doc_comment
+    )]
+    min_mapping_quality: u8,
+
+    /// Minimum base quality at the call.
+    #[arg(
+        short = 'q',
+        long,
+        value_name = "QUAL",
+        default_value_t = 20,
+        verbatim_doc_comment
+    )]
+    min_base_quality: u8,
+
+    /// Use only paired reads whose mate is also mapped.
+    ///
+    /// Duplicate, secondary, and supplementary reads are always left out.
+    #[arg(short = 'p', long, verbatim_doc_comment)]
+    paired_reads_only: bool,
+
+    /// The filters to run, comma-separated.
+    ///
+    ///   --filters lesion-copy                     only the lesion copy filter
+    ///   --filters end-repair-fill-in,a-tailing    only the fgbio filters
+    #[arg(
+        long,
+        value_enum,
+        value_delimiter = ',',
+        value_name = "FILTER",
+        default_values_t = FilterKind::ALL,
+        hide_possible_values = true,
+        verbatim_doc_comment
+    )]
+    filters: Vec<FilterKind>,
+
+    /// The prior that turns a likelihood ratio into a posterior.
+    ///
+    ///   learned   artifact fraction per sample and stratum, learned by EM
+    ///   fgbio     fgbio's per-call mutation prior, (2 * maf)^2, for parity
+    #[arg(
+        long,
+        value_enum,
+        value_name = "PRIOR",
+        default_value_t = PriorMode::Learned,
+        hide_possible_values = true,
+        verbatim_doc_comment
+    )]
+    prior: PriorMode,
+
+    /// Lesion classes as lesion base `>` read base, comma-separated.
+    ///
+    /// A class matches on either strand: `C>T` covers REF/ALT `C/T` (lesion on
+    /// the forward strand) and `G/A` (lesion on the reverse strand).
+    ///
+    ///   C>T   cytosine or 5-methylcytosine deamination
+    ///   G>T   guanine oxidation to 8-oxoguanine
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_name = "CLASS",
+        default_values = ["C>T", "G>T"],
+        verbatim_doc_comment
+    )]
+    lesion_copy_classes: Vec<LesionClass>,
+
+    /// Mean length in bases of the resynthesis that copies a lesion.
+    #[arg(long, value_name = "BP", default_value_t = 30.0, value_parser = positive, verbatim_doc_comment)]
+    lesion_copy_scale: f64,
+
+    /// Apply `LesionCopyArtifact` at or below this posterior.
+    #[arg(long, value_name = "P", value_parser = probability, verbatim_doc_comment)]
+    lesion_copy_threshold: Option<f64>,
+
+    /// Distance from a template end within which end repair fill-in acts.
+    #[arg(long, value_name = "BP", default_value_t = 15, verbatim_doc_comment)]
+    end_repair_fill_in_distance: u32,
+
+    /// Replace the distance window with a decay of this scale in bases.
+    #[arg(long, value_name = "BP", value_parser = positive, verbatim_doc_comment)]
+    end_repair_fill_in_scale: Option<f64>,
+
+    /// Apply `EndRepairFillInArtifact` at or below this posterior.
+    #[arg(
+        long,
+        alias = "end-repair-fill-in-p-value",
+        value_name = "P",
+        value_parser = probability,
+        verbatim_doc_comment
+    )]
+    end_repair_fill_in_threshold: Option<f64>,
+
+    /// Distance from a template end within which A-tailing acts.
+    #[arg(long, value_name = "BP", default_value_t = 2, verbatim_doc_comment)]
+    a_tailing_distance: u32,
+
+    /// Apply `ATailingArtifact` at or below this posterior.
+    #[arg(
+        long,
+        alias = "a-tailing-p-value",
+        value_name = "P",
+        value_parser = probability,
+        verbatim_doc_comment
+    )]
+    a_tailing_threshold: Option<f64>,
+}
+
+/// Parse a finite length greater than zero.
+fn positive(text: &str) -> Result<f64, String> {
+    match text.parse::<f64>() {
+        Ok(value) if value.is_finite() && value > 0.0 => Ok(value),
+        _ => Err(format!("expected a positive number, found: {text}")),
+    }
+}
+
+/// Parse a probability from zero to one.
+fn probability(text: &str) -> Result<f64, String> {
+    match text.parse::<f64>() {
+        Ok(value) if (0.0..=1.0).contains(&value) => Ok(value),
+        _ => Err(format!("expected a probability from 0 to 1, found: {text}")),
+    }
+}
+
+impl FilterCmd {
+    /// Validate the options and gather them into [`FilterArgs`].
+    fn into_args(self) -> Result<FilterArgs> {
+        validate_classes(&self.lesion_copy_classes)?;
+        let options = FilterOptions {
+            sample: self.sample,
+            filters: self.filters,
+            prior: self.prior,
+            lesion_copy: LesionCopy {
+                classes: self.lesion_copy_classes,
+                scale: self.lesion_copy_scale,
+            },
+            lesion_copy_threshold: self.lesion_copy_threshold,
+            end_repair_fill_in: EndRepairFillIn {
+                distance: self.end_repair_fill_in_distance,
+                scale: self.end_repair_fill_in_scale,
+            },
+            end_repair_fill_in_threshold: self.end_repair_fill_in_threshold,
+            a_tailing: ATailing {
+                distance: self.a_tailing_distance,
+            },
+            a_tailing_threshold: self.a_tailing_threshold,
+        };
+        Ok(FilterArgs {
+            input: self.input,
+            output: self.output,
+            bam: self.bam,
+            reference: self.reference,
+            metrics: self.metrics,
+            read_filter: ReadFilter {
+                min_mapping_quality: self.min_mapping_quality,
+                min_base_quality: self.min_base_quality,
+                paired_reads_only: self.paired_reads_only,
+            },
+            options,
+        })
+    }
+}
 
 /// The ANSI escape that starts `style`, or an empty string when `color` is off
 /// (honoring `NO_COLOR`). Its matching reset comes from [`esc_reset`].
@@ -234,6 +497,16 @@ fn main() -> Result<(), Error> {
     // ANSI color into them, which clap's wrapping would count as visible width.
     let cmd = decorate_help(Cli::command().term_width(usize::MAX), color);
     let matches = cmd.get_matches();
-    let _cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
-    process::exit(0);
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+
+    let result = match cli.command {
+        Commands::Filter(cmd) => cmd.into_args().and_then(|args| run_filter(&args)),
+    };
+    match result {
+        Ok(()) => process::exit(0),
+        Err(e) => {
+            error!("{e:#}");
+            process::exit(1);
+        }
+    }
 }
