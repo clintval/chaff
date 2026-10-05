@@ -1,0 +1,24 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# rust / cargo
+/target/
+
+# coverage reports (tarpaulin writes these to the repo root)
+/lcov.info
+
+# reference repo clones (read-only, never committed)
+/reference/
+
+# macOS
+.DS_Store
+
+# claude code
+.claude/*
+
+# local planning docs (kept out of the remote)
+/docs/
+
+# editor settings
+/.vscode/

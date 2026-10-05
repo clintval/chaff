@@ -1,0 +1,46 @@
+[package]
+name = "chaff"
+version = "0.1.0"
+authors = ["Clint Valentine <valentine.clint@gmail.com>"]
+edition = "2021"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/clintval/chaff"
+description = "Separate somatic variant calls from library-preparation damage artifacts."
+categories = ["command-line-utilities", "science"]
+keywords = ["bioinformatics", "somatic", "duplex", "artifact", "vcf"]
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+
+# Shipped artifacts (bioconda etc.): the release settings plus no debug info and a stripped binary.
+[profile.dist]
+inherits = "release"
+codegen-units = 1
+lto = "fat"
+debug = 0
+incremental = false
+strip = true
+
+[lib]
+name = "chaff"
+path = "src/lib/mod.rs"
+
+[[bin]]
+name = "chaff"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "wrap_help"] }
+env_logger = "0.11"
+log = "0.4"
+mimalloc = "0.1"
+
+[dev-dependencies]
+assert_cmd = "2"
+clap = { version = "4", features = ["derive"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }
