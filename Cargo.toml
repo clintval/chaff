@@ -34,13 +34,20 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "wrap_help"] }
+csv = "1"
 env_logger = "0.11"
 log = "0.4"
 mimalloc = "0.1"
+noodles = { version = "0.115", features = ["bam", "bcf", "bgzf", "core", "fasta", "sam", "vcf"] }
+noodles-bgzf = { version = "0.51", features = ["libdeflate"] }
+serde = { version = "1", features = ["derive"] }
+statrs = "0.18"
 
 [dev-dependencies]
 assert_cmd = "2"
 clap = { version = "4", features = ["derive"] }
+rstest = "0.26"
+tempfile = "3"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }
