@@ -279,6 +279,7 @@ mod tests {
 
     use super::*;
     use crate::evidence::{Evidence, PileupEvidence};
+    use crate::io::vcf_float;
     use crate::prior::{
         fgbio_artifact_prior, learn_artifact_fraction, posterior_mutation, PSEUDOCOUNT,
     };
@@ -313,6 +314,8 @@ mod tests {
     }
 
     /// The posterior fgbio reports for one call, with its `(2 * maf)^2` prior.
+    /// The exact values asserted against it were produced by fgbio 4.1.1
+    /// `FilterSomaticVcf` on the same reads.
     fn fgbio_posterior(score: &Score) -> f64 {
         let prior = fgbio_artifact_prior(score.alt_molecules, score.ref_molecules, score.depth);
         posterior_mutation(score.log_likelihood_ratio.unwrap(), prior)
@@ -496,6 +499,7 @@ mod tests {
         let score = filter.score(&molecules_at(&distributed_reads(), 25), 25, G, T);
         assert!(score.log_likelihood_ratio.is_some());
         assert!(fgbio_posterior(&score) > 0.5);
+        assert_eq!(vcf_float(fgbio_posterior(&score)), 1.0);
         assert!(learned_posterior(&score) > 0.5);
     }
 
@@ -507,6 +511,7 @@ mod tests {
         let score = filter.score(&molecules_at(&biased_reads(11..=25), 25), 25, G, T);
         assert!(score.log_likelihood_ratio.is_some());
         assert!(fgbio_posterior(&score) < 1e-6);
+        assert_eq!(vcf_float(fgbio_posterior(&score)), 1.869e-10);
         assert!(learned_posterior(&score) < 1e-6);
     }
 
@@ -612,6 +617,7 @@ mod tests {
         let score = filter.score(&molecules_at(&distributed_reads(), 25), 25, G, T);
         assert!(score.log_likelihood_ratio.is_some());
         assert!(fgbio_posterior(&score) > 0.5);
+        assert_eq!(vcf_float(fgbio_posterior(&score)), 1.0);
         assert!(learned_posterior(&score) > 0.5);
     }
 
@@ -626,6 +632,7 @@ mod tests {
         let score = filter.score(&molecules_at(&biased_reads(21..=25), 25), 25, G, T);
         assert!(score.log_likelihood_ratio.is_some());
         assert!(fgbio_posterior(&score) < 1e-6);
+        assert_eq!(vcf_float(fgbio_posterior(&score)), 1.547e-8);
         let learned = learned_posterior(&score);
         assert!(learned > 1e-6 && learned < 1e-5, "{learned}");
     }
@@ -660,6 +667,7 @@ mod tests {
         let score = filter.score(&molecules_at(&builder, 25), 25, G, T);
         assert!(score.log_likelihood_ratio.is_some());
         assert!(fgbio_posterior(&score) < 1e-4);
+        assert_eq!(vcf_float(fgbio_posterior(&score)), 8.094e-5);
         let learned = learned_posterior(&score);
         assert!(learned > 1e-3 && learned < 1e-2, "{learned}");
     }

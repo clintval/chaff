@@ -46,6 +46,7 @@ statrs = "0.18"
 [dev-dependencies]
 assert_cmd = "2"
 clap = { version = "4", features = ["derive"] }
+csv = "1"
 cucumber = "0.21"
 futures = "0.3"
 rstest = "0.26"

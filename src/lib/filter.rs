@@ -829,6 +829,36 @@ mod tests {
     }
 
     #[test]
+    fn test_bcf_and_bgzf_outputs_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(10, &["G", "T"], vec![gt("tumor", "0/1")]));
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let mut table = MoleculeTable::new();
+        let mut molecules: Vec<Molecule> = (0..20)
+            .map(|o| Molecule::new(b'G', 30, 10 - o, 100))
+            .collect();
+        molecules.push(Molecule::new(b'T', 30, 10, 100));
+        table.insert("chr1", 10, molecules);
+        let options = FilterOptions {
+            filters: vec![FilterKind::ATailing, FilterKind::EndRepairFillIn],
+            ..FilterOptions::default()
+        };
+        for name in ["out.bcf", "out.vcf.gz"] {
+            let output = dir.path().join(name);
+            filter_vcf(&input, &output, &mut table.clone(), None, &options).unwrap();
+            let (header, records) = read_records(&output);
+            assert!(header.infos().contains_key(EndRepairFillIn::INFO), "{name}");
+            assert_eq!(records.len(), 1, "{name}");
+            assert!(
+                float(&records[0], EndRepairFillIn::INFO).is_some(),
+                "{name}"
+            );
+            assert!(float(&records[0], ATailing::INFO).is_some(), "{name}");
+        }
+    }
+
+    #[test]
     fn test_lesion_copy_requires_a_reference() {
         let dir = tempfile::tempdir().unwrap();
         let input = VcfBuilder::new(&["tumor"]).write(&dir.path().join("in.vcf"));

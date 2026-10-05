@@ -195,6 +195,19 @@ impl SamBuilder {
         self
     }
 
+    /// Declare the records coordinate sorted (`@HD SO:coordinate`), as fgbio's
+    /// `sort = Some(SamOrder.Coordinate)` does.
+    pub fn coordinate_sorted(mut self) -> Self {
+        use noodles::sam::header::record::value::map::header::tag::SORT_ORDER;
+        use noodles::sam::header::record::value::map::Header;
+        let hd = Map::<Header>::builder()
+            .insert(SORT_ORDER, "coordinate")
+            .build()
+            .expect("a valid @HD");
+        *self.header.header_mut() = Some(hd);
+        self
+    }
+
     /// The header of the built records.
     pub fn header(&self) -> &sam::Header {
         &self.header
@@ -205,16 +218,31 @@ impl SamBuilder {
         &self.records
     }
 
+    /// Write the records as a BAM in coordinate order (fgbio's `write`).
+    pub fn write_bam(&self, path: &Path) -> PathBuf {
+        use noodles::bam;
+        use noodles::sam::alignment::io::Write as _;
+        let mut writer = bam::io::Writer::new(std::fs::File::create(path).unwrap());
+        writer.write_header(&self.header).unwrap();
+        for record in &self.pileup().records {
+            writer.write_alignment_record(&self.header, record).unwrap();
+        }
+        writer.try_finish().unwrap();
+        path.to_path_buf()
+    }
+
     /// Add records built elsewhere (fgbio's `++=`).
     pub fn extend(&mut self, records: impl IntoIterator<Item = RecordBuf>) {
         self.records.extend(records);
     }
 
-    /// A pileup over the built records.
+    /// A pileup over the built records, in coordinate order.
     pub fn pileup(&self) -> TestPileup {
+        let mut records = self.records.clone();
+        records.sort_by_key(|r| (r.reference_sequence_id(), r.alignment_start()));
         TestPileup {
             header: self.header.clone(),
-            records: self.records.clone(),
+            records,
         }
     }
 
