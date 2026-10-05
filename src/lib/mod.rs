@@ -5,6 +5,7 @@
 pub mod call;
 pub mod classes;
 pub mod evidence;
+pub mod filter;
 pub mod io;
 pub mod lesion_copy;
 pub mod metrics;

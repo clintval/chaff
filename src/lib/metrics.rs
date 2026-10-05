@@ -36,8 +36,9 @@ pub struct StratumMetrics {
     pub calls: u64,
     /// Calls the filter's FILTER was applied to.
     pub filtered: u64,
-    /// The learned artifact fraction of the stratum.
-    pub artifact_fraction: f64,
+    /// The learned artifact fraction of the stratum, empty under fgbio's
+    /// per-call prior.
+    pub artifact_fraction: Option<f64>,
     /// The sum over calls of the posterior probability of an artifact.
     pub expected_artifacts: f64,
     /// Alternate molecules measured.
@@ -139,7 +140,7 @@ mod tests {
             stratum: "C>T:CpG".into(),
             calls: 3,
             filtered: 1,
-            artifact_fraction: 0.4,
+            artifact_fraction: Some(0.4),
             expected_artifacts: 1.2,
             alt_molecules: 10,
             alt_congruent: 9,
