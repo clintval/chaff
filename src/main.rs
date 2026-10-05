@@ -493,8 +493,7 @@ fn main() -> Result<(), Error> {
         .write_style(write_style)
         .init();
 
-    // Doc comments are hand-wrapped to 80 columns and `decorate_help` injects
-    // ANSI color into them, which clap's wrapping would count as visible width.
+    // Help text is hand-wrapped, and clap would count the injected ANSI escapes as width.
     let cmd = decorate_help(Cli::command().term_width(usize::MAX), color);
     let matches = cmd.get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
