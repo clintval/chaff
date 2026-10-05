@@ -41,18 +41,18 @@ use crate::template::ReadFilter;
 pub enum FilterKind {
     /// Damage copied onto the other strand before strand tagging.
     LesionCopy,
-    /// Damage copied into a filled-in recessed 3' end during end repair.
-    EndRepairFillIn,
     /// Adenines added to an over-digested recessed 3' end during A-tailing.
     ATailing,
+    /// Damage copied into a filled-in recessed 3' end during end repair.
+    EndRepairFillIn,
 }
 
 impl FilterKind {
     /// Every filter, in output order.
     pub const ALL: [FilterKind; 3] = [
         FilterKind::LesionCopy,
-        FilterKind::EndRepairFillIn,
         FilterKind::ATailing,
+        FilterKind::EndRepairFillIn,
     ];
 }
 
@@ -192,6 +192,24 @@ impl FilterOptions {
                 ),
             );
         }
+        if self.enabled(FilterKind::ATailing) {
+            let distance = self.a_tailing.distance;
+            add_info(
+                header,
+                ATailing::INFO,
+                Number::Count(1),
+                Type::Float,
+                &format!("Posterior probability that the call is a true mutation rather than an A-tailing artifact, with a {distance} bp distance from the template end and {prior}."),
+            );
+            add_filter(
+                header,
+                ATailing::FILTER,
+                &format!(
+                    "Call is likely an A-tailing artifact, with a {distance} bp distance from the template end, {}.",
+                    self.threshold_text(FilterKind::ATailing)
+                ),
+            );
+        }
         if self.enabled(FilterKind::EndRepairFillIn) {
             let model = match self.end_repair_fill_in.scale {
                 Some(scale) => format!("a {scale} bp decay from the nearest template end"),
@@ -213,24 +231,6 @@ impl FilterOptions {
                 &format!(
                     "Call is likely an end repair fill-in artifact, with {model}, {}.",
                     self.threshold_text(FilterKind::EndRepairFillIn)
-                ),
-            );
-        }
-        if self.enabled(FilterKind::ATailing) {
-            let distance = self.a_tailing.distance;
-            add_info(
-                header,
-                ATailing::INFO,
-                Number::Count(1),
-                Type::Float,
-                &format!("Posterior probability that the call is a true mutation rather than an A-tailing artifact, with a {distance} bp distance from the template end and {prior}."),
-            );
-            add_filter(
-                header,
-                ATailing::FILTER,
-                &format!(
-                    "Call is likely an A-tailing artifact, with a {distance} bp distance from the template end, {}.",
-                    self.threshold_text(FilterKind::ATailing)
                 ),
             );
         }
