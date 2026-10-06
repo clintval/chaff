@@ -13,11 +13,6 @@ use noodles::vcf::header::record::value::map::{Filter, Info, Map};
 use noodles::vcf::variant::io::Write as _;
 use noodles::vcf::variant::RecordBuf;
 
-/// Whether a path names a BCF file.
-fn is_bcf(path: &Path) -> bool {
-    path.extension().is_some_and(|ext| ext == "bcf")
-}
-
 /// A reader over VCF (plain or BGZF) or BCF records.
 pub enum VariantReader {
     /// A VCF reader.
@@ -29,7 +24,7 @@ pub enum VariantReader {
 impl VariantReader {
     /// Open a VCF or BCF by its extension.
     pub fn open(path: &Path) -> Result<Self> {
-        if is_bcf(path) {
+        if Format::of(path) == Format::Bcf {
             let file = File::open(path).with_context(|| format!("failed to open BCF: {path:?}"))?;
             Ok(Self::Bcf(bcf::io::Reader::new(file)))
         } else {
@@ -61,42 +56,66 @@ impl VariantReader {
     }
 }
 
+/// The format of a VCF/BCF file, from its extension.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Format {
+    /// Plain-text VCF.
+    Vcf,
+    /// BGZF-compressed VCF: `.gz` or `.bgz`.
+    VcfGz,
+    /// BCF: `.bcf`.
+    Bcf,
+}
+
+impl Format {
+    /// The format a path's extension names, plain VCF for any other.
+    pub fn of(path: &Path) -> Self {
+        match path.extension().and_then(|ext| ext.to_str()) {
+            Some("bcf") => Format::Bcf,
+            Some("gz" | "bgz") => Format::VcfGz,
+            _ => Format::Vcf,
+        }
+    }
+}
+
 /// A writer of VCF (plain or BGZF) or BCF records.
 pub enum VariantWriter {
-    /// A VCF writer.
-    Vcf(vcf::io::Writer<Box<dyn Write>>),
+    /// A plain VCF writer.
+    Vcf(vcf::io::Writer<BufWriter<Box<dyn Write>>>),
+    /// A BGZF-compressed VCF writer.
+    VcfGz(vcf::io::Writer<bgzf::io::Writer<Box<dyn Write>>>),
     /// A BCF writer.
-    Bcf(Box<bcf::io::Writer<bgzf::io::Writer<BufWriter<File>>>>),
+    Bcf(Box<bcf::io::Writer<bgzf::io::Writer<Box<dyn Write>>>>),
 }
 
 impl VariantWriter {
+    /// A writer of `format` into `sink`.
+    pub fn new(sink: Box<dyn Write>, format: Format) -> Self {
+        match format {
+            Format::Vcf => Self::Vcf(vcf::io::Writer::new(BufWriter::new(sink))),
+            Format::VcfGz => Self::VcfGz(vcf::io::Writer::new(bgzf::io::Writer::new(sink))),
+            Format::Bcf => Self::Bcf(Box::new(bcf::io::Writer::new(sink))),
+        }
+    }
+
     /// Create a VCF or BCF by its extension; `-` writes VCF to standard output.
     pub fn create(path: &Path) -> Result<Self> {
         if path == Path::new("-") {
-            let stdout: Box<dyn Write> = Box::new(BufWriter::new(io::stdout()));
-            return Ok(Self::Vcf(vcf::io::Writer::new(stdout)));
+            return Ok(Self::new(Box::new(io::stdout()), Format::Vcf));
         }
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create output directory: {parent:?}"))?;
         }
-        if is_bcf(path) {
-            let file =
-                File::create(path).with_context(|| format!("failed to create BCF: {path:?}"))?;
-            let writer = bcf::io::Writer::new(BufWriter::new(file));
-            Ok(Self::Bcf(Box::new(writer)))
-        } else {
-            let writer = vcf::io::writer::Builder::default()
-                .build_from_path(path)
-                .with_context(|| format!("failed to create VCF: {path:?}"))?;
-            Ok(Self::Vcf(writer))
-        }
+        let file = File::create(path).with_context(|| format!("failed to create: {path:?}"))?;
+        Ok(Self::new(Box::new(file), Format::of(path)))
     }
 
     /// Write the header.
     pub fn write_header(&mut self, header: &vcf::Header) -> io::Result<()> {
         match self {
             Self::Vcf(w) => w.write_header(header),
+            Self::VcfGz(w) => w.write_header(header),
             Self::Bcf(w) => w.write_header(header),
         }
     }
@@ -105,6 +124,7 @@ impl VariantWriter {
     pub fn write_record(&mut self, header: &vcf::Header, record: &RecordBuf) -> io::Result<()> {
         match self {
             Self::Vcf(w) => w.write_variant_record(header, record),
+            Self::VcfGz(w) => w.write_variant_record(header, record),
             Self::Bcf(w) => w.write_variant_record(header, record),
         }
     }
@@ -112,15 +132,9 @@ impl VariantWriter {
     /// Flush and close the stream, finishing any BGZF blocks.
     pub fn finish(self) -> io::Result<()> {
         match self {
-            Self::Vcf(mut w) => {
-                w.get_mut().flush()?;
-                drop(w);
-                Ok(())
-            }
-            Self::Bcf(w) => {
-                let mut inner = w.into_inner().finish()?;
-                inner.flush()
-            }
+            Self::Vcf(w) => w.into_inner().flush(),
+            Self::VcfGz(w) => w.into_inner().finish()?.flush(),
+            Self::Bcf(w) => w.into_inner().finish()?.flush(),
         }
     }
 }
@@ -174,6 +188,45 @@ mod tests {
         assert_eq!(vcf_float(1.5e-25), 0.0);
         assert_eq!(vcf_float(-12.3456), -12.35);
         assert_eq!(vcf_float(-0.0012345), -0.001_235);
+    }
+
+    /// The BGZF end-of-file marker block, the last write of a BGZF stream.
+    const BGZF_EOF: [u8; 28] = [
+        0x1f, 0x8b, 0x08, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x06, 0x00, 0x42, 0x43, 0x02,
+        0x00, 0x1b, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    /// A sink with no room left for a BGZF stream's end-of-file block.
+    struct FullAtEof;
+
+    impl Write for FullAtEof {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            match buf == BGZF_EOF {
+                true => Err(io::Error::other("no space left on device")),
+                false => Ok(buf.len()),
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_finish_reports_a_failed_end_of_file_block() {
+        for format in [Format::VcfGz, Format::Bcf] {
+            let mut writer = VariantWriter::new(Box::new(FullAtEof), format);
+            writer.write_header(&vcf::Header::default()).unwrap();
+            assert!(writer.finish().is_err(), "{format:?}");
+        }
+    }
+
+    #[test]
+    fn test_format_follows_the_extension() {
+        assert_eq!(Format::of(Path::new("a.vcf")), Format::Vcf);
+        assert_eq!(Format::of(Path::new("a.vcf.gz")), Format::VcfGz);
+        assert_eq!(Format::of(Path::new("a.vcf.bgz")), Format::VcfGz);
+        assert_eq!(Format::of(Path::new("a.bcf")), Format::Bcf);
     }
 
     #[test]
