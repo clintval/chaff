@@ -1,5 +1,5 @@
-//! The `filter` command: score each somatic call against library-preparation
-//! artifacts, learn the artifact priors, and write the annotated calls.
+//! Score each somatic call against library-preparation artifacts, learn the
+//! artifact priors, and write the annotated calls.
 //!
 //! The VCF and the reads are merge-joined in coordinate order: each call asks
 //! the [`Evidence`] for the molecules at its position, so neither file needs an
@@ -238,7 +238,7 @@ impl FilterOptions {
     }
 }
 
-/// The inputs and outputs of one `filter` run.
+/// The inputs and outputs of one run.
 #[derive(Clone, Debug)]
 pub struct FilterArgs {
     /// The somatic VCF or BCF, coordinate-sorted.
@@ -649,8 +649,8 @@ pub fn is_coordinate_sorted(header: &sam::Header) -> bool {
         .is_some_and(|so| so == "coordinate")
 }
 
-/// Run the `filter` command with molecules from `evidence`, writing the
-/// metrics when asked.
+/// Filter the calls with molecules from `evidence`, writing the metrics when
+/// asked.
 pub fn run_filter_with(args: &FilterArgs, evidence: &mut dyn Evidence) -> Result<()> {
     let mut reference = args.reference.as_deref().map(Reference::open).transpose()?;
     let rows = filter_vcf(
@@ -666,8 +666,8 @@ pub fn run_filter_with(args: &FilterArgs, evidence: &mut dyn Evidence) -> Result
     Ok(())
 }
 
-/// Run the `filter` command with molecules from a streaming pileup engine over
-/// the BAM, after the read floors.
+/// Filter the calls with molecules from a streaming pileup engine over the
+/// BAM, after the read floors.
 pub fn run_filter_on<P: PileupSource>(args: &FilterArgs, engine: P) -> Result<()> {
     if !is_coordinate_sorted(engine.header()) {
         bail!(
@@ -714,7 +714,7 @@ pub fn validate_inputs(args: &FilterArgs) -> Result<sam::Header> {
     Ok(bam_header)
 }
 
-/// Run the `filter` command on the BAM named by `args`, streamed once through
+/// Filter the calls with the BAM named by `args`, streamed once through
 /// streampile. The engine keeps QC-fail reads and both mates, as fgbio does:
 /// the read floors and the mate collapse are chaff's own.
 pub fn run_filter(args: &FilterArgs) -> Result<()> {

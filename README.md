@@ -41,7 +41,7 @@ cargo install --git https://github.com/clintval/chaff
 Annotate the calls of one sample, apply the lesion copy FILTER at a posterior of 0.05 or below, and write the per-sample metrics:
 
 ```bash
-chaff filter \
+chaff \
     --input "calls.vcf.gz" \
     --bam "tumor.bam" \
     --ref "reference.fa" \

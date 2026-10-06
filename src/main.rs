@@ -11,7 +11,7 @@ use chaff::prior::PriorMode;
 use chaff::read_end::{ATailing, EndRepairFillIn};
 use chaff::template::ReadFilter;
 use clap::builder::styling::{AnsiColor, Effects, Style, Styles};
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser};
 use env_logger::Env;
 use log::error;
 use mimalloc::MiMalloc;
@@ -54,27 +54,12 @@ pub(crate) const CARGO_STYLING: Styles = Styles::styled()
 /// Separate somatic variant calls from library-preparation damage artifacts.
 ///
 /// Library preparation can turn DNA damage into a base change that both
-/// strands of a duplex agree on. This tool scores each somatic call by where
-/// its alternate allele sits on the molecules that carry it, compared with the
-/// molecules that carry the reference allele at the same site.
-#[derive(Debug, Parser)]
-#[command(author, version, color = clap::ColorChoice::Always, verbatim_doc_comment, arg_required_else_help = true)]
-#[clap(styles = CARGO_STYLING)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Debug, Subcommand)]
-enum Commands {
-    Filter(FilterCmd),
-}
-
-/// Score and filter somatic calls against library-preparation artifacts.
-///
-/// Reads a coordinate-sorted VCF/BCF of somatic calls and the coordinate-sorted
-/// BAM of one of its samples, merge-joins them without an index, and writes
-/// the calls with INFO annotations and, past a threshold, FILTERs.
+/// strands of a duplex agree on. chaff reads a coordinate-sorted VCF/BCF of
+/// somatic calls and the coordinate-sorted BAM of one of its samples,
+/// merge-joins them without an index, and scores each call by where its
+/// alternate molecules sit compared with the reference molecules at the same
+/// site. It writes the calls with INFO annotations and, past a threshold,
+/// FILTERs.
 ///
 /// MENTAL MODEL
 ///
@@ -99,21 +84,29 @@ enum Commands {
 ///
 ///  1. Annotate every filter and write the per-sample metrics:
 ///
-///   chaff filter -i calls.vcf.gz -b tumor.bam -r ref.fa -o out.vcf.gz \
+///   chaff -i calls.vcf.gz -b tumor.bam -r ref.fa -o out.vcf.gz \
 ///       --metrics tumor.chaff.tsv
 ///
 ///  2. Apply the lesion copy FILTER at a posterior of 0.05 or below:
 ///
-///   chaff filter -i calls.vcf.gz -b tumor.bam -r ref.fa -o out.vcf.gz \
+///   chaff -i calls.vcf.gz -b tumor.bam -r ref.fa -o out.vcf.gz \
 ///       --lesion-copy-threshold 0.05
 ///
 ///  3. Reproduce fgbio FilterSomaticVcf, including its prior:
 ///
-///   chaff filter -i calls.vcf -b tumor.bam -o out.vcf --prior fgbio \
+///   chaff -i calls.vcf -b tumor.bam -o out.vcf --prior fgbio \
 ///       --filters end-repair-fill-in,a-tailing
 #[derive(Debug, Parser)]
-#[command(rename_all = "kebab-case", verbatim_doc_comment)]
-struct FilterCmd {
+#[command(
+    author,
+    version,
+    color = clap::ColorChoice::Always,
+    rename_all = "kebab-case",
+    verbatim_doc_comment,
+    arg_required_else_help = true
+)]
+#[clap(styles = CARGO_STYLING)]
+struct Cli {
     /// Input VCF/BCF of somatic calls, coordinate-sorted.
     ///
     /// Read twice (once to learn priors, once to write), so it must be a file.
@@ -280,7 +273,7 @@ fn probability(text: &str) -> Result<f64, String> {
     }
 }
 
-impl FilterCmd {
+impl Cli {
     /// Validate the options and gather them into [`FilterArgs`].
     fn into_args(self) -> Result<FilterArgs> {
         validate_classes(&self.lesion_copy_classes)?;
@@ -436,7 +429,7 @@ fn style_help_text(text: &str, color: bool) -> String {
 
 /// Style a command's help: paint the first line of the about text in the
 /// [`TITLE`] color, apply [`style_help_text`] to the abouts and every option's
-/// help, and add the license footer. Subcommands are styled the same way.
+/// help, and add the license footer.
 fn decorate_help(cmd: clap::Command, color: bool) -> clap::Command {
     let about = cmd.get_about().map(ToString::to_string);
     let long_about = cmd
@@ -478,7 +471,6 @@ fn decorate_help(cmd: clap::Command, color: bool) -> clap::Command {
         }
         arg
     })
-    .mut_subcommands(|sub| decorate_help(sub, color))
 }
 
 /// Main binary entrypoint.
@@ -501,10 +493,7 @@ fn main() -> Result<(), Error> {
     let matches = cmd.get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
-    let result = match cli.command {
-        Commands::Filter(cmd) => cmd.into_args().and_then(|args| run_filter(&args)),
-    };
-    match result {
+    match cli.into_args().and_then(|args| run_filter(&args)) {
         Ok(()) => process::exit(0),
         Err(e) => {
             error!("{e:#}");
