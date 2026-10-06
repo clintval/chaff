@@ -133,7 +133,3 @@ The `asymmetry_p_value` is a one-sided binomial test of the congruent alternate 
 ## Development and Testing
 
 See the [contributing guide](./CONTRIBUTING.md) for more information.
-
-> [!NOTE]
-> Claude Code was used substantially in the development of `chaff`, most notably for ideation support, prototyping, and code generation.
-> Until a v1 release, treat this project as AI-enabled and under active review.
