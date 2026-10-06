@@ -544,10 +544,9 @@ fn test_raise_an_error_if_the_reads_are_not_coordinate_sorted() {
 fn test_a_read_without_a_mate_cigar_fails_the_run_naming_it() {
     let dir = TempDir::new().unwrap();
     let (tumor, _) = tumor_vcfs(dir.path());
-    let recs = SamBuilder::new().read_length(RLEN).add_pair(Pair {
-        name: Some(String::from("q1")),
-        ..Pair::filled(81, 101, 'C', RLEN)
-    });
+    let recs = SamBuilder::new()
+        .read_length(RLEN)
+        .add_pair(Pair::filled(81, 101, 'C', RLEN).name("q1"));
     let mut reads = SamBuilder::new().read_length(RLEN);
     reads.extend(recs.into_iter().map(SamBuilder::without_mate_cigar));
     let bam = dir.path().join("reads.bam");

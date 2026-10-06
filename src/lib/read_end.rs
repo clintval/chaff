@@ -393,11 +393,11 @@ mod tests {
     fn test_end_repair_fill_in_incongruent_away_from_the_ends() {
         let filter = EndRepairFillIn::new(15);
         let mut builder = SamBuilder::new().read_length(50);
-        let recs = builder.add_pair(Pair {
-            bases1: Some("ACACA".repeat(10)),
-            bases2: Some("ACACA".repeat(10)),
-            ..Pair::at(101, 101)
-        });
+        let recs = builder.add_pair(
+            Pair::at(101, 101)
+                .bases1("ACACA".repeat(10))
+                .bases2("ACACA".repeat(10)),
+        );
         for r in &recs {
             for pos in 116..=135 {
                 assert!(!filter.is_congruent(&entry(r, pos)));
@@ -410,11 +410,11 @@ mod tests {
     fn test_end_repair_fill_in_congruent_near_the_ends() {
         let filter = EndRepairFillIn::new(15);
         let mut builder = SamBuilder::new().read_length(50);
-        let recs = builder.add_pair(Pair {
-            bases1: Some("ACACA".repeat(10)),
-            bases2: Some("ACACA".repeat(10)),
-            ..Pair::at(101, 101)
-        });
+        let recs = builder.add_pair(
+            Pair::at(101, 101)
+                .bases1("ACACA".repeat(10))
+                .bases2("ACACA".repeat(10)),
+        );
         for r in &recs {
             for pos in (101..=115).chain(136..=150) {
                 assert!(filter.is_congruent(&entry(r, pos)));
@@ -429,10 +429,7 @@ mod tests {
         let filter = EndRepairFillIn::new(15);
         let mut builder = SamBuilder::new().read_length(50);
         let plain = builder.add_frag(Frag::at(101));
-        let deleted = builder.add_frag(Frag {
-            cigar: Some("10M5D40M".into()),
-            ..Frag::at(101)
-        });
+        let deleted = builder.add_frag(Frag::at(101).cigar("10M5D40M"));
         let (plain, deleted) = (entry(&plain[0], 120), entry(&deleted[0], 120));
         assert_eq!((plain.left, deleted.left), (Some(19), Some(14)));
         assert!(!filter.is_congruent(&plain));
@@ -447,23 +444,13 @@ mod tests {
         for start in 1..=25 {
             for _ in 1..=10 {
                 for strand in [Strand::Plus, Strand::Minus] {
-                    builder.add_frag(Frag {
-                        start,
-                        strand,
-                        bases: Some("G".repeat(50)),
-                        ..Frag::default()
-                    });
+                    builder.add_frag(Frag::at(start).strand(strand).bases("G".repeat(50)));
                 }
             }
         }
         for start in 1..=25 {
             for strand in [Strand::Plus, Strand::Minus] {
-                builder.add_frag(Frag {
-                    start,
-                    strand,
-                    bases: Some("T".repeat(50)),
-                    ..Frag::default()
-                });
+                builder.add_frag(Frag::at(start).strand(strand).bases("T".repeat(50)));
             }
         }
         builder
@@ -476,21 +463,12 @@ mod tests {
         for start in 1..=25 {
             for _ in 1..=5 {
                 for strand in [Strand::Plus, Strand::Minus] {
-                    builder.add_frag(Frag {
-                        start,
-                        strand,
-                        bases: Some("G".repeat(50)),
-                        ..Frag::default()
-                    });
+                    builder.add_frag(Frag::at(start).strand(strand).bases("G".repeat(50)));
                 }
             }
         }
         for start in alt_starts {
-            builder.add_frag(Frag {
-                start,
-                bases: Some("T".repeat(50)),
-                ..Frag::default()
-            });
+            builder.add_frag(Frag::at(start).bases("T".repeat(50)));
         }
         builder
     }
@@ -554,11 +532,11 @@ mod tests {
     fn test_a_tailing_incongruent_away_from_the_ends() {
         let filter = ATailing { distance: 5 };
         let mut builder = SamBuilder::new().read_length(50);
-        let recs = builder.add_pair(Pair {
-            bases1: Some("ACACA".repeat(10)),
-            bases2: Some("ACACA".repeat(10)),
-            ..Pair::at(101, 101)
-        });
+        let recs = builder.add_pair(
+            Pair::at(101, 101)
+                .bases1("ACACA".repeat(10))
+                .bases2("ACACA".repeat(10)),
+        );
         for r in &recs {
             for pos in 106..=145 {
                 assert!(!filter.is_congruent(A, &entry(r, pos)));
@@ -619,16 +597,8 @@ mod tests {
     fn test_a_tailing_counts_soft_clips_and_not_hard_clips() {
         let filter = ATailing::default();
         let mut builder = SamBuilder::new().read_length(50);
-        let soft = builder.add_frag(Frag {
-            bases: Some("T".repeat(50)),
-            cigar: Some("2S48M".into()),
-            ..Frag::at(101)
-        });
-        let hard = builder.add_frag(Frag {
-            bases: Some("T".repeat(48)),
-            cigar: Some("2H48M".into()),
-            ..Frag::at(101)
-        });
+        let soft = builder.add_frag(Frag::at(101).bases("T".repeat(50)).cigar("2S48M"));
+        let hard = builder.add_frag(Frag::at(101).bases("T".repeat(48)).cigar("2H48M"));
         let (soft, hard) = (entry(&soft[0], 101), entry(&hard[0], 101));
         assert_eq!((soft.left, hard.left), (Some(2), Some(0)));
         assert!(!filter.is_congruent(T, &soft));
@@ -674,21 +644,12 @@ mod tests {
         for start in 20..=25 {
             for _ in 1..=10 {
                 for strand in [Strand::Plus, Strand::Minus] {
-                    builder.add_frag(Frag {
-                        start,
-                        strand,
-                        bases: Some("G".repeat(50)),
-                        ..Frag::default()
-                    });
+                    builder.add_frag(Frag::at(start).strand(strand).bases("G".repeat(50)));
                 }
             }
         }
         for start in 21..=25 {
-            builder.add_frag(Frag {
-                start,
-                bases: Some("T".repeat(50)),
-                ..Frag::default()
-            });
+            builder.add_frag(Frag::at(start).bases("T".repeat(50)));
         }
         let score = filter.score(&molecules_at(&builder, 25), G, T);
         assert!(score.log_likelihood_ratio.is_some());
@@ -712,12 +673,7 @@ mod tests {
         for start in 1..=20 {
             for _ in 1..=10 {
                 for strand in [Strand::Plus, Strand::Minus] {
-                    builder.add_frag(Frag {
-                        start,
-                        strand,
-                        bases: Some("G".repeat(50)),
-                        ..Frag::default()
-                    });
+                    builder.add_frag(Frag::at(start).strand(strand).bases("G".repeat(50)));
                 }
             }
         }

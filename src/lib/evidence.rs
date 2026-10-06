@@ -278,12 +278,7 @@ mod tests {
     fn test_filter_out_reads_below_the_minimum_mapping_quality() {
         let mut reads = SamBuilder::new().read_length(50);
         for (name, mapq) in [("q1", 9), ("q2", 10), ("q3", 11)] {
-            reads.add_frag(Frag {
-                name: Some(name.into()),
-                start: 101,
-                mapq,
-                ..Frag::default()
-            });
+            reads.add_frag(Frag::at(101).name(name).mapq(mapq));
         }
         let options = PileupOptions {
             min_mapping_quality: 10,
@@ -298,12 +293,7 @@ mod tests {
     fn test_filter_out_base_entries_below_the_minimum_base_quality() {
         let mut reads = SamBuilder::new().read_length(50);
         for (name, quality) in [("q1", 19), ("q2", 20), ("q3", 21)] {
-            reads.add_frag(Frag {
-                name: Some(name.into()),
-                start: 101,
-                quals: Some(vec![quality; 50]),
-                ..Frag::default()
-            });
+            reads.add_frag(Frag::at(101).name(name).quals(vec![quality; 50]));
         }
         let options = PileupOptions::default();
         assert_eq!(names(&templates_at(&reads, options, 105)), ["q2", "q3"]);
@@ -314,22 +304,9 @@ mod tests {
     #[test]
     fn test_filter_out_reads_that_are_not_part_of_a_mapped_pair() {
         let mut reads = SamBuilder::new().read_length(50);
-        reads.add_frag(Frag {
-            name: Some("q1".into()),
-            start: 101,
-            ..Frag::default()
-        });
-        reads.add_pair(Pair {
-            name: Some("q2".into()),
-            start1: 101,
-            start2: 101,
-            unmapped2: true,
-            ..Pair::default()
-        });
-        reads.add_pair(Pair {
-            name: Some("q3".into()),
-            ..Pair::at(101, 300)
-        });
+        reads.add_frag(Frag::at(101).name("q1"));
+        reads.add_pair(Pair::at(101, 101).name("q2").unmapped2(true));
+        reads.add_pair(Pair::at(101, 300).name("q3"));
         let options = PileupOptions {
             paired_reads_only: true,
             ..PileupOptions::default()
@@ -342,10 +319,7 @@ mod tests {
     fn test_remove_one_half_of_each_overlapping_pair() {
         let mut reads = SamBuilder::new().read_length(50);
         for (name, start1, start2) in [("q1", 100, 110), ("q2", 110, 100), ("q3", 50, 100)] {
-            reads.add_pair(Pair {
-                name: Some(name.into()),
-                ..Pair::at(start1, start2)
-            });
+            reads.add_pair(Pair::at(start1, start2).name(name));
         }
         let templates = templates_at(&reads, PileupOptions::default(), 125);
         assert_eq!(depth(&templates), 5);
@@ -358,11 +332,7 @@ mod tests {
     #[test]
     fn test_keep_single_end_records_at_both_read_ends() {
         let mut reads = SamBuilder::new().read_length(50);
-        reads.add_frag(Frag {
-            name: Some("q1".into()),
-            start: 100,
-            ..Frag::default()
-        });
+        reads.add_frag(Frag::at(100).name("q1"));
         for site in [100, 149] {
             assert_eq!(
                 templates_at(&reads, PileupOptions::default(), site).len(),
@@ -376,10 +346,7 @@ mod tests {
     #[test]
     fn test_filter_out_positions_outside_the_insert_of_an_fr_pair() {
         let mut reads = SamBuilder::new().read_length(50);
-        reads.add_pair(Pair {
-            name: Some("q2".into()),
-            ..Pair::at(101, 100)
-        });
+        reads.add_pair(Pair::at(101, 100).name("q2"));
         let depths: Vec<usize> = [100, 101, 149, 150]
             .map(|site| depth(&templates_at(&reads, PileupOptions::default(), site)))
             .into();
@@ -391,12 +358,12 @@ mod tests {
     #[test]
     fn test_keep_positions_outside_what_looks_like_an_insert_for_a_non_fr_pair() {
         let mut reads = SamBuilder::new().read_length(50);
-        reads.add_pair(Pair {
-            name: Some("q2".into()),
-            strand1: Strand::Minus,
-            strand2: Strand::Plus,
-            ..Pair::at(101, 100)
-        });
+        reads.add_pair(
+            Pair::at(101, 100)
+                .name("q2")
+                .strand1(Strand::Minus)
+                .strand2(Strand::Plus),
+        );
         let depths: Vec<usize> = [100, 101, 149, 150]
             .map(|site| depth(&templates_at(&reads, PileupOptions::default(), site)))
             .into();
@@ -410,14 +377,12 @@ mod tests {
     #[test]
     fn test_entries_report_offsets_positions_and_bases() {
         let mut reads = SamBuilder::new().read_length(50).base_quality(35);
-        reads.add_pair(Pair {
-            name: Some("q1".into()),
-            start1: 101,
-            start2: 201,
-            bases1: Some("A".repeat(50)),
-            bases2: Some("C".repeat(50)),
-            ..Pair::default()
-        });
+        reads.add_pair(
+            Pair::at(101, 201)
+                .name("q1")
+                .bases1("A".repeat(50))
+                .bases2("C".repeat(50)),
+        );
         let mut builder = PileupOptions::default().configure(reads.to_pileup_builder());
         let mut seen = Vec::new();
         for site in [105, 205] {
@@ -448,12 +413,7 @@ mod tests {
         let mut reads = SamBuilder::new().read_length(10).base_quality(20);
         let own_only = vec![(Some(4), None)];
         assert_eq!(distances_at(&reads.add_frag(Frag::at(100)), 104), own_only);
-        let unmapped_mate = reads.add_pair(Pair {
-            start1: 100,
-            start2: 100,
-            unmapped2: true,
-            ..Pair::default()
-        });
+        let unmapped_mate = reads.add_pair(Pair::at(100, 100).unmapped2(true));
         assert_eq!(distances_at(&unmapped_mate[..1], 104), own_only);
         let pair = reads.add_pair(Pair::at(100, 200));
         let other_contig = SamBuilder::with_mate_reference_sequence_id(pair[0].clone(), 1);
@@ -487,24 +447,13 @@ mod tests {
             }
         };
         check(reads.add_frag(Frag::at(100)));
-        check(reads.add_pair(Pair {
-            start1: 100,
-            start2: 200,
-            unmapped2: true,
-            ..Pair::default()
-        }));
+        check(reads.add_pair(Pair::at(100, 200).unmapped2(true)));
         for (strand1, strand2) in [
             (Strand::Plus, Strand::Plus),
             (Strand::Minus, Strand::Minus),
             (Strand::Minus, Strand::Plus),
         ] {
-            check(reads.add_pair(Pair {
-                start1: 100,
-                start2: 200,
-                strand1,
-                strand2,
-                ..Pair::default()
-            }));
+            check(reads.add_pair(Pair::at(100, 200).strand1(strand1).strand2(strand2)));
         }
     }
 
@@ -533,18 +482,10 @@ mod tests {
     #[test]
     fn test_template_distances_count_soft_clips_and_not_hard_clips() {
         let mut reads = SamBuilder::new().read_length(50);
-        let soft = reads.add_pair(Pair {
-            cigar1: Some("5S45M".into()),
-            cigar2: Some("40M10S".into()),
-            ..Pair::at(101, 151)
-        });
+        let soft = reads.add_pair(Pair::at(101, 151).cigar1("5S45M").cigar2("40M10S"));
         assert_eq!(distances_at(&soft, 101), [(Some(5), Some(99))]);
         assert_eq!(distances_at(&soft, 190), [(Some(94), Some(10))]);
-        let hard = reads.add_pair(Pair {
-            cigar1: Some("5H45M".into()),
-            cigar2: Some("40M10H".into()),
-            ..Pair::at(101, 151)
-        });
+        let hard = reads.add_pair(Pair::at(101, 151).cigar1("5H45M").cigar2("40M10H"));
         assert_eq!(distances_at(&hard, 101), [(Some(0), Some(89))]);
         assert_eq!(distances_at(&hard, 190), [(Some(89), Some(0))]);
     }
@@ -555,11 +496,7 @@ mod tests {
     #[test]
     fn test_template_distances_count_indels_by_their_length() {
         let mut reads = SamBuilder::new().read_length(50);
-        let pair = reads.add_pair(Pair {
-            cigar1: Some("30M4D20M".into()),
-            cigar2: Some("20M2I28M".into()),
-            ..Pair::at(101, 121)
-        });
+        let pair = reads.add_pair(Pair::at(101, 121).cigar1("30M4D20M").cigar2("20M2I28M"));
         let (deleted, inserted) = (4, 2);
         let expected = [(Some(140 - 101 - deleted), Some(168 - 140 + inserted))];
         for records in [&pair[..], &pair[..1], &pair[1..]] {
@@ -591,11 +528,11 @@ mod tests {
         let away = reads.add_pair(Pair::at(151, 101));
         assert_eq!(distances_at(&away, 150), [(None, Some(0))]);
         assert_eq!(distances_at(&away, 151), [(Some(0), None)]);
-        let apart = reads.add_pair(Pair {
-            strand1: Strand::Minus,
-            strand2: Strand::Plus,
-            ..Pair::at(100, 200)
-        });
+        let apart = reads.add_pair(
+            Pair::at(100, 200)
+                .strand1(Strand::Minus)
+                .strand2(Strand::Plus),
+        );
         assert_eq!(distances_at(&apart, 120), [(None, Some(29))]);
         assert_eq!(distances_at(&apart, 220), [(Some(20), None)]);
     }
@@ -603,10 +540,7 @@ mod tests {
     #[test]
     fn test_template_distances_of_a_pair_without_a_mate_cigar_are_an_error() {
         let mut reads = SamBuilder::new().read_length(50);
-        let pair = reads.add_pair(Pair {
-            name: Some("q1".into()),
-            ..Pair::at(101, 151)
-        });
+        let pair = reads.add_pair(Pair::at(101, 151).name("q1"));
         let mut stripped = SamBuilder::new();
         stripped.extend(pair.into_iter().map(SamBuilder::without_mate_cigar));
         for site in [111, 161] {
@@ -643,22 +577,18 @@ mod tests {
         #[case] expected: (Option<usize>, Option<usize>),
     ) {
         let mut reads = SamBuilder::new().read_length(50);
-        let frag = reads.add_frag(Frag {
-            strand,
-            cigar: Some(cigar.into()),
-            ..Frag::at(100)
-        });
+        let frag = reads.add_frag(Frag::at(100).strand(strand).cigar(cigar));
         assert_eq!(distances_at(&frag, 100), [expected]);
     }
 
     #[test]
     fn test_template_distances_of_a_tandem_pair_know_only_their_own_end() {
         let mut reads = SamBuilder::new().read_length(50);
-        let pair = reads.add_pair(Pair {
-            strand1: Strand::Plus,
-            strand2: Strand::Plus,
-            ..Pair::at(100, 200)
-        });
+        let pair = reads.add_pair(
+            Pair::at(100, 200)
+                .strand1(Strand::Plus)
+                .strand2(Strand::Plus),
+        );
         assert_eq!(distances_at(&pair, 210), [(Some(10), None)]);
     }
 
@@ -669,13 +599,13 @@ mod tests {
     fn test_overlapping_mates_are_called_into_one_molecule() {
         let mut reads = SamBuilder::new().read_length(50);
         for (bases2, quality2) in [('A', 40), ('C', 30), ('C', 10)] {
-            reads.add_pair(Pair {
-                bases1: Some("A".repeat(50)),
-                bases2: Some(bases2.to_string().repeat(50)),
-                quals1: Some(vec![30; 50]),
-                quals2: Some(vec![quality2; 50]),
-                ..Pair::at(101, 121)
-            });
+            reads.add_pair(
+                Pair::at(101, 121)
+                    .bases1("A".repeat(50))
+                    .bases2(bases2.to_string().repeat(50))
+                    .quals1(vec![30; 50])
+                    .quals2(vec![quality2; 50]),
+            );
         }
         let molecules = molecules_at(&reads, PileupOptions::default(), 130);
         let calls: Vec<(u8, u8)> = molecules.iter().map(|m| (m.base, m.quality)).collect();

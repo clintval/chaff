@@ -217,10 +217,7 @@ mod tests {
     fn test_distance_counts_template_bases_across_a_deletion() {
         let mut builder = SamBuilder::new().read_length(50);
         for cigar1 in ["50M", "20M4D30M"] {
-            builder.add_pair(Pair {
-                cigar1: Some(cigar1.into()),
-                ..Pair::at(101, 141)
-            });
+            builder.add_pair(Pair::at(101, 141).cigar1(cigar1));
         }
         let mut evidence =
             PileupEvidence::new(builder.to_pileup_builder(), &PileupOptions::default());
