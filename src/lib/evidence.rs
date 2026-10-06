@@ -1,13 +1,14 @@
 //! Molecule evidence at a variant site.
 //!
 //! The statistics see each template once, as a [`Molecule`]: the base it holds
-//! at the site, that base's quality, and the template ends the reads reveal.
-//! [`Evidence`] separates the statistics from the reads.
-//! [`PileupEvidence`] fills it from any [`PileupSource`], a streaming pileup
-//! engine that lists the reads covering a position with the offset of their
-//! aligned base there. The engine owns record streaming and CIGAR walking; this
-//! module owns the read floors, the template geometry, and the collapse of
-//! overlapping mates into one molecule.
+//! at the site, that base's quality, and the site's distances from the
+//! template ends the reads reveal. [`Evidence`] separates the statistics from
+//! the reads. [`PileupEvidence`] fills it from any [`PileupSource`], a
+//! streaming pileup engine that lists the reads covering a position with the
+//! offset of their aligned base there. The engine owns record streaming and
+//! CIGAR walking, streampile counts the distances for any engine's records, and
+//! this module owns the read floors and the collapse of overlapping mates into
+//! one molecule.
 
 use std::collections::HashMap;
 
@@ -16,7 +17,7 @@ use noodles::core::Position;
 use noodles::sam;
 use noodles::sam::alignment::Record;
 
-use crate::template::{template_ends, ReadBase, ReadFilter, TemplateEnds};
+use crate::template::{ReadBase, ReadFilter};
 
 /// One template's observation at a site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,36 +26,28 @@ pub struct Molecule {
     pub base: u8,
     /// The base quality.
     pub quality: u8,
-    /// The template's leftmost base, the forward strand's 5' end, when known.
-    pub start: Option<i64>,
-    /// The template's rightmost base, the reverse strand's 5' end, when known.
-    pub end: Option<i64>,
+    /// The template's bases between the site and its leftmost base, the
+    /// forward strand's 5' end, when known: 0 at that base.
+    pub left: Option<usize>,
+    /// The template's bases between the site and its rightmost base, the
+    /// reverse strand's 5' end, when known: 0 at that base.
+    pub right: Option<usize>,
 }
 
 impl Molecule {
-    /// A molecule with both ends known.
-    pub fn new(base: u8, quality: u8, start: i64, end: i64) -> Self {
+    /// A molecule with both distances known.
+    pub fn new(base: u8, quality: u8, left: usize, right: usize) -> Self {
         Self {
             base,
             quality,
-            start: Some(start),
-            end: Some(end),
+            left: Some(left),
+            right: Some(right),
         }
     }
 
-    /// The 0-based distance of `pos` from the template's leftmost base.
-    pub fn from_start(&self, pos: i64) -> Option<i64> {
-        self.start.map(|start| pos - start)
-    }
-
-    /// The 0-based distance of `pos` from the template's rightmost base.
-    pub fn from_end(&self, pos: i64) -> Option<i64> {
-        self.end.map(|end| end - pos)
-    }
-
-    /// The template length, when both ends are known.
-    pub fn length(&self) -> Option<i64> {
-        Some(self.end? - self.start? + 1)
+    /// The template's length in bases, when both distances are known.
+    pub fn length(&self) -> Option<usize> {
+        Some(self.left? + self.right? + 1)
     }
 }
 
@@ -125,7 +118,6 @@ impl<P: PileupSource> PileupEvidence<P> {
         contig: &str,
         pos: Position,
     ) -> Result<Vec<(Option<Vec<u8>>, Molecule)>> {
-        let site = usize::from(pos) as i64;
         let entries = self.source.pileup(contig, pos)?;
         let mut observations = Vec::with_capacity(entries.len());
         for entry in entries {
@@ -138,19 +130,20 @@ impl<P: PileupSource> PileupEvidence<P> {
             if quality < self.filter.min_base_quality {
                 continue;
             }
-            let ends: TemplateEnds = template_ends(record, &self.header)
-                .with_context(|| format!("reading template ends at {contig}:{site}"))?;
-            if ends.excludes(site) {
+            let Some((left, right)) = entry
+                .template_distances(&self.header, pos)
+                .with_context(|| format!("reading template ends at {contig}:{pos}"))?
+            else {
                 continue;
-            }
+            };
             let name = record.name().map(|n| n.to_vec());
             observations.push((
                 name,
                 Molecule {
                     base,
                     quality,
-                    start: ends.start,
-                    end: ends.end,
+                    left,
+                    right,
                 },
             ));
         }
@@ -168,8 +161,11 @@ impl<P: PileupSource> Evidence for PileupEvidence<P> {
 ///
 /// Mates that agree on the base become one molecule with the higher of the
 /// two qualities; mates that disagree become one molecule holding `N`, which
-/// counts as neither allele. Ends one mate cannot see are taken from the other.
-/// Unnamed reads are never collapsed. First-seen order is kept.
+/// counts as neither allele. Where the mates of an FR pair overlap, each
+/// distance is counted along the read sequenced from that end, so both mates
+/// report the same distances. The molecule keeps the first read's distances
+/// and takes any it lacks from its mate. Unnamed reads are never collapsed.
+/// First-seen order is kept.
 pub fn collapse_templates(observations: Vec<(Option<Vec<u8>>, Molecule)>) -> Vec<Molecule> {
     let mut molecules: Vec<Molecule> = Vec::with_capacity(observations.len());
     let mut index: HashMap<Vec<u8>, usize> = HashMap::with_capacity(observations.len());
@@ -191,8 +187,8 @@ pub fn collapse_templates(observations: Vec<(Option<Vec<u8>>, Molecule)>) -> Vec
                     kept.base = b'N';
                     kept.quality = kept.quality.min(molecule.quality);
                 }
-                kept.start = kept.start.or(molecule.start);
-                kept.end = kept.end.or(molecule.end);
+                kept.left = kept.left.or(molecule.left);
+                kept.right = kept.right.or(molecule.right);
             }
         }
     }
@@ -394,11 +390,11 @@ mod tests {
 
     #[test]
     fn test_collapse_templates_merges_agreeing_mates_and_masks_disagreeing_ones() {
-        let a = |q, start, end| Molecule {
+        let a = |q, left, right| Molecule {
             base: b'A',
             quality: q,
-            start,
-            end,
+            left,
+            right,
         };
         let observations = vec![
             (Some(b"x".to_vec()), a(30, Some(10), None)),
@@ -422,20 +418,77 @@ mod tests {
     }
 
     #[test]
-    fn test_molecule_distances() {
-        let m = Molecule::new(b'A', 30, 101, 150);
-        assert_eq!(m.from_start(101), Some(0));
-        assert_eq!(m.from_end(101), Some(49));
+    fn test_overlapping_mates_report_the_same_template_bases_across_indels() {
+        let mut builder = SamBuilder::new().read_length(50);
+        builder.add_pair(Pair {
+            name: Some("q1".into()),
+            cigar1: Some("30M4D20M".into()),
+            cigar2: Some("20M2I28M".into()),
+            ..Pair::at(101, 121)
+        });
+        let mut evidence = PileupEvidence::new(builder.pileup(), ReadFilter::default());
+        let pile = evidence.observations("chr1", pos(140)).unwrap();
+        let distances: Vec<_> = pile.iter().map(|(_, m)| (m.left, m.right)).collect();
+        assert_eq!(distances, vec![(Some(35), Some(30)); 2]);
+        let molecules = collapse_templates(pile);
+        assert_eq!(molecules.len(), 1);
+        assert_eq!(
+            (molecules[0].left, molecules[0].right),
+            (Some(35), Some(30))
+        );
+    }
+
+    #[test]
+    fn test_the_streampile_engine_measures_template_bases_as_the_test_pileup_does() {
+        let mut builder = SamBuilder::new().read_length(50).coordinate_sorted();
+        for (start1, start2, cigar1, cigar2) in [
+            (101, 121, "30M4D20M", "20M2I28M"),
+            (96, 131, "5S45M", "40M10S"),
+            (111, 141, "5H45M", "45M5H"),
+            (121, 120, "50M", "50M"),
+        ] {
+            let bases = |cigar: &str| "A".repeat(if cigar.contains('H') { 45 } else { 50 });
+            builder.add_pair(Pair {
+                bases1: Some(bases(cigar1)),
+                bases2: Some(bases(cigar2)),
+                cigar1: Some(cigar1.into()),
+                cigar2: Some(cigar2.into()),
+                ..Pair::at(start1, start2)
+            });
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = builder.write_bam(&dir.path().join("reads.bam"));
+        let mut reader = noodles::bam::io::reader::Builder
+            .build_from_path(path)
+            .unwrap();
+        let header = reader.read_header().unwrap();
+        let engine = streampile::StreamingPileupBuilder::new(reader, &header).unwrap();
+        let mut streamed = PileupEvidence::new(engine, ReadFilter::default());
+        let mut expected = PileupEvidence::new(builder.pileup(), ReadFilter::default());
+        let mut measured = 0;
+        for site in 100..=190 {
+            let observations = streamed.observations("chr1", pos(site)).unwrap();
+            assert_eq!(
+                observations,
+                expected.observations("chr1", pos(site)).unwrap()
+            );
+            measured += observations.len();
+        }
+        assert!(measured > 300, "{measured}");
+    }
+
+    #[test]
+    fn test_molecule_length_counts_the_site_and_both_distances() {
+        let m = Molecule::new(b'A', 30, 0, 49);
         assert_eq!(m.length(), Some(50));
-        let half = Molecule { end: None, ..m };
-        assert_eq!(half.from_end(101), None);
+        let half = Molecule { right: None, ..m };
         assert_eq!(half.length(), None);
     }
 
     #[test]
     fn test_molecule_table_returns_inserted_molecules() {
         let mut table = MoleculeTable::new();
-        table.insert("chr1", 10, vec![Molecule::new(b'A', 30, 1, 20)]);
+        table.insert("chr1", 10, vec![Molecule::new(b'A', 30, 9, 10)]);
         assert_eq!(table.molecules("chr1", pos(10)).unwrap().len(), 1);
         assert!(table.molecules("chr1", pos(11)).unwrap().is_empty());
     }

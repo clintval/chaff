@@ -365,7 +365,6 @@ fn score_call(
         *cache = Some((key, molecules));
     }
     let molecules = &cache.as_ref().expect("filled above").1;
-    let site = pos as i64;
     let count = |base: u8| molecules.iter().filter(|m| m.base == base).count() as u32;
     let fgbio_prior =
         fgbio_artifact_prior(count(alt_base), count(ref_base), molecules.len() as u32);
@@ -378,11 +377,11 @@ fn score_call(
                 substitution.clone(),
                 options
                     .end_repair_fill_in
-                    .score(molecules, site, ref_base, alt_base),
+                    .score(molecules, ref_base, alt_base),
             )),
             FilterKind::ATailing => Some((
                 substitution.clone(),
-                options.a_tailing.score(molecules, site, ref_base, alt_base),
+                options.a_tailing.score(molecules, ref_base, alt_base),
             )),
             FilterKind::CopiedDamage => match options.copied_damage.classify(ref_base, alt_base) {
                 None => None,
@@ -398,7 +397,7 @@ fn score_call(
                     };
                     let score = options
                         .copied_damage
-                        .score(molecules, site, ref_base, alt_base, strand);
+                        .score(molecules, ref_base, alt_base, strand);
                     Some((damage.stratum(), score))
                 }
             },
@@ -794,20 +793,15 @@ mod tests {
         let output = dir.path().join("out.vcf");
 
         let mut table = MoleculeTable::new();
-        for pos in [1002i64, 1006] {
-            let mut molecules: Vec<Molecule> = (0..150)
-                .map(|o| Molecule::new(b'C', 90, pos - o, pos - o + 149))
-                .collect();
+        let at = |base, d| Molecule::new(base, 90, d, 149 - d);
+        for pos in [1002, 1006] {
+            let mut molecules: Vec<Molecule> = (0..150).map(|d| at(b'C', d)).collect();
             if pos == 1002 {
-                molecules.extend((0..6).map(|o| Molecule::new(b'T', 90, pos - o, pos - o + 149)));
+                molecules.extend((0..6).map(|d| at(b'T', d)));
             } else {
-                molecules.extend(
-                    (0..150)
-                        .step_by(25)
-                        .map(|o| Molecule::new(b'T', 90, pos - o, pos - o + 149)),
-                );
+                molecules.extend((0..150).step_by(25).map(|d| at(b'T', d)));
             }
-            table.insert("chr1", pos as usize, molecules);
+            table.insert("chr1", pos, molecules);
         }
         let options = FilterOptions {
             filters: vec![FilterKind::CopiedDamage],
@@ -844,10 +838,9 @@ mod tests {
         vcf.add(Variant::new(10, &["G", "T"], vec![gt("tumor", "0/1")]));
         let input = vcf.write(&dir.path().join("in.vcf"));
         let mut table = MoleculeTable::new();
-        let mut molecules: Vec<Molecule> = (0..20)
-            .map(|o| Molecule::new(b'G', 30, 10 - o, 100))
-            .collect();
-        molecules.push(Molecule::new(b'T', 30, 10, 100));
+        let mut molecules: Vec<Molecule> =
+            (0..20).map(|d| Molecule::new(b'G', 30, d, 90)).collect();
+        molecules.push(Molecule::new(b'T', 30, 0, 90));
         table.insert("chr1", 10, molecules);
         let options = FilterOptions {
             filters: vec![FilterKind::ATailing, FilterKind::EndRepairFillIn],

@@ -3,8 +3,9 @@
 //!
 //! Both ask whether a call's alternate molecules sit closer to a template end
 //! than its reference molecules do. A molecule is congruent with the artifact
-//! when the site lies within a distance of the relevant template end. Distances
-//! are 1-based, so the template's terminal base is at distance 1, as in fgbio.
+//! when the site lies within a distance of the relevant template end, counted
+//! in the template's bases. Distances are 1-based, so the template's terminal
+//! base is at distance 1, as in fgbio.
 //!
 //! The likelihoods are fgbio's. Let `f` be the congruent fraction of the
 //! reference molecules and `e` an alternate molecule's base error probability:
@@ -100,8 +101,8 @@ pub fn window_score(
 /// since a base error lands anywhere a reference molecule could. Returns
 /// `None` when alternate distances exist but no reference distance does.
 pub fn tilt_log_likelihood_ratio(
-    ref_distances: &[i64],
-    alt: &[(i64, u8)],
+    ref_distances: &[usize],
+    alt: &[(usize, u8)],
     scale: f64,
 ) -> Option<f64> {
     if alt.is_empty() {
@@ -110,7 +111,7 @@ pub fn tilt_log_likelihood_ratio(
     if ref_distances.is_empty() {
         return None;
     }
-    let w = |d: i64| (-(d as f64) / scale).exp();
+    let w = |d: usize| (-(d as f64) / scale).exp();
     let mean = ref_distances.iter().map(|&d| w(d)).sum::<f64>() / ref_distances.len() as f64;
     Some(
         alt.iter()
@@ -122,15 +123,10 @@ pub fn tilt_log_likelihood_ratio(
     )
 }
 
-/// The 1-based distance of `pos` from the nearest template end the molecule
-/// knows, as `(distance, end)` with `end` false for the leftmost end.
-fn nearest_end(m: &Molecule, pos: i64) -> Option<(i64, bool)> {
-    let left = m.from_start(pos).map(|d| (d + 1, false));
-    let right = m.from_end(pos).map(|d| (d + 1, true));
-    match (left, right) {
-        (Some(l), Some(r)) => Some(if r.0 < l.0 { r } else { l }),
-        (l, r) => l.or(r),
-    }
+/// The 1-based distance of the site from the nearest template end the
+/// molecule knows.
+fn nearest_end(m: &Molecule) -> Option<usize> {
+    m.left.into_iter().chain(m.right).min().map(|d| d + 1)
 }
 
 /// The end repair fill-in artifact filter.
@@ -177,21 +173,21 @@ impl EndRepairFillIn {
     }
 
     /// Whether the site is within the distance of the nearest known template end.
-    pub fn is_congruent(&self, m: &Molecule, pos: i64) -> bool {
-        nearest_end(m, pos).is_some_and(|(d, _)| d <= i64::from(self.distance))
+    pub fn is_congruent(&self, m: &Molecule) -> bool {
+        nearest_end(m).is_some_and(|d| d <= self.distance as usize)
     }
 
     /// The call's score from its molecules.
-    pub fn score(&self, molecules: &[Molecule], pos: i64, ref_base: u8, alt_base: u8) -> Score {
-        let mut score = window_score(molecules, ref_base, alt_base, |m| self.is_congruent(m, pos));
+    pub fn score(&self, molecules: &[Molecule], ref_base: u8, alt_base: u8) -> Score {
+        let mut score = window_score(molecules, ref_base, alt_base, |m| self.is_congruent(m));
         if let Some(scale) = self.scale {
-            let distance = |m: &Molecule| nearest_end(m, pos).map(|(d, _)| d - 1);
-            let ref_distances: Vec<i64> = molecules
+            let distance = |m: &Molecule| nearest_end(m).map(|d| d - 1);
+            let ref_distances: Vec<usize> = molecules
                 .iter()
                 .filter(|m| m.base == ref_base)
                 .filter_map(distance)
                 .collect();
-            let alt: Vec<(i64, u8)> = molecules
+            let alt: Vec<(usize, u8)> = molecules
                 .iter()
                 .filter(|m| m.base == alt_base)
                 .filter_map(|m| distance(m).map(|d| (d, m.quality)))
@@ -242,10 +238,10 @@ impl ATailing {
     /// alternate allele would appear by A addition (the leftmost end for a
     /// forward-strand `T`, the rightmost for an `A`). At a tie both ends are
     /// candidates.
-    pub fn is_congruent(&self, alt_base: u8, m: &Molecule, pos: i64) -> bool {
-        let left = m.from_start(pos).map(|d| d + 1);
-        let right = m.from_end(pos).map(|d| d + 1);
-        let within = |d: Option<i64>| d.is_some_and(|d| d <= i64::from(self.distance));
+    pub fn is_congruent(&self, alt_base: u8, m: &Molecule) -> bool {
+        let left = m.left.map(|d| d + 1);
+        let right = m.right.map(|d| d + 1);
+        let within = |d: Option<usize>| d.is_some_and(|d| d <= self.distance as usize);
         let (near_left, near_right) = match (left, right) {
             (Some(l), Some(r)) => (l <= r, r <= l),
             (Some(_), None) => (true, false),
@@ -260,9 +256,9 @@ impl ATailing {
     }
 
     /// The call's score from its molecules.
-    pub fn score(&self, molecules: &[Molecule], pos: i64, ref_base: u8, alt_base: u8) -> Score {
+    pub fn score(&self, molecules: &[Molecule], ref_base: u8, alt_base: u8) -> Score {
         window_score(molecules, ref_base, alt_base, |m| {
-            self.is_congruent(alt_base, m, pos)
+            self.is_congruent(alt_base, m)
         })
     }
 }
@@ -283,8 +279,8 @@ mod tests {
     use crate::prior::{
         fgbio_artifact_prior, learn_artifact_fraction, posterior_mutation, PSEUDOCOUNT,
     };
-    use crate::template::{template_ends, ReadBase, ReadFilter};
-    use crate::testing::{Frag, Pair, SamBuilder, Strand};
+    use crate::template::{ReadBase, ReadFilter};
+    use crate::testing::{offset_at, Frag, Pair, SamBuilder, Strand};
 
     const A: u8 = b'A';
     const C: u8 = b'C';
@@ -297,19 +293,18 @@ mod tests {
 
     /// The molecule one record shows at `pos`, before mates are collapsed, like
     /// one of fgbio's `BaseEntry` values.
-    fn entry(builder: &SamBuilder, record: &RecordBuf, pos: i64) -> Molecule {
-        let start = usize::from(
-            noodles::sam::alignment::Record::alignment_start(record)
-                .unwrap()
-                .unwrap(),
-        ) as i64;
-        let base = ReadBase::new(record, (pos - start) as usize);
-        let ends = template_ends(record, builder.header()).unwrap();
+    fn entry(builder: &SamBuilder, record: &RecordBuf, pos: usize) -> Molecule {
+        let base = ReadBase::new(record, offset_at(record, pos).unwrap());
+        let position = Position::try_from(pos).unwrap();
+        let (left, right) = base
+            .template_distances(builder.header(), position)
+            .unwrap()
+            .unwrap();
         Molecule {
             base: base.base().unwrap(),
             quality: base.quality().unwrap().unwrap(),
-            start: ends.start,
-            end: ends.end,
+            left,
+            right,
         }
     }
 
@@ -412,7 +407,7 @@ mod tests {
         });
         for r in &recs {
             for pos in 116..=135 {
-                assert!(!filter.is_congruent(&entry(&builder, r, pos), pos));
+                assert!(!filter.is_congruent(&entry(&builder, r, pos)));
             }
         }
     }
@@ -429,9 +424,29 @@ mod tests {
         });
         for r in &recs {
             for pos in (101..=115).chain(136..=150) {
-                assert!(filter.is_congruent(&entry(&builder, r, pos), pos));
+                assert!(filter.is_congruent(&entry(&builder, r, pos)));
             }
         }
+    }
+
+    /// A deletion between the site and the template's leftmost base brings the
+    /// site nearer that end, in template bases, than its reference positions.
+    #[test]
+    fn test_end_repair_fill_in_counts_template_bases_across_a_deletion() {
+        let filter = EndRepairFillIn::new(15);
+        let mut builder = SamBuilder::new().read_length(50);
+        let plain = builder.add_frag(Frag::at(101));
+        let deleted = builder.add_frag(Frag {
+            cigar: Some("10M5D40M".into()),
+            ..Frag::at(101)
+        });
+        let (plain, deleted) = (
+            entry(&builder, &plain[0], 120),
+            entry(&builder, &deleted[0], 120),
+        );
+        assert_eq!((plain.left, deleted.left), (Some(19), Some(14)));
+        assert!(!filter.is_congruent(&plain));
+        assert!(filter.is_congruent(&deleted));
     }
 
     /// The reads of fgbio's "distributed throughout the reads" annotation tests:
@@ -496,7 +511,7 @@ mod tests {
     #[test]
     fn test_end_repair_fill_in_not_significant_when_distributed() {
         let filter = EndRepairFillIn::new(15);
-        let score = filter.score(&molecules_at(&distributed_reads(), 25), 25, G, T);
+        let score = filter.score(&molecules_at(&distributed_reads(), 25), G, T);
         assert!(score.log_likelihood_ratio.is_some());
         assert!(fgbio_posterior(&score) > 0.5);
         assert_eq!(vcf_float(fgbio_posterior(&score)), 1.0);
@@ -508,7 +523,7 @@ mod tests {
     #[test]
     fn test_end_repair_fill_in_significant_when_biased() {
         let filter = EndRepairFillIn::new(15);
-        let score = filter.score(&molecules_at(&biased_reads(11..=25), 25), 25, G, T);
+        let score = filter.score(&molecules_at(&biased_reads(11..=25), 25), G, T);
         assert!(score.log_likelihood_ratio.is_some());
         assert!(fgbio_posterior(&score) < 1e-6);
         assert_eq!(vcf_float(fgbio_posterior(&score)), 1.869e-10);
@@ -556,7 +571,7 @@ mod tests {
         });
         for r in &recs {
             for pos in 106..=145 {
-                assert!(!filter.is_congruent(A, &entry(&builder, r, pos), pos));
+                assert!(!filter.is_congruent(A, &entry(&builder, r, pos)));
             }
         }
     }
@@ -577,12 +592,12 @@ mod tests {
             for pos in 101..=105 {
                 let m = entry(&builder, r, pos);
                 assert!(m.base == C || m.base == A);
-                assert!(!filter.is_congruent(A, &m, pos));
+                assert!(!filter.is_congruent(A, &m));
             }
             for pos in 146..=150 {
                 let m = entry(&builder, r, pos);
                 assert!(m.base == G || m.base == T);
-                assert!(!filter.is_congruent(T, &m, pos));
+                assert!(!filter.is_congruent(T, &m));
             }
         }
     }
@@ -601,12 +616,36 @@ mod tests {
             .collect();
         for r in &recs {
             for pos in 101..=105 {
-                assert!(filter.is_congruent(T, &entry(&builder, r, pos), pos));
+                assert!(filter.is_congruent(T, &entry(&builder, r, pos)));
             }
             for pos in 146..=150 {
-                assert!(filter.is_congruent(A, &entry(&builder, r, pos), pos));
+                assert!(filter.is_congruent(A, &entry(&builder, r, pos)));
             }
         }
+    }
+
+    /// Soft-clipped bases are template bases and hard-clipped bases are not.
+    #[test]
+    fn test_a_tailing_counts_soft_clips_and_not_hard_clips() {
+        let filter = ATailing::default();
+        let mut builder = SamBuilder::new().read_length(50);
+        let soft = builder.add_frag(Frag {
+            bases: Some("T".repeat(50)),
+            cigar: Some("2S48M".into()),
+            ..Frag::at(101)
+        });
+        let hard = builder.add_frag(Frag {
+            bases: Some("T".repeat(48)),
+            cigar: Some("2H48M".into()),
+            ..Frag::at(101)
+        });
+        let (soft, hard) = (
+            entry(&builder, &soft[0], 101),
+            entry(&builder, &hard[0], 101),
+        );
+        assert_eq!((soft.left, hard.left), (Some(2), Some(0)));
+        assert!(!filter.is_congruent(T, &soft));
+        assert!(filter.is_congruent(T, &hard));
     }
 
     /// fgbio: "ATailingArtifactLikelihoodFilter.annotations should compute a
@@ -614,7 +653,7 @@ mod tests {
     #[test]
     fn test_a_tailing_not_significant_when_distributed() {
         let filter = ATailing { distance: 5 };
-        let score = filter.score(&molecules_at(&distributed_reads(), 25), 25, G, T);
+        let score = filter.score(&molecules_at(&distributed_reads(), 25), G, T);
         assert!(score.log_likelihood_ratio.is_some());
         assert!(fgbio_posterior(&score) > 0.5);
         assert_eq!(vcf_float(fgbio_posterior(&score)), 1.0);
@@ -629,7 +668,7 @@ mod tests {
     #[test]
     fn test_a_tailing_significant_when_biased() {
         let filter = ATailing { distance: 5 };
-        let score = filter.score(&molecules_at(&biased_reads(21..=25), 25), 25, G, T);
+        let score = filter.score(&molecules_at(&biased_reads(21..=25), 25), G, T);
         assert!(score.log_likelihood_ratio.is_some());
         assert!(fgbio_posterior(&score) < 1e-6);
         assert_eq!(vcf_float(fgbio_posterior(&score)), 1.547e-8);
@@ -664,7 +703,7 @@ mod tests {
                 ..Frag::default()
             });
         }
-        let score = filter.score(&molecules_at(&builder, 25), 25, G, T);
+        let score = filter.score(&molecules_at(&builder, 25), G, T);
         assert!(score.log_likelihood_ratio.is_some());
         assert!(fgbio_posterior(&score) < 1e-4);
         assert_eq!(vcf_float(fgbio_posterior(&score)), 8.094e-5);
@@ -679,7 +718,7 @@ mod tests {
         let filter = ATailing { distance: 10 };
         let mut builder = SamBuilder::new().read_length(50).base_quality(40);
 
-        let score = filter.score(&molecules_at(&builder, 25), 25, G, T);
+        let score = filter.score(&molecules_at(&builder, 25), G, T);
         assert_eq!(score.log_likelihood_ratio, Some(0.0));
         assert!((fgbio_posterior(&score) - 0.9999).abs() < 1e-12);
 
@@ -695,7 +734,7 @@ mod tests {
                 }
             }
         }
-        let score = filter.score(&molecules_at(&builder, 25), 25, G, T);
+        let score = filter.score(&molecules_at(&builder, 25), G, T);
         assert_eq!(score.log_likelihood_ratio, Some(0.0));
         assert!((fgbio_posterior(&score) - 0.000025).abs() < 1e-12);
     }
@@ -714,7 +753,7 @@ mod tests {
         let alt = Molecule::new(T, 30, 100, 200);
         let molecules: Vec<_> = refs.chain([alt]).collect();
         let score = window_score(&molecules, G, T, |m| {
-            m.start == Some(0) || m.start == Some(100)
+            m.left == Some(0) || m.left == Some(100)
         });
         let e: f64 = 1e-3;
         let f = 0.25;
@@ -727,7 +766,7 @@ mod tests {
 
     #[test]
     fn test_tilt_ratio_rewards_alternates_nearer_the_end_than_the_references() {
-        let refs: Vec<i64> = (0..100).collect();
+        let refs: Vec<usize> = (0..100).collect();
         let near = tilt_log_likelihood_ratio(&refs, &[(1, 90), (3, 90)], 15.0).unwrap();
         let far = tilt_log_likelihood_ratio(&refs, &[(80, 90), (95, 90)], 15.0).unwrap();
         assert!(near > 0.0, "{near}");
@@ -749,7 +788,7 @@ mod tests {
             distance: 15,
             scale: Some(15.0),
         };
-        let score = filter.score(&molecules_at(&biased_reads(11..=25), 25), 25, G, T);
+        let score = filter.score(&molecules_at(&biased_reads(11..=25), 25), G, T);
         assert!(score.log_likelihood_ratio.unwrap() > 0.0);
         assert_eq!(score.alt_congruent, 15);
     }
@@ -762,7 +801,7 @@ mod tests {
                 distance,
                 scale: Some(15.0),
             }
-            .score(&molecules, 25, G, T)
+            .score(&molecules, G, T)
         };
         let (wide, narrow) = (score(15), score(5));
         assert_eq!(wide.log_likelihood_ratio, narrow.log_likelihood_ratio);
@@ -772,9 +811,9 @@ mod tests {
     #[test]
     fn test_a_tailing_tie_is_congruent_for_either_end() {
         let filter = ATailing::default();
-        let m = Molecule::new(A, 30, 10, 12);
-        assert!(filter.is_congruent(A, &m, 11));
-        assert!(filter.is_congruent(T, &m, 11));
-        assert!(!filter.is_congruent(C, &m, 11));
+        let m = Molecule::new(A, 30, 1, 1);
+        assert!(filter.is_congruent(A, &m));
+        assert!(filter.is_congruent(T, &m));
+        assert!(!filter.is_congruent(C, &m));
     }
 }

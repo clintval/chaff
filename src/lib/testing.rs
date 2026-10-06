@@ -11,7 +11,6 @@ use anyhow::{anyhow, Result};
 use noodles::core::Position;
 use noodles::sam;
 use noodles::sam::alignment::record::cigar::op::Kind;
-use noodles::sam::alignment::record::cigar::Op;
 use noodles::sam::alignment::record::data::field::Tag;
 use noodles::sam::alignment::record::{Flags, MappingQuality};
 use noodles::sam::alignment::record_buf::data::field::Value;
@@ -21,7 +20,7 @@ use noodles::sam::header::record::value::map::{Map, ReferenceSequence};
 use std::num::NonZeroUsize;
 
 use crate::evidence::PileupSource;
-use crate::template::{parse_cigar, ReadBase};
+use crate::template::ReadBase;
 
 /// The strand a built read aligns to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -268,10 +267,9 @@ impl SamBuilder {
         let text = cigar
             .clone()
             .unwrap_or_else(|| format!("{}M", self.read_length));
-        parse_cigar(text.as_bytes())
-            .unwrap()
-            .into_iter()
-            .map(|(kind, len)| Op::new(kind, len))
+        sam::record::Cigar::new(text.as_bytes())
+            .iter()
+            .map(|op| op.unwrap())
             .collect()
     }
 
@@ -517,7 +515,7 @@ fn set_mate_info(r1: &mut RecordBuf, r2: &mut RecordBuf, header: &sam::Header) {
 
 /// The 0-based query offset of the read base aligned to the 1-based `pos`, or
 /// `None` when the read does not cover `pos` or has a deletion there.
-fn offset_at(record: &RecordBuf, pos: usize) -> Option<usize> {
+pub fn offset_at(record: &RecordBuf, pos: usize) -> Option<usize> {
     let start = usize::from(record.alignment_start()?);
     if pos < start {
         return None;
