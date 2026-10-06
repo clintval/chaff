@@ -54,6 +54,60 @@ impl FilterKind {
         FilterKind::ATailing,
         FilterKind::EndRepairFillIn,
     ];
+
+    /// The FILTER the filter applies.
+    pub fn filter_id(self) -> &'static str {
+        match self {
+            FilterKind::CopiedDamage => CopiedDamage::FILTER,
+            FilterKind::ATailing => ATailing::FILTER,
+            FilterKind::EndRepairFillIn => EndRepairFillIn::FILTER,
+        }
+    }
+
+    /// The INFO key of the posterior probability of a true mutation.
+    pub fn posterior_id(self) -> &'static str {
+        match self {
+            FilterKind::CopiedDamage => CopiedDamage::INFO_POSTERIOR,
+            FilterKind::ATailing => ATailing::INFO,
+            FilterKind::EndRepairFillIn => EndRepairFillIn::INFO,
+        }
+    }
+
+    /// Whether the filter scores a genotype.
+    pub fn applies_to(self, gt: &Genotype) -> bool {
+        match self {
+            FilterKind::CopiedDamage => CopiedDamage::applies_to(gt),
+            FilterKind::ATailing => ATailing::applies_to(gt),
+            FilterKind::EndRepairFillIn => EndRepairFillIn::applies_to(gt),
+        }
+    }
+
+    /// The posterior at or below which the filter's FILTER is applied.
+    pub fn threshold(self, options: &FilterOptions) -> Option<f64> {
+        match self {
+            FilterKind::CopiedDamage => options.copied_damage_threshold,
+            FilterKind::ATailing => options.a_tailing_threshold,
+            FilterKind::EndRepairFillIn => options.end_repair_fill_in_threshold,
+        }
+    }
+
+    /// The IDs of the command-line arguments that only this filter reads.
+    pub fn arguments(self) -> &'static [&'static str] {
+        match self {
+            FilterKind::CopiedDamage => &[
+                "reference",
+                "copied_damage_classes",
+                "copied_damage_scale",
+                "copied_damage_threshold",
+            ],
+            FilterKind::ATailing => &["a_tailing_distance", "a_tailing_threshold"],
+            FilterKind::EndRepairFillIn => &[
+                "end_repair_fill_in_distance",
+                "end_repair_fill_in_scale",
+                "end_repair_fill_in_threshold",
+            ],
+        }
+    }
 }
 
 impl fmt::Display for FilterKind {
@@ -110,22 +164,6 @@ impl FilterOptions {
         self.filters.contains(&kind)
     }
 
-    fn threshold(&self, kind: FilterKind) -> Option<f64> {
-        match kind {
-            FilterKind::CopiedDamage => self.copied_damage_threshold,
-            FilterKind::EndRepairFillIn => self.end_repair_fill_in_threshold,
-            FilterKind::ATailing => self.a_tailing_threshold,
-        }
-    }
-
-    fn filter_name(kind: FilterKind) -> &'static str {
-        match kind {
-            FilterKind::CopiedDamage => CopiedDamage::FILTER,
-            FilterKind::EndRepairFillIn => EndRepairFillIn::FILTER,
-            FilterKind::ATailing => ATailing::FILTER,
-        }
-    }
-
     fn prior_text(&self) -> &'static str {
         match self.prior {
             PriorMode::Learned => "an artifact prior learned per sample and stratum",
@@ -134,7 +172,7 @@ impl FilterOptions {
     }
 
     fn threshold_text(&self, kind: FilterKind) -> String {
-        match self.threshold(kind) {
+        match kind.threshold(self) {
             Some(t) => format!("at or below a posterior of {t}"),
             None => "never applied without a threshold".to_string(),
         }
@@ -318,15 +356,6 @@ impl CoordinateOrder {
     }
 }
 
-/// Whether a filter applies to a genotype.
-fn applies(kind: FilterKind, gt: &Genotype) -> bool {
-    match kind {
-        FilterKind::CopiedDamage => CopiedDamage::applies_to(gt),
-        FilterKind::EndRepairFillIn => EndRepairFillIn::applies_to(gt),
-        FilterKind::ATailing => ATailing::applies_to(gt),
-    }
-}
-
 /// Score one call under every enabled filter that applies to it.
 fn score_call(
     gt: &Genotype,
@@ -339,7 +368,7 @@ fn score_call(
 ) -> Result<Vec<Annotation>> {
     let kinds: Vec<FilterKind> = FilterKind::ALL
         .into_iter()
-        .filter(|k| options.enabled(*k) && applies(*k, gt))
+        .filter(|k| options.enabled(*k) && k.applies_to(gt))
         .collect();
     let (Some(ref_allele), Some(alt_allele)) = (gt.reference().bytes().next(), gt.first_alt())
     else {
@@ -450,53 +479,38 @@ fn assign_posteriors(
 fn annotate_record(record: &mut RecordBuf, annotations: &[Annotation], options: &FilterOptions) {
     let mut new_filters = Vec::new();
     for annotation in annotations {
+        let (kind, score) = (annotation.kind, &annotation.score);
         let info = record.info_mut();
-        match annotation.kind {
-            FilterKind::EndRepairFillIn | FilterKind::ATailing => {
-                let Some(posterior) = annotation.posterior else {
-                    continue;
-                };
-                let key = if annotation.kind == FilterKind::ATailing {
-                    ATailing::INFO
-                } else {
-                    EndRepairFillIn::INFO
-                };
-                info.insert(key.to_string(), Some(Value::Float(vcf_float(posterior))));
+        if let (Some(posterior), Some(llr)) = (annotation.posterior, score.log_likelihood_ratio) {
+            info.insert(
+                kind.posterior_id().to_string(),
+                Some(Value::Float(vcf_float(posterior))),
+            );
+            if kind == FilterKind::CopiedDamage {
+                info.insert(
+                    CopiedDamage::INFO_RATIO.to_string(),
+                    Some(Value::Float(vcf_float(llr / std::f64::consts::LN_10))),
+                );
             }
-            FilterKind::CopiedDamage => {
-                let score = &annotation.score;
-                let pair = |a: u32, b: u32| {
-                    Some(Value::Array(Array::Integer(vec![
-                        Some(a as i32),
-                        Some(b as i32),
-                    ])))
-                };
-                if let (Some(posterior), Some(llr)) =
-                    (annotation.posterior, score.log_likelihood_ratio)
-                {
-                    info.insert(
-                        CopiedDamage::INFO_POSTERIOR.to_string(),
-                        Some(Value::Float(vcf_float(posterior))),
-                    );
-                    info.insert(
-                        CopiedDamage::INFO_RATIO.to_string(),
-                        Some(Value::Float(vcf_float(llr / std::f64::consts::LN_10))),
-                    );
-                }
-                info.insert(
-                    CopiedDamage::INFO_ALT.to_string(),
-                    pair(score.alt_congruent, score.alt_molecules),
-                );
-                info.insert(
-                    CopiedDamage::INFO_REF.to_string(),
-                    pair(score.ref_congruent, score.ref_molecules),
-                );
+            if is_filtered(posterior, kind.threshold(options)) {
+                new_filters.push(kind.filter_id().to_string());
             }
         }
-        if let Some(posterior) = annotation.posterior {
-            if is_filtered(posterior, options.threshold(annotation.kind)) {
-                new_filters.push(FilterOptions::filter_name(annotation.kind).to_string());
-            }
+        if kind == FilterKind::CopiedDamage {
+            let pair = |a: u32, b: u32| {
+                Some(Value::Array(Array::Integer(vec![
+                    Some(a as i32),
+                    Some(b as i32),
+                ])))
+            };
+            info.insert(
+                CopiedDamage::INFO_ALT.to_string(),
+                pair(score.alt_congruent, score.alt_molecules),
+            );
+            info.insert(
+                CopiedDamage::INFO_REF.to_string(),
+                pair(score.ref_congruent, score.ref_molecules),
+            );
         }
     }
     if new_filters.is_empty() {
@@ -630,7 +644,7 @@ fn metrics_rows(
         row.ref_congruent += u64::from(score.ref_congruent);
         if let Some(posterior) = annotation.posterior {
             row.expected_artifacts += 1.0 - posterior;
-            if is_filtered(posterior, options.threshold(annotation.kind)) {
+            if is_filtered(posterior, annotation.kind.threshold(options)) {
                 row.filtered += 1;
             }
         }

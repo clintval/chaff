@@ -290,24 +290,6 @@ fn probability(text: &str) -> Result<f64, String> {
     }
 }
 
-/// The argument IDs of each filter's options and inputs.
-fn filter_options(kind: FilterKind) -> &'static [&'static str] {
-    match kind {
-        FilterKind::CopiedDamage => &[
-            "reference",
-            "copied_damage_classes",
-            "copied_damage_scale",
-            "copied_damage_threshold",
-        ],
-        FilterKind::ATailing => &["a_tailing_distance", "a_tailing_threshold"],
-        FilterKind::EndRepairFillIn => &[
-            "end_repair_fill_in_distance",
-            "end_repair_fill_in_scale",
-            "end_repair_fill_in_threshold",
-        ],
-    }
-}
-
 impl Cli {
     /// Reject, as usage errors of `cmd`, an option typed on the command line for
     /// a filter `--filters` leaves out, the copied damage filter without a
@@ -317,7 +299,7 @@ impl Cli {
             if self.filters.contains(&kind) {
                 continue;
             }
-            for id in filter_options(kind) {
+            for id in kind.arguments() {
                 if matches.value_source(id) != Some(ValueSource::CommandLine) {
                     continue;
                 }
@@ -637,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_options_are_every_option_named_for_a_filter() {
+    fn test_filter_arguments_are_every_option_named_for_a_filter() {
         let ids: Vec<String> = Cli::command()
             .get_arguments()
             .map(|arg| arg.get_id().to_string())
@@ -645,9 +627,9 @@ mod tests {
         for kind in FilterKind::ALL {
             let prefix = format!("{}_", kind.to_string().replace('-', "_"));
             for id in ids.iter().filter(|id| id.starts_with(&prefix)) {
-                assert!(filter_options(kind).contains(&id.as_str()), "{kind}: {id}");
+                assert!(kind.arguments().contains(&id.as_str()), "{kind}: {id}");
             }
-            for id in filter_options(kind) {
+            for id in kind.arguments() {
                 assert!(ids.iter().any(|known| known == id), "{kind}: {id}");
             }
         }
