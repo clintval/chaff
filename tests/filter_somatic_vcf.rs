@@ -738,3 +738,67 @@ fn test_contigs_ordered_unlike_the_bam_or_missing_from_it_fail_by_name() {
         "{message}"
     );
 }
+
+/// The metrics rows of a run of `options` over the shared calls and reads, as
+/// `(stratum, alt_congruent, ref_congruent)`, and each call's ERFAP.
+fn erfap_and_congruent_counts(options: FilterOptions) -> (Vec<Option<f32>>, Vec<[String; 3]>) {
+    let dir = TempDir::new().unwrap();
+    let (tumor, _) = tumor_vcfs(dir.path());
+    let output = dir.path().join("filtered.vcf");
+    let metrics = dir.path().join("metrics.tsv");
+    let args = FilterArgs {
+        input: tumor,
+        output: output.clone(),
+        bam: PathBuf::from("reads.bam"),
+        reference: None,
+        metrics: Some(metrics.clone()),
+        pileup: PileupOptions::default(),
+        options,
+    };
+    run_filter_on(&args, tumor_bam().to_pileup_builder()).unwrap();
+    let erfap = read_vcf(&output)
+        .1
+        .iter()
+        .map(|r| float(r, EndRepairFillIn::INFO))
+        .collect();
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(b'\t')
+        .from_path(&metrics)
+        .unwrap();
+    let headers = reader.headers().unwrap().clone();
+    let column = |name: &str| headers.iter().position(|h| h == name).unwrap();
+    let (stratum, alt, refs) = (
+        column("stratum"),
+        column("alt_congruent"),
+        column("ref_congruent"),
+    );
+    let counts = reader
+        .records()
+        .map(|r| {
+            let r = r.unwrap();
+            [stratum, alt, refs].map(|i| r[i].to_string())
+        })
+        .collect();
+    (erfap, counts)
+}
+
+/// `--end-repair-fill-in-scale` changes each call's posterior but leaves the
+/// congruent molecules of the metrics to the distance window.
+#[test]
+fn test_the_end_repair_fill_in_scale_replaces_the_window_only_in_the_posterior() {
+    let with = |scale| FilterOptions {
+        filters: vec![FilterKind::EndRepairFillIn],
+        end_repair_fill_in: EndRepairFillIn {
+            distance: 10,
+            scale,
+        },
+        ..options(Some("tumor"), PriorMode::Learned)
+    };
+    let (window, window_counts) = erfap_and_congruent_counts(with(None));
+    let (decay, decay_counts) = erfap_and_congruent_counts(with(Some(15.0)));
+    assert_eq!(window_counts, decay_counts);
+    assert_eq!(window_counts.len(), 4);
+    assert_ne!(window, decay);
+    assert_eq!(window[2], None);
+    assert_eq!(decay[2], None);
+}
