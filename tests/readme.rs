@@ -1,137 +1,81 @@
 //! The README's examples, run on `tests/data` by the real binary.
+//!
+//! Every `console` block but the installation runs in order, under bash, in
+//! one working directory holding a copy of `tests/data`, with `chaff` on the
+//! `PATH`. The `text` block right after a `console` block is what that block
+//! prints, compared line by line and field by field in both directions, and a
+//! `console` block without one must print nothing.
 
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
-use assert_cmd::Command;
 use tempfile::TempDir;
 
 const README: &str = include_str!("../README.md");
 
-fn chaff(args: &[&str]) {
-    Command::cargo_bin("chaff")
-        .unwrap()
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env("NO_COLOR", "1")
-        .args(args)
-        .assert()
-        .success();
+/// The README's fenced blocks, as their language and their lines.
+fn blocks() -> Vec<(&'static str, &'static str)> {
+    let mut blocks = Vec::new();
+    let mut rest = README;
+    while let Some(start) = rest.find("```") {
+        let (language, body) = rest[start + 3..].split_once('\n').unwrap();
+        let end = body.find("```").unwrap();
+        blocks.push((language, &body[..end]));
+        rest = &body[end + 3..];
+    }
+    blocks
 }
 
-/// Whether the README shows a line with these whitespace-separated fields.
-fn shows(fields: &[&str]) -> bool {
-    README
-        .lines()
-        .any(|line| line.split_whitespace().eq(fields.iter().copied()))
-}
-
-/// Columns 1, 2, 4, 5, 7, and 8 of each record, as the README cuts them.
-fn records(path: &Path) -> Vec<Vec<String>> {
-    fs::read_to_string(path)
-        .unwrap()
-        .lines()
-        .filter(|line| !line.starts_with('#'))
-        .map(|line| {
-            let fields: Vec<&str> = line.split('\t').collect();
-            [0, 1, 3, 4, 6, 7].map(|i| fields[i].to_string()).to_vec()
-        })
+/// The whitespace-separated fields of each line that has any.
+fn fields(text: &str) -> Vec<Vec<&str>> {
+    text.lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>())
+        .filter(|fields| !fields.is_empty())
         .collect()
 }
 
-fn assert_shown(rows: &[Vec<String>]) {
-    assert!(!rows.is_empty());
-    for row in rows {
-        let fields: Vec<&str> = row.iter().map(String::as_str).collect();
-        assert!(
-            shows(&fields),
-            "the README does not show: {}",
-            fields.join(" ")
-        );
+/// A working directory holding a copy of `tests/data`.
+fn work_dir() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let data = dir.path().join("tests/data");
+    fs::create_dir_all(&data).unwrap();
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        fs::copy(entry.path(), data.join(entry.file_name())).unwrap();
     }
+    dir
 }
 
 #[test]
-fn test_the_readme_shows_the_scored_calls_header_and_metrics() {
-    let dir = TempDir::new().unwrap();
-    let output = dir.path().join("calls.chaff.vcf");
-    let metrics = dir.path().join("tumor.chaff.tsv");
-    chaff(&[
-        "--input",
-        "tests/data/calls.vcf",
-        "--bam",
-        "tests/data/tumor.bam",
-        "--ref",
-        "tests/data/ref.fa",
-        "--sample",
-        "tumor",
-        "--output",
-        output.to_str().unwrap(),
-        "--metrics",
-        metrics.to_str().unwrap(),
-        "--copied-damage-threshold",
-        "0.05",
-    ]);
-    assert_shown(&records(&output));
-
-    let filter = fs::read_to_string(&output)
-        .unwrap()
-        .lines()
-        .find(|line| line.starts_with("##FILTER=<ID=CopiedDamage"))
-        .unwrap()
-        .to_string();
-    assert!(README.lines().any(|line| line == filter), "{filter}");
-
-    let rows: Vec<Vec<String>> = fs::read_to_string(&metrics)
-        .unwrap()
-        .lines()
-        .take(3)
-        .map(|line| {
-            let fields: Vec<&str> = line.split('\t').collect();
-            [1, 2, 5, 6, 15].map(|i| fields[i].to_string()).to_vec()
-        })
-        .collect();
-    assert_shown(&rows);
-}
-
-#[test]
-fn test_the_readme_shows_the_fgbio_prior_calls() {
-    let dir = TempDir::new().unwrap();
-    let output = dir.path().join("fgbio.vcf");
-    chaff(&[
-        "--input",
-        "tests/data/calls.vcf",
-        "--bam",
-        "tests/data/tumor.bam",
-        "--sample",
-        "tumor",
-        "--output",
-        output.to_str().unwrap(),
-        "--filters",
-        "end-repair-fill-in,a-tailing",
-        "--end-repair-fill-in-threshold",
-        "0.001",
-        "--prior",
-        "fgbio",
-    ]);
-    assert_shown(&records(&output));
-}
-
-#[test]
-fn test_the_readme_choosing_filters_example_parses() {
-    let section = README.split("## Choosing Filters").nth(1).unwrap();
-    let block = section.split("```console\n").nth(1).unwrap();
-    let command = block.split("```").next().unwrap().replace("\\\n", " ");
-    let args: Vec<&str> = command.split_whitespace().skip(1).collect();
-    assert!(args.contains(&"--copied-damage-classes"), "{args:?}");
-    let dir = TempDir::new().unwrap();
-    let output = Command::cargo_bin("chaff")
-        .unwrap()
-        .current_dir(dir.path())
-        .env("NO_COLOR", "1")
-        .args(&args)
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains("failed to open BAM"), "{stderr}");
+fn test_every_readme_example_prints_what_the_readme_shows() {
+    let dir = work_dir();
+    let binary = Path::new(env!("CARGO_BIN_EXE_chaff")).parent().unwrap();
+    let path = format!("{}:{}", binary.display(), std::env::var("PATH").unwrap());
+    let blocks = blocks();
+    let mut shown = 0;
+    for (i, (language, body)) in blocks.iter().enumerate() {
+        if *language != "console" || body.starts_with("cargo install") {
+            continue;
+        }
+        let output = Command::new("bash")
+            .args(["-e", "-c", &body.replace("| column -t", "")])
+            .current_dir(dir.path())
+            .env("PATH", &path)
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{body}\n{stderr}");
+        match blocks.get(i + 1) {
+            Some(("text", expected)) => {
+                assert_eq!(fields(&stdout), fields(expected), "{body}");
+                shown += 1;
+            }
+            _ => assert_eq!(stdout, "", "the README shows no output of:\n{body}"),
+        }
+    }
+    assert!(shown >= 4, "only {shown} outputs were checked");
 }

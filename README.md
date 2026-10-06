@@ -115,14 +115,14 @@ A sheared or enzymatically fragmented, end-repaired, A-tailed duplex library wit
 
 ```console
 chaff \
-    --input calls.vcf.gz \
-    --bam tumor.bam \
-    --ref ref.fa \
+    --input tests/data/calls.vcf \
+    --bam tests/data/tumor.bam \
+    --ref tests/data/ref.fa \
     --sample tumor \
     --output calls.chaff.vcf.gz \
     --metrics tumor.chaff.tsv \
     --filters copied-damage,end-repair-fill-in,a-tailing \
-    --copied-damage-classes C>T \
+    --copied-damage-classes 'C>T' \
     --copied-damage-threshold 0.05 \
     --end-repair-fill-in-threshold 0.001 \
     --a-tailing-threshold 0.001
