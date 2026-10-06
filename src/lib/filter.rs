@@ -560,7 +560,7 @@ fn annotate_record(record: &mut RecordBuf, annotations: &[Annotation], options: 
             if kind == FilterKind::CopiedDamage {
                 info.insert(
                     CopiedDamage::INFO_RATIO.to_string(),
-                    Some(Value::Float(vcf_float(llr / std::f64::consts::LN_10))),
+                    Some(Value::Float(CopiedDamage::log10_ratio(llr))),
                 );
             }
             if is_filtered(posterior, kind.threshold(options)) {

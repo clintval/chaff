@@ -40,7 +40,7 @@ grep -v '^#' calls.chaff.vcf | cut -f 1,2,4,5,7,8 | column -t
 ```
 
 ```text
-chr1  100  C    A  CopiedDamageArtifact  CDAP=0.042;CDLR=1.31;CDAC=3,3;CDRC=120,240;ATAP=0.963;ERFAP=0.023
+chr1  100  C    A  CopiedDamageArtifact  CDAP=0.042;CDLR=1.307;CDAC=3,3;CDRC=120,240;ATAP=0.963;ERFAP=0.023
 chr1  200  G    A  .                     CDAP=0.999;CDLR=-2.869;CDAC=10,20;CDRC=120,240;ATAP=1;ERFAP=1
 chr1  300  AAA  A  .                     .
 chr1  400  A    T  .                     ATAP=1;ERFAP=0.0033

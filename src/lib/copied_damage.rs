@@ -80,6 +80,12 @@ impl CopiedDamage {
     /// The FILTER name.
     pub const FILTER: &'static str = "CopiedDamageArtifact";
 
+    /// The `CDLR` value of a natural-log likelihood ratio: its log10 at four
+    /// significant digits, whatever its sign.
+    pub fn log10_ratio(log_likelihood_ratio: f64) -> f32 {
+        crate::io::significant(log_likelihood_ratio / std::f64::consts::LN_10, 4)
+    }
+
     /// Heterozygous calls whose every called allele is one base.
     pub fn applies_to(gt: &Genotype) -> bool {
         gt.is_het() && gt.calls_are_single_bases()
@@ -298,6 +304,16 @@ mod tests {
         assert_eq!(score.alt_molecules, 0);
         assert_eq!(score.ref_molecules, 1);
         assert_eq!(score.log_likelihood_ratio, None);
+    }
+
+    #[test]
+    fn test_log10_ratio_keeps_four_significant_digits_of_either_sign() {
+        let ln = std::f64::consts::LN_10;
+        assert_eq!(CopiedDamage::log10_ratio(1.234_56 * ln), 1.235);
+        assert_eq!(CopiedDamage::log10_ratio(-1.234_56 * ln), -1.235);
+        assert_eq!(CopiedDamage::log10_ratio(0.012_345_6 * ln), 0.012_35);
+        assert_eq!(CopiedDamage::log10_ratio(123.456 * ln), 123.5);
+        assert_eq!(CopiedDamage::log10_ratio(0.0), 0.0);
     }
 
     #[test]
