@@ -9,10 +9,8 @@
 //! mates that disagree become an `N`, which counts as neither allele.
 
 use std::collections::HashMap;
-use std::io;
 
 use anyhow::{Context as _, Result};
-use noodles::bam;
 use noodles::core::Position;
 use noodles::sam::alignment::record::Flags;
 use streampile::{
@@ -172,9 +170,10 @@ fn molecule<R: AlignmentRecord>(
 ///
 /// Each distance is counted along the read sequenced from that end where it
 /// holds a base here, and otherwise by a read of the other strand, which walks
-/// its mate's CIGAR from the `MC` tag. A read whose mate maps to the same contig on the other
-/// strand is outside its template wherever a distance is unknown: past its
-/// mate's 5' end, or anywhere in a pair whose reads face away from each other.
+/// its mate's CIGAR from the `MC` tag. A read of an FR pair, as htsjdk 5.0.0
+/// classifies it, is outside its template wherever a distance is unknown: past
+/// its mate's 5' end. A read of a pair whose reads face away from each other
+/// knows only its own end, as fgbio has it.
 fn distances<R: AlignmentRecord>(
     template: &PileupTemplate<'_, R>,
 ) -> streampile::Result<Option<(Option<usize>, Option<usize>)>> {
@@ -193,27 +192,11 @@ fn distances<R: AlignmentRecord>(
         }
     };
     let (left, right) = (end(false)?, end(true)?);
-    let read = template.entries().next().map(|entry| entry.record());
-    if (left.is_none() || right.is_none())
-        && read.map_or(Ok(false), has_mate_on_the_other_strand)?
-    {
+    let read = template.entries().next();
+    if (left.is_none() || right.is_none()) && read.map_or(Ok(false), |r| r.is_fr_pair())? {
         return Ok(None);
     }
     Ok(Some((left, right)))
-}
-
-/// Whether a read's mate maps to the same contig on the other strand.
-fn has_mate_on_the_other_strand(record: &bam::Record) -> io::Result<bool> {
-    let flags = record.flags();
-    if !flags.is_segmented()
-        || flags.is_mate_unmapped()
-        || flags.is_reverse_complemented() == flags.is_mate_reverse_complemented()
-    {
-        return Ok(false);
-    }
-    let this = record.reference_sequence_id().transpose()?;
-    let mate = record.mate_reference_sequence_id().transpose()?;
-    Ok(this == mate)
 }
 
 /// [`Evidence`] from a fixed table of molecules per site, for callers that
@@ -598,8 +581,7 @@ mod tests {
         }
     }
 
-    /// A site past its mate's 5' end lies outside the template, and so does
-    /// every site of a pair whose reads face away from each other.
+    /// A site past its mate's 5' end lies outside the template of an FR pair.
     #[test]
     fn test_template_distances_leave_out_sites_past_the_mates_five_prime_end() {
         let mut reads = SamBuilder::new().read_length(50);
@@ -607,13 +589,29 @@ mod tests {
         assert_eq!(distances_at(&through, 150), []);
         assert_eq!(distances_at(&through, 100), []);
         assert_eq!(distances_at(&through, 149), [(Some(48), Some(0))]);
-        let away = reads.add_pair(Pair {
+    }
+
+    /// A pair whose aligned 5' ends coincide is FR, as htsjdk 5.0.0 has it, so
+    /// only their shared site lies inside its template. A pair whose forward
+    /// read starts one base later faces away, and each read knows only its own
+    /// end, as fgbio has it.
+    #[test]
+    fn test_a_five_prime_tie_is_fr_and_a_pair_one_base_apart_faces_away() {
+        let mut reads = SamBuilder::new().read_length(50);
+        let tie = reads.add_pair(Pair::at(150, 101));
+        assert_eq!(distances_at(&tie, 149), []);
+        assert_eq!(distances_at(&tie, 150), [(Some(0), Some(0))]);
+        assert_eq!(distances_at(&tie, 151), []);
+        let away = reads.add_pair(Pair::at(151, 101));
+        assert_eq!(distances_at(&away, 150), [(None, Some(0))]);
+        assert_eq!(distances_at(&away, 151), [(Some(0), None)]);
+        let apart = reads.add_pair(Pair {
             strand1: Strand::Minus,
             strand2: Strand::Plus,
             ..Pair::at(100, 200)
         });
-        assert_eq!(distances_at(&away, 120), []);
-        assert_eq!(distances_at(&away, 220), []);
+        assert_eq!(distances_at(&apart, 120), [(None, Some(29))]);
+        assert_eq!(distances_at(&apart, 220), [(Some(20), None)]);
     }
 
     #[test]
