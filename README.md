@@ -119,7 +119,7 @@ The posterior probability of a true mutation is then `1 / (1 + exp(LLR_i + logit
 
 - **The prior.** fgbio's `(2 * maf)^2` prior is near zero at duplex allele fractions, so any call whose alternate molecules all sit inside the window becomes an artifact however often the reference molecules sit there too. The learned prior needs the molecules themselves to carry the evidence. `--prior fgbio` restores fgbio's.
 - **The end repair mechanism.** fgbio describes fill-in of single-stranded 3' overhangs. Polymerase cannot extend a 3' overhang; it extends a recessed 3' end opposite a 5' overhang, and the damage copied is in that 5' overhang.
-- **Template ends.** fgbio measures from the read's own 5' end and from the far end by insert size. `chaff` uses the unclipped 5' ends of both mates, the mate's from the `MC` tag, and falls back to the insert size without one.
+- **Template ends.** fgbio measures from the read's own 5' end and from the far end by insert size. `chaff` uses the unclipped 5' ends of both mates, the mate's from the `MC` tag, which a read with a mapped mate must carry; it never reads `TLEN`.
 - **Overlapping mates.** fgbio keeps the first read of each name. `chaff` keeps one molecule per template: mates that agree keep the higher quality, and mates that disagree count as neither allele.
 - **Missing evidence.** fgbio writes `NaN` when a call has alternate molecules but no reference molecules, and a posterior from `1 / depth` when it has neither. `chaff` leaves the INFO field out in the first case and reports the prior in the second.
 - **Access.** fgbio can query an indexed BAM; `chaff` always streams.

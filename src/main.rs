@@ -130,6 +130,9 @@ struct FilterCmd {
     output: PathBuf,
 
     /// Coordinate-sorted BAM of the sample under test; no index needed.
+    ///
+    /// A read whose mate maps to the same contig needs the mate CIGAR (`MC`)
+    /// tag; the insert size (`TLEN`) is never read.
     #[arg(short = 'b', long, value_name = "BAM", verbatim_doc_comment)]
     bam: PathBuf,
 

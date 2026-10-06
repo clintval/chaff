@@ -6,8 +6,7 @@
 //!
 //! The ends come from the unclipped 5' ends of both mates: the record's own
 //! from its position and CIGAR, its mate's from the mate position and the `MC`
-//! (mate CIGAR) tag. Without `MC`, the far end falls back to the insert size
-//! (`TLEN`), measured from the record's aligned 5' end the way fgbio does.
+//! (mate CIGAR) tag. The insert size (`TLEN`) is never read.
 
 use std::io;
 
@@ -175,21 +174,6 @@ pub fn parse_cigar(text: &[u8]) -> io::Result<Vec<(Kind, usize)>> {
     Ok(ops)
 }
 
-/// The record's aligned (clipped) 5' end: its start, or its end when reversed.
-fn aligned_five_prime<R: Record>(record: &R) -> io::Result<Option<i64>> {
-    if record.flags()?.is_reverse_complemented() {
-        record
-            .alignment_end()
-            .transpose()
-            .map(|end| end.map(|p| usize::from(p) as i64))
-    } else {
-        record
-            .alignment_start()
-            .transpose()
-            .map(|start| start.map(|p| usize::from(p) as i64))
-    }
-}
-
 /// The record's unclipped 5' end: the unclipped start of a forward read or the
 /// unclipped end of a reverse read, counting soft and hard clips.
 pub fn unclipped_five_prime<R: Record>(record: &R) -> io::Result<Option<i64>> {
@@ -215,10 +199,6 @@ pub fn unclipped_five_prime<R: Record>(record: &R) -> io::Result<Option<i64>> {
 /// `None` without an `MC` tag.
 pub fn mate_unclipped_five_prime<R: Record>(record: &R) -> io::Result<Option<i64>> {
     let flags = record.flags()?;
-    let Some(mate_start) = record.mate_alignment_start().transpose()? else {
-        return Ok(None);
-    };
-    let mate_start = usize::from(mate_start) as i64;
     let data = record.data();
     let Some(value) = data.get(&Tag::MATE_CIGAR).transpose()? else {
         return Ok(None);
@@ -229,6 +209,13 @@ pub fn mate_unclipped_five_prime<R: Record>(record: &R) -> io::Result<Option<i64
             "the MC tag is not a string",
         ));
     };
+    let Some(mate_start) = record.mate_alignment_start().transpose()? else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "a record with an MC tag has no mate position",
+        ));
+    };
+    let mate_start = usize::from(mate_start) as i64;
     let ops = parse_cigar(text)?;
     let (leading, trailing) = clipping(&ops);
     if flags.is_mate_reverse_complemented() {
@@ -251,95 +238,16 @@ fn is_mapped_pair_on_one_contig<R: Record>(record: &R, header: &Header) -> io::R
     Ok(this.is_some() && this == mate)
 }
 
-/// Whether the record is in a mapped forward-reverse (FR) pair, decided as
-/// htsjdk's `SamPairUtil.getPairOrientation` does, from aligned positions and
-/// the insert size.
-pub fn is_fr_pair<R: Record>(record: &R, header: &Header) -> io::Result<bool> {
-    if !is_mapped_pair_on_one_contig(record, header)? {
-        return Ok(false);
-    }
-    let flags = record.flags()?;
-    if flags.is_reverse_complemented() == flags.is_mate_reverse_complemented() {
-        return Ok(false);
-    }
-    let start = || -> io::Result<i64> {
-        record
-            .alignment_start()
-            .transpose()?
-            .map(|p| usize::from(p) as i64)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "mapped read has no start"))
-    };
-    let (positive_five_prime, negative_five_prime) = if flags.is_reverse_complemented() {
-        let mate_start = record
-            .mate_alignment_start()
-            .transpose()?
-            .map(|p| usize::from(p) as i64)
-            .unwrap_or(0);
-        let end = record
-            .alignment_end()
-            .transpose()?
-            .map(|p| usize::from(p) as i64)
-            .unwrap_or(0);
-        (mate_start, end)
-    } else {
-        let start = start()?;
-        (start, start + i64::from(record.template_length()?))
-    };
-    Ok(positive_five_prime < negative_five_prime)
-}
-
-/// The template's start and end from the record's aligned 5' end and its
-/// insert size, as fgbio's `Bams.insertCoordinates` computes them, or `None`
-/// for a fragment, an unmapped mate, or a mate on another contig.
-pub fn insert_coordinates<R: Record>(
-    record: &R,
-    header: &Header,
-) -> io::Result<Option<(i64, i64)>> {
-    if !is_mapped_pair_on_one_contig(record, header)? {
-        return Ok(None);
-    }
-    let Some(first_end) = aligned_five_prime(record)? else {
-        return Ok(None);
-    };
-    let isize = i64::from(record.template_length()?);
-    let adjustment = if isize < 0 { 1 } else { -1 };
-    let second_end = first_end + isize + adjustment;
-    Ok(Some((first_end.min(second_end), first_end.max(second_end))))
-}
-
-/// The 1-based distance of `pos` from the far end of the template (the
-/// mate's 5' end) from the insert size, as fgbio's
-/// `Bams.positionFromOtherEndOfTemplate` computes it, or `None` unless the
-/// record is in an FR pair with a non-zero insert size.
-pub fn position_from_other_end_of_template<R: Record>(
-    record: &R,
-    header: &Header,
-    pos: i64,
-) -> io::Result<Option<i64>> {
-    let isize = i64::from(record.template_length()?);
-    if isize == 0 || !is_fr_pair(record, header)? {
-        return Ok(None);
-    }
-    let Some(this_end) = aligned_five_prime(record)? else {
-        return Ok(None);
-    };
-    let adjustment = if isize < 0 { 1 } else { -1 };
-    let other_end = this_end + isize + adjustment;
-    if isize < 0 {
-        Ok(Some(pos - other_end + 1))
-    } else {
-        Ok(Some(other_end - pos + 1))
-    }
-}
-
 /// The template ends a record can see: its own unclipped 5' end always, and
-/// the far end when the record is in an FR pair, from the mate's unclipped 5'
-/// end (`MC` tag) or else from the insert size.
+/// the far end from the mate's unclipped 5' end (`MC` tag) when the record is
+/// in an FR pair. A record whose mate maps to the same contig on the other
+/// strand must carry `MC`.
 pub fn template_ends<R: Record>(record: &R, header: &Header) -> io::Result<TemplateEnds> {
     let Some(own) = unclipped_five_prime(record)? else {
         return Ok(TemplateEnds::default());
     };
-    let reverse = record.flags()?.is_reverse_complemented();
+    let flags = record.flags()?;
+    let reverse = flags.is_reverse_complemented();
     let own_only = if reverse {
         TemplateEnds {
             start: None,
@@ -351,29 +259,22 @@ pub fn template_ends<R: Record>(record: &R, header: &Header) -> io::Result<Templ
             end: None,
         }
     };
-    if !is_mapped_pair_on_one_contig(record, header)? {
+    if !is_mapped_pair_on_one_contig(record, header)?
+        || reverse == flags.is_mate_reverse_complemented()
+    {
         return Ok(own_only);
     }
-    let flags = record.flags()?;
-    if flags.is_reverse_complemented() == flags.is_mate_reverse_complemented() {
-        return Ok(own_only);
-    }
-    let other = match mate_unclipped_five_prime(record)? {
-        Some(mate) => Some(mate),
-        None => {
-            let isize = i64::from(record.template_length()?);
-            if isize == 0 || !is_fr_pair(record, header)? {
-                None
-            } else {
-                let adjustment = if isize < 0 { 1 } else { -1 };
-                aligned_five_prime(record)?.map(|this| this + isize + adjustment)
-            }
-        }
+    let Some(mate) = mate_unclipped_five_prime(record)? else {
+        let name = record
+            .name()
+            .map(|n| String::from_utf8_lossy(n).into_owned())
+            .unwrap_or_else(|| "*".to_string());
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("read {name} has a mapped mate but no MC tag to place the far template end"),
+        ));
     };
-    let Some(other) = other else {
-        return Ok(own_only);
-    };
-    let (start, end) = if reverse { (other, own) } else { (own, other) };
+    let (start, end) = if reverse { (mate, own) } else { (own, mate) };
     if start < end {
         Ok(TemplateEnds {
             start: Some(start),
@@ -435,6 +336,8 @@ impl ReadFilter {
 mod tests {
     use rstest::rstest;
 
+    use noodles::sam::alignment::RecordBuf;
+
     use super::*;
     use crate::testing::{Frag, Pair, SamBuilder, Strand};
 
@@ -459,12 +362,17 @@ mod tests {
     }
 
     /// fgbio `BamsTest`: "Bams.insertCoordinates should fail on fragments and
-    /// inappropriate pairs". chaff returns `None` where fgbio raises.
+    /// inappropriate pairs". chaff gives such records only their own end where
+    /// fgbio raises.
     #[test]
-    fn test_insert_coordinates_none_on_fragments_and_inappropriate_pairs() {
+    fn test_template_ends_know_only_their_own_end_on_fragments_and_inappropriate_pairs() {
         let mut builder = SamBuilder::new().read_length(10).base_quality(20);
+        let own_only = TemplateEnds {
+            start: Some(100),
+            end: None,
+        };
         for r in builder.add_frag(Frag::at(100)) {
-            assert_eq!(insert_coordinates(&r, builder.header()).unwrap(), None);
+            assert_eq!(template_ends(&r, builder.header()).unwrap(), own_only);
         }
         let recs = builder.add_pair(Pair {
             start1: 100,
@@ -472,25 +380,24 @@ mod tests {
             unmapped2: true,
             ..Pair::default()
         });
-        for r in recs {
-            assert_eq!(insert_coordinates(&r, builder.header()).unwrap(), None);
-        }
+        assert_eq!(template_ends(&recs[0], builder.header()).unwrap(), own_only);
         let recs = builder.add_pair(Pair::at(100, 200));
-        for r in recs {
-            let r = SamBuilder::with_mate_reference_sequence_id(r, 1);
-            assert_eq!(insert_coordinates(&r, builder.header()).unwrap(), None);
-        }
+        let r = SamBuilder::with_mate_reference_sequence_id(recs[0].clone(), 1);
+        assert_eq!(template_ends(&r, builder.header()).unwrap(), own_only);
     }
 
     /// fgbio `BamsTest`: "Bams.insertCoordinates should calculate insert
-    /// coordinates correctly".
+    /// coordinates correctly". chaff reads the far end from `MC`, not `TLEN`.
     #[test]
-    fn test_insert_coordinates() {
+    fn test_template_ends_of_an_fr_pair() {
         let mut builder = SamBuilder::new().read_length(10).base_quality(20);
         for r in builder.add_pair(Pair::at(100, 191)) {
             assert_eq!(
-                insert_coordinates(&r, builder.header()).unwrap(),
-                Some((100, 200))
+                template_ends(&r, builder.header()).unwrap(),
+                TemplateEnds {
+                    start: Some(100),
+                    end: Some(200)
+                }
             );
         }
     }
@@ -498,15 +405,13 @@ mod tests {
     /// fgbio `BamsTest`: "Bams.positionFromOtherEndOfTemplate should return
     /// None for anything that's not an FR mapped pair".
     #[test]
-    fn test_position_from_other_end_of_template_none_unless_fr_pair() {
+    fn test_template_ends_have_no_far_end_unless_fr_pair() {
         let mut builder = SamBuilder::new();
         let header = builder.header().clone();
-        let check = |recs: Vec<_>| {
-            for r in recs {
-                assert_eq!(
-                    position_from_other_end_of_template(&r, &header, 10).unwrap(),
-                    None
-                );
+        let check = |recs: Vec<RecordBuf>| {
+            for r in recs.iter().filter(|r| !r.flags().is_unmapped()) {
+                let ends = template_ends(r, &header).unwrap();
+                assert!(ends.start.is_none() || ends.end.is_none(), "{ends:?}");
             }
         };
         check(builder.add_frag(Frag::at(100)));
@@ -519,7 +424,6 @@ mod tests {
         for (strand1, strand2) in [
             (Strand::Plus, Strand::Plus),
             (Strand::Minus, Strand::Minus),
-            (Strand::Plus, Strand::Plus),
             (Strand::Minus, Strand::Plus),
         ] {
             check(builder.add_pair(Pair {
@@ -533,22 +437,29 @@ mod tests {
     }
 
     /// fgbio `BamsTest`: "Bams.positionFromOtherEndOfTemplate should correctly
-    /// calculate the position from the other end of the template for FR pairs".
+    /// calculate the position from the other end of the template for FR pairs",
+    /// as the 1-based distance from the far template end.
     #[test]
-    fn test_position_from_other_end_of_template() {
+    fn test_distance_from_the_other_end_of_the_template() {
         let mut builder = SamBuilder::new().read_length(50);
         let recs = builder.add_pair(Pair::at(101, 151));
-        let (r1, r2) = (&recs[0], &recs[1]);
         let header = builder.header();
-        let distance = |r, pos| position_from_other_end_of_template(r, header, pos).unwrap();
-        assert_eq!(distance(r1, 101), Some(100));
-        assert_eq!(distance(r1, 111), Some(90));
-        assert_eq!(distance(r1, 151), Some(50));
-        assert_eq!(distance(r1, 200), Some(1));
-        assert_eq!(distance(r2, 200), Some(100));
-        assert_eq!(distance(r2, 190), Some(90));
-        assert_eq!(distance(r2, 150), Some(50));
-        assert_eq!(distance(r2, 101), Some(1));
+        let ends: Vec<TemplateEnds> = recs
+            .iter()
+            .map(|r| template_ends(r, header).unwrap())
+            .collect();
+        let from_other_end = |i: usize, pos: i64| match i {
+            0 => ends[0].end.unwrap() - pos + 1,
+            _ => pos - ends[1].start.unwrap() + 1,
+        };
+        assert_eq!(from_other_end(0, 101), 100);
+        assert_eq!(from_other_end(0, 111), 90);
+        assert_eq!(from_other_end(0, 151), 50);
+        assert_eq!(from_other_end(0, 200), 1);
+        assert_eq!(from_other_end(1, 200), 100);
+        assert_eq!(from_other_end(1, 190), 90);
+        assert_eq!(from_other_end(1, 150), 50);
+        assert_eq!(from_other_end(1, 101), 1);
     }
 
     /// fgbio `PileupTest`: "BaseEntry should report the correct
@@ -605,14 +516,27 @@ mod tests {
     }
 
     #[test]
-    fn test_template_ends_fall_back_to_the_insert_size_without_a_mate_cigar() {
+    fn test_template_ends_of_a_pair_without_a_mate_cigar_are_an_error() {
         let mut builder = SamBuilder::new().read_length(50);
-        let recs = builder.add_pair(Pair::at(101, 151));
-        let header = builder.header();
+        let recs = builder.add_pair(Pair {
+            name: Some("q1".into()),
+            ..Pair::at(101, 151)
+        });
         for r in recs {
             let r = SamBuilder::without_mate_cigar(r);
+            let error = template_ends(&r, builder.header()).unwrap_err();
+            assert!(error.to_string().contains("read q1"), "{error}");
+            assert!(error.to_string().contains("MC"), "{error}");
+        }
+    }
+
+    #[test]
+    fn test_template_ends_ignore_the_insert_size() {
+        let mut builder = SamBuilder::new().read_length(50);
+        for mut r in builder.add_pair(Pair::at(101, 151)) {
+            *r.template_length_mut() = 7;
             assert_eq!(
-                template_ends(&r, header).unwrap(),
+                template_ends(&r, builder.header()).unwrap(),
                 TemplateEnds {
                     start: Some(101),
                     end: Some(200)
