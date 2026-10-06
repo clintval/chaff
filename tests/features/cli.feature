@@ -65,6 +65,20 @@ Feature: CLI contract
     Then the exit code is 2
     And stderr contains "error: the copied-damage filter needs a reference FASTA: '--ref <FASTA>'"
 
+  Scenario: a REF that differs from the reference FASTA is an error
+    Given a file "ref.fa" containing:
+      """
+      >chr1
+      GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG
+      """
+    And a file "ref.fa.fai" containing:
+      """
+      chr1\t120\t6\t120\t121
+      """
+    When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam -r ref.fa --sample tumor`
+    Then the exit code is 1
+    And stderr contains "the call at chr1:100 has REF C, but the reference FASTA has G there"
+
   Scenario: the BAM must be coordinate sorted
     When I run `chaff -i calls.vcf -o out.vcf -b unsorted.bam --filters a-tailing --sample tumor`
     Then the exit code is 1

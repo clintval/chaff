@@ -383,6 +383,20 @@ fn score_call(
         ref_allele.to_ascii_uppercase(),
         alt_allele.to_ascii_uppercase(),
     );
+    let context = match reference.as_deref_mut() {
+        Some(reference) => {
+            let context = reference.context(contig, pos)?;
+            if context.1 != ref_base {
+                bail!(
+                    "the call at {contig}:{pos} has REF {}, but the reference FASTA has {} there",
+                    gt.reference(),
+                    context.1 as char
+                );
+            }
+            Some(context)
+        }
+        None => None,
+    };
     let key = (contig.to_string(), pos);
     if cache.as_ref().map(|(k, _)| k) != Some(&key) {
         let position = Position::try_from(pos).context("a VCF position must be at least 1")?;
@@ -410,24 +424,22 @@ fn score_call(
                 substitution.clone(),
                 options.a_tailing.score(molecules, ref_base, alt_base),
             )),
-            FilterKind::CopiedDamage => match (
-                options.copied_damage.classify(ref_base, alt_base),
-                reference.as_deref_mut(),
-            ) {
-                (None, _) | (_, None) => None,
-                (Some((class, strand)), Some(reference)) => {
-                    let (prev, base, next) = reference.context(contig, pos)?;
-                    let damage = DamageSite {
-                        class,
-                        strand,
-                        context: Context::of(prev, base, next),
-                    };
-                    let score = options
-                        .copied_damage
-                        .score(molecules, ref_base, alt_base, strand);
-                    Some((damage.stratum(), score))
+            FilterKind::CopiedDamage => {
+                match (options.copied_damage.classify(ref_base, alt_base), context) {
+                    (Some((class, strand)), Some((prev, base, next))) => {
+                        let damage = DamageSite {
+                            class,
+                            strand,
+                            context: Context::of(prev, base, next),
+                        };
+                        let score = options
+                            .copied_damage
+                            .score(molecules, ref_base, alt_base, strand);
+                        Some((damage.stratum(), score))
+                    }
+                    _ => None,
                 }
-            },
+            }
         };
         if let Some((stratum, score)) = scored {
             annotations.push(Annotation {
@@ -841,6 +853,30 @@ mod tests {
         assert_eq!(records.len(), 2);
         let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
         assert_eq!(names.len(), 1, "{names:?}");
+    }
+
+    #[test]
+    fn test_a_ref_that_differs_from_the_reference_fasta_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = write_fasta(dir.path(), "chr1", &"ACGTTCAA".repeat(250));
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(1003, &["C", "T"], vec![gt("tumor", "0/1")]));
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let output = dir.path().join("out.vcf");
+        let mut reference = Reference::open(&reference).unwrap();
+        let options = FilterOptions::default();
+        let error = filter_vcf(
+            &input,
+            &output,
+            &mut MoleculeTable::new(),
+            Some(&mut reference),
+            &options,
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("chr1:1003"), "{message}");
+        assert!(message.contains("REF C"), "{message}");
+        assert!(message.contains("has G"), "{message}");
     }
 
     #[test]
