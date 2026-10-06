@@ -38,8 +38,6 @@ pub struct Score {
     pub ref_molecules: u32,
     /// Reference molecules congruent with the artifact.
     pub ref_congruent: u32,
-    /// Every molecule at the site, any allele.
-    pub depth: u32,
 }
 
 /// The probability a base call is wrong, from its Phred quality, capped at the
@@ -55,10 +53,7 @@ pub fn window_score(
     alt_base: u8,
     congruent: impl Fn(&Molecule) -> bool,
 ) -> Score {
-    let mut score = Score {
-        depth: molecules.len() as u32,
-        ..Score::default()
-    };
+    let mut score = Score::default();
     for m in molecules.iter().filter(|m| m.base == ref_base) {
         score.ref_molecules += 1;
         if congruent(m) {
@@ -303,8 +298,9 @@ mod tests {
     /// The posterior fgbio reports for one call, with its `(2 * maf)^2` prior.
     /// The exact values asserted against it were produced by fgbio 4.1.1
     /// `FilterSomaticVcf` on the same reads.
-    fn fgbio_posterior(score: &Score) -> f64 {
-        let prior = fgbio_artifact_prior(score.alt_molecules, score.ref_molecules, score.depth);
+    fn fgbio_posterior(molecules: &[Molecule], score: &Score) -> f64 {
+        let depth = molecules.len() as u32;
+        let prior = fgbio_artifact_prior(score.alt_molecules, score.ref_molecules, depth);
         posterior_mutation(score.log_likelihood_ratio.unwrap(), prior)
     }
 
@@ -479,10 +475,11 @@ mod tests {
     #[test]
     fn test_end_repair_fill_in_not_significant_when_distributed() {
         let filter = EndRepairFillIn::new(15);
-        let score = filter.score(&molecules_at(&distributed_reads(), 25), G, T);
+        let molecules = molecules_at(&distributed_reads(), 25);
+        let score = filter.score(&molecules, G, T);
         assert!(score.log_likelihood_ratio.is_some());
-        assert!(fgbio_posterior(&score) > 0.5);
-        assert_eq!(vcf_float(fgbio_posterior(&score)), 1.0);
+        assert!(fgbio_posterior(&molecules, &score) > 0.5);
+        assert_eq!(vcf_float(fgbio_posterior(&molecules, &score)), 1.0);
         assert!(learned_posterior(&score) > 0.5);
     }
 
@@ -491,10 +488,11 @@ mod tests {
     #[test]
     fn test_end_repair_fill_in_significant_when_biased() {
         let filter = EndRepairFillIn::new(15);
-        let score = filter.score(&molecules_at(&biased_reads(11..=25), 25), G, T);
+        let molecules = molecules_at(&biased_reads(11..=25), 25);
+        let score = filter.score(&molecules, G, T);
         assert!(score.log_likelihood_ratio.is_some());
-        assert!(fgbio_posterior(&score) < 1e-6);
-        assert_eq!(vcf_float(fgbio_posterior(&score)), 1.869e-10);
+        assert!(fgbio_posterior(&molecules, &score) < 1e-6);
+        assert_eq!(vcf_float(fgbio_posterior(&molecules, &score)), 1.869e-10);
         assert!(learned_posterior(&score) < 1e-6);
     }
 
@@ -610,10 +608,11 @@ mod tests {
     #[test]
     fn test_a_tailing_not_significant_when_distributed() {
         let filter = ATailing { distance: 5 };
-        let score = filter.score(&molecules_at(&distributed_reads(), 25), G, T);
+        let molecules = molecules_at(&distributed_reads(), 25);
+        let score = filter.score(&molecules, G, T);
         assert!(score.log_likelihood_ratio.is_some());
-        assert!(fgbio_posterior(&score) > 0.5);
-        assert_eq!(vcf_float(fgbio_posterior(&score)), 1.0);
+        assert!(fgbio_posterior(&molecules, &score) > 0.5);
+        assert_eq!(vcf_float(fgbio_posterior(&molecules, &score)), 1.0);
         assert!(learned_posterior(&score) > 0.5);
     }
 
@@ -625,10 +624,11 @@ mod tests {
     #[test]
     fn test_a_tailing_significant_when_biased() {
         let filter = ATailing { distance: 5 };
-        let score = filter.score(&molecules_at(&biased_reads(21..=25), 25), G, T);
+        let molecules = molecules_at(&biased_reads(21..=25), 25);
+        let score = filter.score(&molecules, G, T);
         assert!(score.log_likelihood_ratio.is_some());
-        assert!(fgbio_posterior(&score) < 1e-6);
-        assert_eq!(vcf_float(fgbio_posterior(&score)), 1.547e-8);
+        assert!(fgbio_posterior(&molecules, &score) < 1e-6);
+        assert_eq!(vcf_float(fgbio_posterior(&molecules, &score)), 1.547e-8);
         let learned = learned_posterior(&score);
         assert!(learned > 1e-6 && learned < 1e-5, "{learned}");
     }
@@ -651,10 +651,11 @@ mod tests {
         for start in 21..=25 {
             builder.add_frag(Frag::at(start).bases("T".repeat(50)));
         }
-        let score = filter.score(&molecules_at(&builder, 25), G, T);
+        let molecules = molecules_at(&builder, 25);
+        let score = filter.score(&molecules, G, T);
         assert!(score.log_likelihood_ratio.is_some());
-        assert!(fgbio_posterior(&score) < 1e-4);
-        assert_eq!(vcf_float(fgbio_posterior(&score)), 8.094e-5);
+        assert!(fgbio_posterior(&molecules, &score) < 1e-4);
+        assert_eq!(vcf_float(fgbio_posterior(&molecules, &score)), 8.094e-5);
         let learned = learned_posterior(&score);
         assert!(learned > 1e-3 && learned < 1e-2, "{learned}");
     }
@@ -666,9 +667,10 @@ mod tests {
         let filter = ATailing { distance: 10 };
         let mut builder = SamBuilder::new().read_length(50).base_quality(40);
 
-        let score = filter.score(&molecules_at(&builder, 25), G, T);
+        let molecules = molecules_at(&builder, 25);
+        let score = filter.score(&molecules, G, T);
         assert_eq!(score.log_likelihood_ratio, Some(0.0));
-        assert!((fgbio_posterior(&score) - 0.9999).abs() < 1e-12);
+        assert!((fgbio_posterior(&molecules, &score) - 0.9999).abs() < 1e-12);
 
         for start in 1..=20 {
             for _ in 1..=10 {
@@ -677,9 +679,10 @@ mod tests {
                 }
             }
         }
-        let score = filter.score(&molecules_at(&builder, 25), G, T);
+        let molecules = molecules_at(&builder, 25);
+        let score = filter.score(&molecules, G, T);
         assert_eq!(score.log_likelihood_ratio, Some(0.0));
-        assert!((fgbio_posterior(&score) - 0.000025).abs() < 1e-12);
+        assert!((fgbio_posterior(&molecules, &score) - 0.000025).abs() < 1e-12);
     }
 
     #[test]
@@ -704,7 +707,6 @@ mod tests {
         assert!((score.log_likelihood_ratio.unwrap() - expected).abs() < 1e-12);
         assert_eq!((score.ref_congruent, score.ref_molecules), (1, 4));
         assert_eq!((score.alt_congruent, score.alt_molecules), (1, 1));
-        assert_eq!(score.depth, 5);
     }
 
     #[test]
@@ -731,7 +733,8 @@ mod tests {
             distance: 15,
             scale: Some(15.0),
         };
-        let score = filter.score(&molecules_at(&biased_reads(11..=25), 25), G, T);
+        let molecules = molecules_at(&biased_reads(11..=25), 25);
+        let score = filter.score(&molecules, G, T);
         assert!(score.log_likelihood_ratio.unwrap() > 0.0);
         assert_eq!(score.alt_congruent, 15);
     }

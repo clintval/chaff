@@ -117,10 +117,7 @@ impl CopiedDamage {
         alt_base: u8,
         strand: Strand,
     ) -> Score {
-        let mut score = Score {
-            depth: molecules.len() as u32,
-            ..Score::default()
-        };
+        let mut score = Score::default();
         let mut ref_distances = Vec::new();
         let mut alt = Vec::new();
         for m in molecules {
@@ -302,7 +299,6 @@ mod tests {
         assert_eq!(score.alt_molecules, 0);
         assert_eq!(score.ref_molecules, 1);
         assert_eq!(score.log_likelihood_ratio, Some(0.0));
-        assert_eq!(score.depth, 2);
     }
 
     #[test]
