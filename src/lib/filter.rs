@@ -28,7 +28,7 @@ use crate::classes::{sbs6, Context};
 use crate::copied_damage::{CopiedDamage, DamageSite};
 use crate::evidence::{Evidence, Molecule, PileupEvidence, PileupOptions};
 use crate::io::{add_filter, add_info, vcf_float, VariantReader, VariantWriter};
-use crate::metrics::{write_metrics, StratumMetrics};
+use crate::metrics::{null_fraction, write_metrics, StratumMetrics};
 use crate::prior::{
     fgbio_artifact_prior, learn_artifact_fraction, posterior_mutation, PriorMode, PSEUDOCOUNT,
 };
@@ -293,6 +293,9 @@ pub struct FilterArgs {
     pub options: FilterOptions,
 }
 
+/// A filter and one of its strata.
+type Stratum = (FilterKind, String);
+
 /// One filter's score of one call.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Annotation {
@@ -456,11 +459,8 @@ fn score_call(
 
 /// Learn the priors and fill in every annotation's posterior, returning the
 /// learned artifact fraction of each filter and stratum.
-fn assign_posteriors(
-    calls: &mut [Vec<Annotation>],
-    prior: PriorMode,
-) -> BTreeMap<(FilterKind, String), f64> {
-    let mut ratios: BTreeMap<(FilterKind, String), Vec<f64>> = BTreeMap::new();
+fn assign_posteriors(calls: &mut [Vec<Annotation>], prior: PriorMode) -> BTreeMap<Stratum, f64> {
+    let mut ratios: BTreeMap<Stratum, Vec<f64>> = BTreeMap::new();
     for annotation in calls.iter().flatten() {
         if let Some(llr) = annotation.score.log_likelihood_ratio {
             ratios
@@ -469,7 +469,7 @@ fn assign_posteriors(
                 .push(llr);
         }
     }
-    let fractions: BTreeMap<(FilterKind, String), f64> = ratios
+    let fractions: BTreeMap<Stratum, f64> = ratios
         .into_iter()
         .map(|(key, llrs)| (key, learn_artifact_fraction(&llrs, PSEUDOCOUNT)))
         .collect();
@@ -619,30 +619,24 @@ pub fn filter_vcf(
 fn metrics_rows(
     sample: &str,
     calls: &[Vec<Annotation>],
-    fractions: &BTreeMap<(FilterKind, String), f64>,
+    fractions: &BTreeMap<Stratum, f64>,
     options: &FilterOptions,
 ) -> Vec<StratumMetrics> {
-    let mut rows: BTreeMap<(FilterKind, String), StratumMetrics> = BTreeMap::new();
+    let mut rows: BTreeMap<Stratum, (StratumMetrics, Vec<(u32, f64)>)> = BTreeMap::new();
     for annotation in calls.iter().flatten() {
         let key = (annotation.kind, annotation.stratum.clone());
-        let row = rows.entry(key.clone()).or_insert_with(|| StratumMetrics {
-            sample: sample.to_string(),
-            filter: annotation.kind.to_string(),
-            stratum: annotation.stratum.clone(),
-            calls: 0,
-            filtered: 0,
-            artifact_fraction: match options.prior {
-                PriorMode::Learned => fractions.get(&key).copied(),
-                PriorMode::Fgbio => None,
-            },
-            expected_artifacts: 0.0,
-            alt_molecules: 0,
-            alt_congruent: 0,
-            alt_congruent_fraction: None,
-            ref_molecules: 0,
-            ref_congruent: 0,
-            ref_congruent_fraction: None,
-            asymmetry_p_value: None,
+        let (row, trials) = rows.entry(key.clone()).or_insert_with(|| {
+            let row = StratumMetrics {
+                sample: sample.to_string(),
+                filter: annotation.kind.to_string(),
+                stratum: annotation.stratum.clone(),
+                artifact_fraction: match options.prior {
+                    PriorMode::Learned => fractions.get(&key).copied(),
+                    PriorMode::Fgbio => None,
+                },
+                ..StratumMetrics::default()
+            };
+            (row, Vec::new())
         });
         row.calls += 1;
         let score = &annotation.score;
@@ -650,6 +644,10 @@ fn metrics_rows(
         row.alt_congruent += u64::from(score.alt_congruent);
         row.ref_molecules += u64::from(score.ref_molecules);
         row.ref_congruent += u64::from(score.ref_congruent);
+        if score.alt_molecules > 0 {
+            let null = null_fraction(score.ref_congruent, score.ref_molecules);
+            trials.push((score.alt_molecules, null));
+        }
         if let Some(posterior) = annotation.posterior {
             row.expected_artifacts += 1.0 - posterior;
             if is_filtered(posterior, annotation.kind.threshold(options)) {
@@ -657,7 +655,9 @@ fn metrics_rows(
             }
         }
     }
-    rows.into_values().map(StratumMetrics::finish).collect()
+    rows.into_values()
+        .map(|(row, trials)| row.finish(&trials))
+        .collect()
 }
 
 /// Filter the calls with molecules from `evidence`, writing the metrics when
@@ -952,6 +952,48 @@ mod tests {
                 Some(Some(&Value::Array(Array::Integer(vec![Some(0), Some(0)])))),
             );
         }
+    }
+
+    /// Two calls whose alternate molecules each sit as their own reference
+    /// molecules do are no asymmetry, however different the two calls are; one
+    /// congruent alternate molecule with no congruent reference molecule is
+    /// weak evidence, not certainty.
+    #[test]
+    fn test_the_asymmetry_test_compares_each_call_with_its_own_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = write_fasta(dir.path(), "chr1", &"ACATTCAA".repeat(250));
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        for pos in [1002, 1010, 1018] {
+            vcf.add(Variant::new(pos, &["C", "T"], vec![gt("tumor", "0/1")]));
+        }
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let output = dir.path().join("out.vcf");
+        let near = |base| Molecule::new(base, 40, 10, 100);
+        let far = |base| Molecule::new(base, 40, 100, 10);
+        let molecules = |refs: (usize, usize), alts: (usize, usize)| -> Vec<Molecule> {
+            let mut molecules = vec![near(b'C'); refs.0];
+            molecules.extend(vec![far(b'C'); refs.1]);
+            molecules.extend(vec![near(b'T'); alts.0]);
+            molecules.extend(vec![far(b'T'); alts.1]);
+            molecules
+        };
+        let options = FilterOptions {
+            filters: vec![FilterKind::CopiedDamage],
+            ..FilterOptions::default()
+        };
+        let mut table = MoleculeTable::new();
+        table.insert("chr1", 1002, molecules((100, 900), (1, 9)));
+        table.insert("chr1", 1010, molecules((90, 10), (90, 10)));
+        let mut reference = Reference::open(&reference).unwrap();
+        let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
+        let p = rows[0].asymmetry_p_value.unwrap();
+        assert!(p > 0.1, "{p}");
+
+        let mut table = MoleculeTable::new();
+        table.insert("chr1", 1018, molecules((0, 50), (1, 0)));
+        let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
+        let p = rows[0].asymmetry_p_value.unwrap();
+        assert!((p - 1.0 / 52.0).abs() < 1e-12, "{p}");
     }
 
     #[test]

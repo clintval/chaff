@@ -63,10 +63,10 @@ grep '^##FILTER=<ID=CopiedDamage' calls.chaff.vcf
 
 ### Reading the Metrics
 
-`--metrics` writes one row per filter and stratum, with the learned artifact fraction, the expected number of artifact calls, and a binomial test of the alternate molecules against the reference molecules:
+The `--metrics` file has one row per filter and stratum, with the learned artifact fraction, the expected number of artifact calls, and a test of whether more alternate molecules sit where the artifact puts them than each call's own reference molecules predict:
 
 ```console
-cut -f 2-7,14 tumor.chaff.tsv | head -3 | column -t
+cut -f 2-7,15 tumor.chaff.tsv | head -3 | column -t
 ```
 
 ```text

@@ -87,7 +87,7 @@ fn test_the_readme_shows_the_scored_calls_header_and_metrics() {
         .take(3)
         .map(|line| {
             let fields: Vec<&str> = line.split('\t').collect();
-            [1, 2, 3, 4, 5, 6, 13]
+            [1, 2, 3, 4, 5, 6, 14]
                 .map(|i| fields[i].to_string())
                 .to_vec()
         })

@@ -41,7 +41,6 @@ mimalloc = "0.1"
 noodles = { version = "0.115", features = ["bam", "bcf", "bgzf", "core", "fasta", "sam", "vcf"] }
 noodles-bgzf = { version = "0.51", features = ["libdeflate"] }
 serde = { version = "1", features = ["derive"] }
-statrs = "0.18"
 streampile = { git = "https://github.com/clintval/streampile", rev = "c9e80f7f06178016668a84652353e2734a31ce03" }
 tempfile = "3"
 

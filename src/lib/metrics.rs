@@ -7,12 +7,17 @@
 //! (NanoSeq's strand assignment by nearest 5' end), within the distance of the
 //! relevant template end for the read-end filters.
 //!
-//! The asymmetry test is a one-sided binomial test of the congruent alternate
-//! molecules against the congruent fraction of the reference molecules:
-//! `P(X >= alt_congruent)` for `X ~ Binomial(alt_molecules,
-//! ref_congruent_fraction)`. When fragment geometry is symmetric the
-//! reference fraction is one half, NanoSeq's null; using the reference
-//! molecules keeps capture and length skew out of the test.
+//! The asymmetry test asks whether more alternate molecules are congruent
+//! than each call's own reference molecules predict. Call `i` contributes its
+//! `a_i` alternate molecules, each congruent under the null with probability
+//! `f_i = (ref_congruent_i + 1) / (ref_molecules_i + 2)`, its reference
+//! molecules' congruent fraction smoothed by one molecule each way, so a call
+//! without reference molecules has NanoSeq's null of one half. The p-value is
+//! `P(X >= alt_congruent)` for `X` the sum of the calls' `Binomial(a_i, f_i)`,
+//! computed exactly. Because each call is measured against its own reference
+//! molecules, skew that a site's alleles share, such as capture or fragment
+//! length, stays out of the test, and calls whose alternate molecules follow
+//! their own reference molecules cannot add up to an asymmetric stratum.
 
 use std::io::BufWriter;
 use std::path::Path;
@@ -20,7 +25,6 @@ use std::path::Path;
 use anyhow::Result;
 use csv::{Terminator, WriterBuilder};
 use serde::{Serialize, Serializer};
-use statrs::distribution::{Binomial, DiscreteCDF};
 
 use crate::io::StagedFile;
 
@@ -48,6 +52,10 @@ pub struct StratumMetrics {
     pub alt_molecules: u64,
     /// Alternate molecules congruent with the artifact.
     pub alt_congruent: u64,
+    /// Alternate molecules congruent under the asymmetry test's null, the sum
+    /// over calls of `a_i f_i`.
+    #[serde(serialize_with = "six_digits_or_empty")]
+    pub expected_alt_congruent: Option<f64>,
     /// `alt_congruent / alt_molecules`.
     #[serde(serialize_with = "six_digits_or_empty")]
     pub alt_congruent_fraction: Option<f64>,
@@ -58,7 +66,7 @@ pub struct StratumMetrics {
     /// `ref_congruent / ref_molecules`.
     #[serde(serialize_with = "six_digits_or_empty")]
     pub ref_congruent_fraction: Option<f64>,
-    /// The one-sided binomial asymmetry p-value.
+    /// The one-sided asymmetry p-value, `P(X >= alt_congruent)`.
     #[serde(serialize_with = "six_digits_or_empty")]
     pub asymmetry_p_value: Option<f64>,
 }
@@ -79,22 +87,36 @@ fn six_digits_or_empty<S: Serializer>(
     }
 }
 
-/// `P(X >= k)` for `X ~ Binomial(n, p)`.
-pub fn binomial_upper_tail(k: u64, n: u64, p: f64) -> f64 {
+/// The probability under the asymmetry test's null that one of a call's
+/// alternate molecules is congruent: its reference molecules' congruent
+/// fraction, smoothed by one molecule each way.
+pub fn null_fraction(ref_congruent: u32, ref_molecules: u32) -> f64 {
+    (f64::from(ref_congruent) + 1.0) / (f64::from(ref_molecules) + 2.0)
+}
+
+/// `P(X >= k)` for `X` the sum of independent `Binomial(n_i, p_i)`, one per
+/// `(n_i, p_i)`, by convolving their distributions one trial at a time.
+pub fn poisson_binomial_upper_tail(k: u64, trials: &[(u32, f64)]) -> f64 {
+    let n: usize = trials.iter().map(|&(n, _)| n as usize).sum();
     if k == 0 {
         return 1.0;
     }
-    if k > n {
+    if k as usize > n {
         return 0.0;
     }
-    if p <= 0.0 {
-        return 0.0;
+    let mut pmf = vec![0.0; n + 1];
+    pmf[0] = 1.0;
+    let mut most = 0;
+    for &(count, p) in trials {
+        for _ in 0..count {
+            most += 1;
+            for j in (1..=most).rev() {
+                pmf[j] = pmf[j] * (1.0 - p) + pmf[j - 1] * p;
+            }
+            pmf[0] *= 1.0 - p;
+        }
     }
-    if p >= 1.0 {
-        return 1.0;
-    }
-    let binomial = Binomial::new(p, n).expect("a probability in (0, 1)");
-    binomial.sf(k - 1)
+    pmf[k as usize..].iter().sum::<f64>().min(1.0)
 }
 
 /// A ratio, or `None` over zero.
@@ -103,14 +125,16 @@ pub fn fraction(numerator: u64, denominator: u64) -> Option<f64> {
 }
 
 impl StratumMetrics {
-    /// Fill the derived fractions and the asymmetry test from the counts.
-    pub fn finish(mut self) -> Self {
+    /// Fill the derived fractions and the asymmetry test from the counts and
+    /// each call's alternate molecules and null fraction, as `(a_i, f_i)`.
+    pub fn finish(mut self, trials: &[(u32, f64)]) -> Self {
         self.alt_congruent_fraction = fraction(self.alt_congruent, self.alt_molecules);
         self.ref_congruent_fraction = fraction(self.ref_congruent, self.ref_molecules);
-        self.asymmetry_p_value = match (self.alt_molecules, self.ref_congruent_fraction) {
-            (n, Some(p)) if n > 0 => Some(binomial_upper_tail(self.alt_congruent, n, p)),
-            _ => None,
-        };
+        let measured = self.alt_molecules > 0;
+        self.expected_alt_congruent =
+            measured.then(|| trials.iter().map(|&(n, p)| f64::from(n) * p).sum());
+        self.asymmetry_p_value =
+            measured.then(|| poisson_binomial_upper_tail(self.alt_congruent, trials));
         self
     }
 }
@@ -155,36 +179,49 @@ mod tests {
             expected_artifacts: 1.2,
             alt_molecules: 10,
             alt_congruent: 9,
-            alt_congruent_fraction: None,
             ref_molecules: 100,
             ref_congruent: 50,
-            ref_congruent_fraction: None,
-            asymmetry_p_value: None,
+            ..StratumMetrics::default()
         }
     }
 
+    /// One call with all ten alternate molecules at a null of one half.
+    const TRIALS: [(u32, f64); 1] = [(10, 0.5)];
+
     #[test]
-    fn test_binomial_upper_tail() {
-        assert_eq!(binomial_upper_tail(0, 10, 0.5), 1.0);
-        assert!((binomial_upper_tail(10, 10, 0.5) - 0.5f64.powi(10)).abs() < 1e-12);
-        assert!((binomial_upper_tail(9, 10, 0.5) - 11.0 / 1024.0).abs() < 1e-12);
-        assert_eq!(binomial_upper_tail(1, 10, 0.0), 0.0);
-        assert_eq!(binomial_upper_tail(3, 10, 1.0), 1.0);
-        assert_eq!(binomial_upper_tail(11, 10, 0.5), 0.0);
+    fn test_poisson_binomial_upper_tail() {
+        let tail = poisson_binomial_upper_tail;
+        assert_eq!(tail(0, &TRIALS), 1.0);
+        assert!((tail(10, &TRIALS) - 0.5f64.powi(10)).abs() < 1e-12);
+        assert!((tail(9, &TRIALS) - 11.0 / 1024.0).abs() < 1e-12);
+        assert_eq!(tail(1, &[(10, 0.0)]), 0.0);
+        assert_eq!(tail(3, &[(10, 1.0)]), 1.0);
+        assert_eq!(tail(11, &TRIALS), 0.0);
+        let mixed = [(1, 0.1), (1, 0.9)];
+        assert!((tail(1, &mixed) - 0.91).abs() < 1e-12);
+        assert!((tail(2, &mixed) - 0.09).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_null_fraction_is_smoothed_by_one_molecule_each_way() {
+        assert_eq!(null_fraction(0, 0), 0.5);
+        assert_eq!(null_fraction(0, 50), 1.0 / 52.0);
+        assert_eq!(null_fraction(9, 10), 10.0 / 12.0);
     }
 
     #[test]
     fn test_finish_fills_fractions_and_the_asymmetry_test() {
-        let row = row().finish();
+        let row = row().finish(&TRIALS);
         assert_eq!(row.alt_congruent_fraction, Some(0.9));
         assert_eq!(row.ref_congruent_fraction, Some(0.5));
+        assert_eq!(row.expected_alt_congruent, Some(5.0));
         assert!((row.asymmetry_p_value.unwrap() - 11.0 / 1024.0).abs() < 1e-12);
         let empty = StratumMetrics {
             alt_molecules: 0,
             alt_congruent: 0,
             ..row
         }
-        .finish();
+        .finish(&[]);
         assert_eq!(empty.asymmetry_p_value, None);
         assert_eq!(empty.alt_congruent_fraction, None);
     }
@@ -193,7 +230,7 @@ mod tests {
     fn test_write_metrics_has_a_header_and_rows() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested/metrics.tsv");
-        write_metrics(&path, &[row().finish()]).unwrap();
+        write_metrics(&path, &[row().finish(&TRIALS)]).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2);
@@ -214,7 +251,7 @@ mod tests {
             artifact_fraction: None,
             ..row()
         };
-        write_metrics(&path, &[learned.finish(), fgbio.finish()]).unwrap();
+        write_metrics(&path, &[learned.finish(&TRIALS), fgbio.finish(&TRIALS)]).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let rows: Vec<Vec<&str>> = text
             .lines()
@@ -222,7 +259,8 @@ mod tests {
             .map(|l| l.split('\t').collect())
             .collect();
         assert_eq!(rows[0][5..7], ["0.333333", "0.666667"]);
-        assert_eq!(rows[0][13], "0.0107422");
+        assert_eq!(rows[0][9], "5.0");
+        assert_eq!(rows[0][14], "0.0107422");
         assert_eq!(rows[1][5], "");
     }
 
@@ -232,7 +270,7 @@ mod tests {
         let path = dir.path().join("metrics.tsv");
         write_metrics(&path, &[]).unwrap();
         let empty = std::fs::read_to_string(&path).unwrap();
-        write_metrics(&path, &[row().finish()]).unwrap();
+        write_metrics(&path, &[row().finish(&TRIALS)]).unwrap();
         let full = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
             empty.lines().collect::<Vec<_>>(),
