@@ -9,7 +9,8 @@
 //! Each scenario runs in its own temporary working directory: `Given a file
 //! "..." containing:` writes a fixture there, `Given a BAM "..." sorted by
 //! "..."` writes an empty BAM with that `@HD SO`, and the `I run` step executes
-//! the binary with that directory as the cwd.
+//! the binary with that directory as the cwd. A `\t` in a fixture or an
+//! expected stdout is a tab.
 
 use std::fs;
 use std::num::NonZeroUsize;
@@ -113,6 +114,7 @@ async fn exit_code_is(world: &mut ChaffWorld, expected: i32) {
 
 #[then(regex = r#"^stdout contains "(.*)"$"#)]
 async fn stdout_contains(world: &mut ChaffWorld, needle: String) {
+    let needle = needle.replace("\\t", "\t");
     assert!(
         world.stdout.contains(&needle),
         "stdout did not contain {needle:?}\nstdout:\n{}",

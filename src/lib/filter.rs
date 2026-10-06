@@ -1090,6 +1090,44 @@ mod tests {
     }
 
     #[test]
+    fn test_bcf_and_bgzf_inputs_score_as_a_plain_vcf_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(10, &["G", "T"], vec![gt("tumor", "0/1")]));
+        let plain = vcf.write(&dir.path().join("in.vcf"));
+        let mut table = MoleculeTable::new();
+        let mut molecules: Vec<Molecule> =
+            (0..20).map(|d| Molecule::new(b'G', 30, d, 90)).collect();
+        molecules.push(Molecule::new(b'T', 30, 0, 90));
+        table.insert("chr1", 10, molecules);
+        let copy = FilterOptions {
+            filters: Vec::new(),
+            ..FilterOptions::default()
+        };
+        let options = FilterOptions {
+            filters: vec![FilterKind::ATailing, FilterKind::EndRepairFillIn],
+            ..FilterOptions::default()
+        };
+        let scored = |input: &Path| {
+            let output = dir.path().join("out.vcf");
+            filter_vcf(input, &output, &mut table.clone(), None, &options).unwrap();
+            let (_, records) = read_records(&output);
+            let record = &records[0];
+            (
+                float(record, ATailing::INFO),
+                float(record, EndRepairFillIn::INFO),
+            )
+        };
+        let expected = scored(&plain);
+        assert!(expected.0.is_some() && expected.1.is_some());
+        for name in ["in.bcf", "in.vcf.gz"] {
+            let input = dir.path().join(name);
+            filter_vcf(&plain, &input, &mut table.clone(), None, &copy).unwrap();
+            assert_eq!(scored(&input), expected, "{name}");
+        }
+    }
+
+    #[test]
     fn test_copied_damage_requires_a_reference() {
         let dir = tempfile::tempdir().unwrap();
         let input = VcfBuilder::new(&["tumor"]).write(&dir.path().join("in.vcf"));
