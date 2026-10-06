@@ -725,8 +725,7 @@ pub fn run_filter(args: &FilterArgs) -> Result<()> {
         .read_header()
         .context("failed to read the BAM header")?;
     let engine = streampile::StreamingPileupBuilder::new(reader, &header)?
-        .exclude_flags(Flags::SECONDARY | Flags::DUPLICATE | Flags::SUPPLEMENTARY)
-        .without_overlaps(false);
+        .exclude_flags(Flags::SECONDARY | Flags::DUPLICATE | Flags::SUPPLEMENTARY);
     run_filter_on(args, engine)
 }
 

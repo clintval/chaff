@@ -1777,7 +1777,7 @@ dependencies = [
 [[package]]
 name = "streampile"
 version = "0.1.0"
-source = "git+https://github.com/clintval/streampile?rev=5792224908eaf9f325fbbd2fe5658600670c1094#5792224908eaf9f325fbbd2fe5658600670c1094"
+source = "git+https://github.com/clintval/streampile?rev=de4a34a78c87d1fffa49a0f838d3fb0c9bb73666#de4a34a78c87d1fffa49a0f838d3fb0c9bb73666"
 dependencies = [
  "bstr",
  "noodles",
