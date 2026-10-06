@@ -26,9 +26,10 @@ use crate::evidence::Molecule;
 /// What a filter extracts from one call's molecules.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Score {
-    /// `ln P(molecules | artifact) - ln P(molecules | mutation)`, or `None`
-    /// when alternate molecules are seen but no reference molecule can calibrate
-    /// the null.
+    /// `ln P(molecules | artifact) - ln P(molecules | mutation)`, always
+    /// finite, or `None` when alternate molecules are seen but no reference
+    /// molecule can calibrate the null, or, for the decay models, when no
+    /// alternate molecule is measured.
     pub log_likelihood_ratio: Option<f64>,
     /// Alternate molecules measured.
     pub alt_molecules: u32,
@@ -96,15 +97,15 @@ pub fn window_score(
 /// since a base error lands anywhere a reference molecule could. The weights
 /// are taken relative to the nearest reference molecule's and the terms summed
 /// in log space, so the ratio is finite however far a molecule sits from the
-/// end. Returns `None` when alternate distances exist but no reference
-/// distance does.
+/// end. Returns `None` without both a reference and an alternate distance, as
+/// such a call carries no evidence either way.
 pub fn tilt_log_likelihood_ratio(
     ref_distances: &[usize],
     alt: &[(usize, u8)],
     scale: f64,
 ) -> Option<f64> {
     if alt.is_empty() {
-        return Some(0.0);
+        return None;
     }
     let nearest = *ref_distances.iter().min()? as f64;
     let ln_w = |d: usize| -(d as f64 - nearest) / scale;
@@ -737,7 +738,7 @@ mod tests {
         let far = tilt_log_likelihood_ratio(&refs, &[(80, 90), (95, 90)], 15.0).unwrap();
         assert!(near > 0.0, "{near}");
         assert!(far < 0.0, "{far}");
-        assert_eq!(tilt_log_likelihood_ratio(&refs, &[], 15.0), Some(0.0));
+        assert_eq!(tilt_log_likelihood_ratio(&refs, &[], 15.0), None);
         assert_eq!(tilt_log_likelihood_ratio(&[], &[(1, 30)], 15.0), None);
     }
 

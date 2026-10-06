@@ -297,7 +297,7 @@ mod tests {
         let score = filter.score(&molecules, C, T, Strand::Forward);
         assert_eq!(score.alt_molecules, 0);
         assert_eq!(score.ref_molecules, 1);
-        assert_eq!(score.log_likelihood_ratio, Some(0.0));
+        assert_eq!(score.log_likelihood_ratio, None);
     }
 
     #[test]

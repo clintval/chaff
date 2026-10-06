@@ -913,6 +913,47 @@ mod tests {
         assert!(rows[0].artifact_fraction.unwrap().is_finite());
     }
 
+    /// Alternate molecules that copied damage cannot place, here without the
+    /// template's far end, leave the call without a posterior or FILTER under
+    /// either prior; its counts still show that none was measured.
+    #[test]
+    fn test_copied_damage_without_a_measured_alternate_molecule_is_unscored() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = write_fasta(dir.path(), "chr1", &"ACATTCAA".repeat(250));
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(1002, &["C", "T"], vec![gt("tumor", "0/1")]));
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let output = dir.path().join("out.vcf");
+        let mut table = MoleculeTable::new();
+        let mut molecules: Vec<Molecule> = (0..100)
+            .map(|d| Molecule::new(b'C', 40, d, 150 - d))
+            .collect();
+        molecules.extend((0..5).map(|d| Molecule {
+            right: None,
+            ..Molecule::new(b'T', 40, 40 + d, 0)
+        }));
+        table.insert("chr1", 1002, molecules);
+        for prior in [PriorMode::Fgbio, PriorMode::Learned] {
+            let options = FilterOptions {
+                filters: vec![FilterKind::CopiedDamage],
+                copied_damage_threshold: Some(0.05),
+                prior,
+                ..FilterOptions::default()
+            };
+            let mut reference = Reference::open(&reference).unwrap();
+            filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
+            let (_, records) = read_records(&output);
+            let record = &records[0];
+            assert_eq!(float(record, CopiedDamage::INFO_POSTERIOR), None, "{prior}");
+            assert_eq!(float(record, CopiedDamage::INFO_RATIO), None, "{prior}");
+            assert!(record.filters().as_ref().is_empty(), "{prior}");
+            assert_eq!(
+                record.info().get(CopiedDamage::INFO_ALT),
+                Some(Some(&Value::Array(Array::Integer(vec![Some(0), Some(0)])))),
+            );
+        }
+    }
+
     #[test]
     fn test_copied_damage_requires_a_reference() {
         let dir = tempfile::tempdir().unwrap();
