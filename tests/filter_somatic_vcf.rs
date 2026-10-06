@@ -700,3 +700,41 @@ fn test_a_tailing_breaks_a_tie_at_the_first_read_s_own_end_as_fgbio() {
     let records = run(&dir, &input, &reads, options).unwrap();
     assert_eq!(float(&records[0], ATailing::INFO), Some(1.0));
 }
+
+/// A VCF that orders its contigs unlike the BAM fails at its first call out
+/// of the BAM's order, which the error names by its 1-based position, and one
+/// with a contig the BAM lacks names it.
+#[test]
+fn test_contigs_ordered_unlike_the_bam_or_missing_from_it_fail_by_name() {
+    let dir = TempDir::new().unwrap();
+    let input = dir.path().join("swapped.vcf");
+    let lines = [
+        "##fileformat=VCFv4.2",
+        "##contig=<ID=chr2,length=200000000>",
+        "##contig=<ID=chr1,length=200000000>",
+        "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">",
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ttumor",
+        "chr2\t100\t.\tC\tA\t.\t.\t.\tGT\t0/1",
+        "chr1\t100\t.\tC\tA\t.\t.\t.\tGT\t0/1",
+    ];
+    std::fs::write(&input, lines.join("\n") + "\n").unwrap();
+    let error = run(&dir, &input, &tumor_bam(), fgbio_options()).unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("chr1:100"), "{message}");
+    assert!(message.contains("chr2:100"), "{message}");
+    assert!(!message.contains(":99"), "{message}");
+
+    let lines = [
+        &lines[..3],
+        &["##contig=<ID=chrUn,length=1000>"],
+        &lines[3..5],
+    ];
+    let unknown = lines.concat().join("\n") + "\nchrUn\t100\t.\tC\tA\t.\t.\t.\tGT\t0/1\n";
+    std::fs::write(&input, unknown).unwrap();
+    let error = run(&dir, &input, &tumor_bam(), fgbio_options()).unwrap_err();
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("the BAM header has no contig chrUn"),
+        "{message}"
+    );
+}

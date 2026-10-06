@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context as _, Result};
+use anyhow::{anyhow, Context as _, Result};
 use noodles::core::Position;
 use noodles::sam::alignment::record::Flags;
 use streampile::{
@@ -136,7 +136,25 @@ impl<'f, S: RecordSource> PileupEvidence<'f, S> {
 
 impl<S: RecordSource> Evidence for PileupEvidence<'_, S> {
     fn molecules(&mut self, contig: &str, pos: Position) -> Result<Vec<Molecule>> {
-        let pileup = self.builder.pileup(contig, usize::from(pos) - 1)?;
+        let pileup = self
+            .builder
+            .pileup(contig, usize::from(pos) - 1)
+            .map_err(|error| match error {
+                streampile::Error::Backwards {
+                    contig,
+                    position,
+                    from_contig,
+                    from_position,
+                } => anyhow!(
+                    "the VCF/BCF reaches {contig}:{} after {from_contig}:{}, which the BAM sorts after it, so both must order their contigs alike",
+                    position + 1,
+                    from_position + 1
+                ),
+                streampile::Error::UnknownContig(contig) => {
+                    anyhow!("the BAM header has no contig {contig}")
+                }
+                error => error.into(),
+            })?;
         let mut molecules = Vec::new();
         for template in pileup.templates(AGREEMENT, DISAGREEMENT) {
             let molecule = molecule(&template, pileup.min_base_quality())
