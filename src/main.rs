@@ -3,7 +3,7 @@ use std::process;
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Error, Result};
+use anyhow::{Error, Result};
 use chaff::classes::{validate_classes, DamageClass};
 use chaff::copied_damage::CopiedDamage;
 use chaff::filter::{run_filter, FilterArgs, FilterKind, FilterOptions};
@@ -11,8 +11,9 @@ use chaff::prior::PriorMode;
 use chaff::read_end::{ATailing, EndRepairFillIn};
 use chaff::template::ReadFilter;
 use clap::builder::styling::{AnsiColor, Effects, Style, Styles};
+use clap::error::ErrorKind;
 use clap::parser::ValueSource;
-use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
+use clap::{ArgMatches, Command, CommandFactory, FromArgMatches, Parser};
 use env_logger::Env;
 use log::error;
 use mimalloc::MiMalloc;
@@ -298,23 +299,34 @@ fn filter_options(kind: FilterKind) -> &'static [&'static str] {
 }
 
 impl Cli {
-    /// Validate the options and gather them into [`FilterArgs`], rejecting an
-    /// option given on the command line for a filter `--filters` leaves out.
-    fn into_args(self, matches: &ArgMatches) -> Result<FilterArgs> {
+    /// Reject, as usage errors of `cmd`, an option typed on the command line for
+    /// a filter `--filters` leaves out, and damage classes that repeat a change.
+    fn validate(&self, matches: &ArgMatches, cmd: &mut Command) -> Result<(), clap::Error> {
         for kind in FilterKind::ALL {
             if self.filters.contains(&kind) {
                 continue;
             }
             for id in filter_options(kind) {
-                if matches.value_source(id) == Some(ValueSource::CommandLine) {
-                    bail!(
-                        "--{} applies only to the {kind} filter, which --filters leaves out",
-                        id.replace('_', "-")
-                    );
+                if matches.value_source(id) != Some(ValueSource::CommandLine) {
+                    continue;
                 }
+                let arg = cmd
+                    .get_arguments()
+                    .find(|arg| arg.get_id() == id)
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| id.to_string());
+                let message = format!(
+                    "the argument '{arg}' applies only to the {kind} filter, which '--filters' leaves out"
+                );
+                return Err(cmd.error(ErrorKind::ArgumentConflict, message));
             }
         }
-        validate_classes(&self.copied_damage_classes)?;
+        validate_classes(&self.copied_damage_classes)
+            .map_err(|error| cmd.error(ErrorKind::ValueValidation, error))
+    }
+
+    /// Gather the options into [`FilterArgs`].
+    fn into_args(self) -> FilterArgs {
         let options = FilterOptions {
             sample: self.sample,
             filters: self.filters,
@@ -334,7 +346,7 @@ impl Cli {
             },
             a_tailing_threshold: self.a_tailing_threshold,
         };
-        Ok(FilterArgs {
+        FilterArgs {
             input: self.input,
             output: self.output,
             bam: self.bam,
@@ -346,7 +358,7 @@ impl Cli {
                 paired_reads_only: self.paired_reads_only,
             },
             options,
-        })
+        }
     }
 }
 
@@ -527,11 +539,13 @@ fn main() -> Result<(), Error> {
         .init();
 
     // Help text is hand-wrapped, and clap would count the injected ANSI escapes as width.
-    let cmd = decorate_help(Cli::command().term_width(usize::MAX), color);
-    let matches = cmd.get_matches();
+    let mut cmd = decorate_help(Cli::command().term_width(usize::MAX), color);
+    let matches = cmd.get_matches_mut();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    cli.validate(&matches, &mut cmd)
+        .unwrap_or_else(|e| e.exit());
 
-    match cli.into_args(&matches).and_then(|args| run_filter(&args)) {
+    match run_filter(&cli.into_args()) {
         Ok(()) => process::exit(0),
         Err(e) => {
             error!("{e:#}");
@@ -546,23 +560,38 @@ mod tests {
 
     use super::*;
 
-    fn args(extra: &[&str]) -> Result<FilterArgs> {
+    fn args(extra: &[&str]) -> Result<FilterArgs, clap::Error> {
         let base = ["chaff", "-i", "in.vcf", "-o", "out.vcf", "-b", "in.bam"];
-        let matches = Cli::command().try_get_matches_from(base.iter().chain(extra))?;
-        Cli::from_arg_matches(&matches)?.into_args(&matches)
+        let mut cmd = Cli::command().color(clap::ColorChoice::Never);
+        let matches = cmd.try_get_matches_from_mut(base.iter().chain(extra))?;
+        let cli = Cli::from_arg_matches(&matches)?;
+        cli.validate(&matches, &mut cmd)?;
+        Ok(cli.into_args())
     }
 
     #[rstest]
-    #[case(&["--filters", "a-tailing", "--copied-damage-threshold", "0.05"], "--copied-damage-threshold applies only to the copied-damage filter")]
-    #[case(&["--filters", "a-tailing", "--copied-damage-classes", "C>T"], "--copied-damage-classes applies only to the copied-damage filter")]
-    #[case(&["--filters", "copied-damage", "--a-tailing-distance", "2"], "--a-tailing-distance applies only to the a-tailing filter")]
-    #[case(&["--filters", "copied-damage", "--a-tailing-p-value", "0.01"], "--a-tailing-threshold applies only to the a-tailing filter")]
-    #[case(&["--filters", "a-tailing", "--end-repair-fill-in-scale", "15"], "--end-repair-fill-in-scale applies only to the end-repair-fill-in filter")]
-    fn test_an_option_of_a_filter_left_out_is_an_error(
+    #[case(&["--filters", "a-tailing", "--copied-damage-threshold", "0.05"], "the argument '--copied-damage-threshold <P>' applies only to the copied-damage filter")]
+    #[case(&["--filters", "a-tailing", "--copied-damage-classes", "C>T"], "the argument '--copied-damage-classes <CLASS>' applies only to the copied-damage filter")]
+    #[case(&["--filters", "copied-damage", "--a-tailing-distance", "2"], "the argument '--a-tailing-distance <BP>' applies only to the a-tailing filter")]
+    #[case(&["--filters", "copied-damage", "--a-tailing-p-value", "0.01"], "the argument '--a-tailing-threshold <P>' applies only to the a-tailing filter")]
+    #[case(&["--filters", "a-tailing", "--end-repair-fill-in-scale", "15"], "the argument '--end-repair-fill-in-scale <BP>' applies only to the end-repair-fill-in filter")]
+    fn test_an_option_of_a_filter_left_out_is_a_usage_error(
         #[case] extra: &[&str],
         #[case] message: &str,
     ) {
         let error = args(extra).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+        assert_eq!(error.exit_code(), 2);
+        assert!(error.to_string().contains(message), "{error}");
+        assert!(error.to_string().contains("Usage: chaff"), "{error}");
+    }
+
+    #[test]
+    fn test_a_damage_class_and_its_reverse_complement_are_a_usage_error() {
+        let error = args(&["--copied-damage-classes", "C>T,G>A"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+        assert_eq!(error.exit_code(), 2);
+        let message = "damage classes C>T and G>A describe the same change on opposite strands";
         assert!(error.to_string().contains(message), "{error}");
     }
 

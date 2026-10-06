@@ -38,8 +38,8 @@ Feature: CLI contract
 
   Scenario: a damage class and its reverse complement cannot both be given
     When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --copied-damage-classes C>T,G>A`
-    Then the exit code is 1
-    And stderr contains "describe the same change on opposite strands"
+    Then the exit code is 2
+    And stderr contains "error: damage classes C>T and G>A describe the same change on opposite strands"
 
   Scenario: thresholds are probabilities
     When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --a-tailing-threshold 2`
@@ -77,8 +77,8 @@ Feature: CLI contract
 
   Scenario: an option of a filter left out of --filters is an error
     When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --sample tumor --filters a-tailing --copied-damage-threshold 0.05`
-    Then the exit code is 1
-    And stderr contains "--copied-damage-threshold applies only to the copied-damage filter, which --filters leaves out"
+    Then the exit code is 2
+    And stderr contains "error: the argument '--copied-damage-threshold <P>' applies only to the copied-damage filter, which '--filters' leaves out"
 
   Scenario: the end repair fill-in scale replaces the window only in the posterior
     When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --sample tumor --filters end-repair-fill-in --end-repair-fill-in-distance 10 --end-repair-fill-in-scale 15`
