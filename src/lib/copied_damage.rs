@@ -28,7 +28,7 @@
 use crate::call::Genotype;
 use crate::classes::{Context, DamageClass, Strand};
 use crate::evidence::Molecule;
-use crate::read_end::{tilt_log_likelihood_ratio, Score};
+use crate::read_end::{molecule_tilt_ratio, Score};
 
 /// The copied damage filter.
 #[derive(Clone, Debug, PartialEq)]
@@ -118,24 +118,23 @@ impl CopiedDamage {
         strand: Strand,
     ) -> Score {
         let mut score = Score::default();
-        let mut ref_distances = Vec::new();
-        let mut alt = Vec::new();
         for m in molecules {
             let Some((d, length)) = Self::distance(m, strand) else {
                 continue;
             };
-            let proximal = Self::is_five_prime_proximal(d, length);
+            let proximal = u32::from(Self::is_five_prime_proximal(d, length));
             if m.base == ref_base {
                 score.ref_molecules += 1;
-                score.ref_congruent += u32::from(proximal);
-                ref_distances.push(d);
+                score.ref_congruent += proximal;
             } else if m.base == alt_base {
                 score.alt_molecules += 1;
-                score.alt_congruent += u32::from(proximal);
-                alt.push((d, m.quality));
+                score.alt_congruent += proximal;
             }
         }
-        score.log_likelihood_ratio = tilt_log_likelihood_ratio(&ref_distances, &alt, self.scale);
+        score.log_likelihood_ratio =
+            molecule_tilt_ratio(molecules, ref_base, alt_base, self.scale, |m| {
+                Self::distance(m, strand).map(|(d, _)| d)
+            });
         score
     }
 }

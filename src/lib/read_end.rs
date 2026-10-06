@@ -118,6 +118,28 @@ pub fn tilt_log_likelihood_ratio(
     )
 }
 
+/// The [`tilt_log_likelihood_ratio`] of a call's reference and alternate
+/// molecules at the 0-based distances `distance` gives them, leaving out the
+/// molecules it gives none.
+pub fn molecule_tilt_ratio(
+    molecules: &[Molecule],
+    ref_base: u8,
+    alt_base: u8,
+    scale: f64,
+    distance: impl Fn(&Molecule) -> Option<usize>,
+) -> Option<f64> {
+    let mut ref_distances = Vec::new();
+    let mut alt = Vec::new();
+    for m in molecules {
+        match distance(m) {
+            Some(d) if m.base == ref_base => ref_distances.push(d),
+            Some(d) if m.base == alt_base => alt.push((d, m.quality)),
+            _ => {}
+        }
+    }
+    tilt_log_likelihood_ratio(&ref_distances, &alt, scale)
+}
+
 /// The 1-based distance of the site from the nearest template end the
 /// molecule knows.
 fn nearest_end(m: &Molecule) -> Option<usize> {
@@ -176,18 +198,10 @@ impl EndRepairFillIn {
     pub fn score(&self, molecules: &[Molecule], ref_base: u8, alt_base: u8) -> Score {
         let mut score = window_score(molecules, ref_base, alt_base, |m| self.is_congruent(m));
         if let Some(scale) = self.scale {
-            let distance = |m: &Molecule| nearest_end(m).map(|d| d - 1);
-            let ref_distances: Vec<usize> = molecules
-                .iter()
-                .filter(|m| m.base == ref_base)
-                .filter_map(distance)
-                .collect();
-            let alt: Vec<(usize, u8)> = molecules
-                .iter()
-                .filter(|m| m.base == alt_base)
-                .filter_map(|m| distance(m).map(|d| (d, m.quality)))
-                .collect();
-            score.log_likelihood_ratio = tilt_log_likelihood_ratio(&ref_distances, &alt, scale);
+            score.log_likelihood_ratio =
+                molecule_tilt_ratio(molecules, ref_base, alt_base, scale, |m| {
+                    nearest_end(m).map(|d| d - 1)
+                });
         }
         score
     }
