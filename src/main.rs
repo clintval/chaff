@@ -88,10 +88,13 @@ pub(crate) const CARGO_STYLING: Styles = Styles::styled()
 ///   chaff -i calls.vcf.gz -b tumor.bam -r ref.fa -o out.vcf.gz \
 ///       --metrics tumor.chaff.tsv
 ///
-///  2. Apply the copied damage FILTER at a posterior of 0.05 or below:
+///  2. Filter an end-repaired, A-tailed duplex library with suspected deamination:
 ///
-///   chaff -i calls.vcf.gz -b tumor.bam -r ref.fa -o out.vcf.gz \
-///       --copied-damage-threshold 0.05
+///   chaff -i calls.vcf.gz -b tumor.bam -r ref.fa -s tumor \
+///       -o calls.chaff.vcf.gz --metrics tumor.chaff.tsv \
+///       --filters copied-damage,end-repair-fill-in,a-tailing \
+///       --copied-damage-classes C>T --copied-damage-threshold 0.05 \
+///       --end-repair-fill-in-threshold 0.001 --a-tailing-threshold 0.001
 ///
 ///  3. Reproduce fgbio FilterSomaticVcf, including its prior:
 ///
