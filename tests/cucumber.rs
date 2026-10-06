@@ -130,11 +130,5 @@ async fn stderr_contains(world: &mut ChaffWorld, needle: String) {
 }
 
 fn main() {
-    futures::executor::block_on(ChaffWorld::cucumber().filter_run_and_exit(
-        "tests/features",
-        |feature, _rule, scenario| {
-            let parked = |tags: &[String]| tags.iter().any(|t| t == "narrative");
-            !(parked(&feature.tags) || parked(&scenario.tags))
-        },
-    ));
+    futures::executor::block_on(ChaffWorld::cucumber().run_and_exit("tests/features"));
 }
