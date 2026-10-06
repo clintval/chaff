@@ -1,7 +1,7 @@
 //! Separate somatic variant calls from library-preparation damage artifacts.
 use std::process;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Error, Result};
 use chaff::classes::{validate_classes, DamageClass};
@@ -282,6 +282,19 @@ fn file(text: &str) -> Result<PathBuf, String> {
     }
 }
 
+/// The file a path names, its links and relative parts resolved, when the file
+/// or its directory exists.
+fn resolve(path: &Path) -> Option<PathBuf> {
+    if let Ok(path) = path.canonicalize() {
+        return Some(path);
+    }
+    let directory = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    Some(directory.canonicalize().ok()?.join(path.file_name()?))
+}
+
 /// Parse a probability from zero to one.
 fn probability(text: &str) -> Result<f64, String> {
     match text.parse::<f64>() {
@@ -293,7 +306,8 @@ fn probability(text: &str) -> Result<f64, String> {
 impl Cli {
     /// Reject, as usage errors of `cmd`, an option typed on the command line for
     /// a filter `--filters` leaves out, the copied damage filter without a
-    /// reference, and damage classes that repeat a change.
+    /// reference, an input and outputs that name one file, and damage classes
+    /// that repeat a change.
     fn validate(&self, matches: &ArgMatches, cmd: &mut Command) -> Result<(), clap::Error> {
         for kind in FilterKind::ALL {
             if self.filters.contains(&kind) {
@@ -319,6 +333,24 @@ impl Cli {
                 ErrorKind::MissingRequiredArgument,
                 "the copied-damage filter needs a reference FASTA: '--ref <FASTA>'",
             ));
+        }
+        let files = [
+            ("--input", Some(&self.input)),
+            (
+                "--output",
+                Some(&self.output).filter(|p| *p != Path::new("-")),
+            ),
+            ("--metrics", self.metrics.as_ref()),
+        ];
+        for (i, (a, first)) in files.iter().enumerate() {
+            for (b, second) in &files[i + 1..] {
+                if let (Some(first), Some(second)) = (first, second) {
+                    if resolve(first).is_some_and(|path| Some(path) == resolve(second)) {
+                        let message = format!("'{a}' and '{b}' name the same file: {first:?}");
+                        return Err(cmd.error(ErrorKind::ArgumentConflict, message));
+                    }
+                }
+            }
         }
         validate_classes(&self.copied_damage_classes)
             .map_err(|error| cmd.error(ErrorKind::ValueValidation, error))
@@ -560,14 +592,15 @@ mod tests {
     use super::*;
 
     fn args(extra: &[&str]) -> Result<FilterArgs, clap::Error> {
-        let base = ["chaff", "-o", "out.vcf", "-b", "in.bam"];
-        let input: &[&str] = match extra.contains(&"-i") {
-            true => &[],
-            false => &["-i", "in.vcf"],
-        };
-        let extra: Vec<&str> = input.iter().chain(extra).copied().collect();
+        let mut argv = vec!["chaff", "-b", "in.bam"];
+        for (flag, default) in [("-i", "in.vcf"), ("-o", "out.vcf")] {
+            if !extra.contains(&flag) {
+                argv.extend([flag, default]);
+            }
+        }
+        argv.extend(extra);
         let mut cmd = Cli::command().color(clap::ColorChoice::Never);
-        let matches = cmd.try_get_matches_from_mut(base.iter().chain(&extra))?;
+        let matches = cmd.try_get_matches_from_mut(argv)?;
         let cli = Cli::from_arg_matches(&matches)?;
         cli.validate(&matches, &mut cmd)?;
         Ok(cli.into_args())
@@ -607,6 +640,43 @@ mod tests {
         assert_eq!(error.exit_code(), 2);
         let message = "invalid value '-' for '--input <VCF>': the input is read twice";
         assert!(error.to_string().contains(message), "{error}");
+    }
+
+    #[test]
+    fn test_outputs_that_name_the_input_or_each_other_are_a_usage_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("calls.vcf");
+        std::fs::write(&input, "").unwrap();
+        let link = dir.path().join("link.vcf");
+        std::os::unix::fs::symlink(&input, &link).unwrap();
+        let path = |p: &std::path::Path| p.to_str().unwrap().to_string();
+        let (input, link) = (path(&input), path(&link));
+        let metrics = path(&dir.path().join("out.tsv"));
+        let filters = ["--filters", "a-tailing"];
+        for (extra, message) in [
+            (
+                vec!["-o", &input],
+                "'--input' and '--output' name the same file",
+            ),
+            (
+                vec!["-o", &link],
+                "'--input' and '--output' name the same file",
+            ),
+            (
+                vec!["--metrics", &input],
+                "'--input' and '--metrics' name the same file",
+            ),
+            (
+                vec!["-o", &metrics, "--metrics", &metrics],
+                "'--output' and '--metrics' name the same file",
+            ),
+        ] {
+            let error = args(&[&["-i", &input][..], &filters, &extra].concat()).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+            assert_eq!(error.exit_code(), 2);
+            assert!(error.to_string().contains(message), "{error}");
+        }
+        args(&[&["-i", &input, "-o", "-"][..], &filters].concat()).unwrap();
     }
 
     #[test]

@@ -75,6 +75,11 @@ Feature: CLI contract
     Then the exit code is 2
     And stderr contains "error: invalid value '-' for '--input <VCF>': the input is read twice, so it must be a file, not standard input"
 
+  Scenario: an output that names the input is an error
+    When I run `chaff -i calls.vcf -o ./calls.vcf -b sorted.bam --sample tumor --filters a-tailing`
+    Then the exit code is 2
+    And stderr contains "error: '--input' and '--output' name the same file"
+
   Scenario: an option of a filter left out of --filters is an error
     When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --sample tumor --filters a-tailing --copied-damage-threshold 0.05`
     Then the exit code is 2
