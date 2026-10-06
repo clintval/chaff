@@ -253,14 +253,15 @@ impl ATailing {
     /// Whether a molecule, of either allele, is congruent: the site is within
     /// the distance of its nearest template end, and that end is where the
     /// alternate allele would appear by A addition (the leftmost end for a
-    /// forward-strand `T`, the rightmost for an `A`). At a tie both ends are
-    /// candidates.
+    /// forward-strand `T`, the rightmost for an `A`). At a tie the nearest end
+    /// is the kept read's own, as fgbio has it.
     pub fn is_congruent(&self, alt_base: u8, m: &Molecule) -> bool {
         let left = m.left.map(|d| d + 1);
         let right = m.right.map(|d| d + 1);
         let within = |d: Option<usize>| d.is_some_and(|d| d <= self.distance as usize);
         let (near_left, near_right) = match (left, right) {
-            (Some(l), Some(r)) => (l <= r, r <= l),
+            (Some(l), Some(r)) if l == r => (!m.reverse, m.reverse),
+            (Some(l), Some(r)) => (l < r, r < l),
             (Some(_), None) => (true, false),
             (None, Some(_)) => (false, true),
             (None, None) => (false, false),
@@ -796,12 +797,20 @@ mod tests {
         assert_eq!((wide.alt_congruent, narrow.alt_congruent), (15, 5));
     }
 
+    /// fgbio takes the other end only when it is strictly nearer than the kept
+    /// read's own 5' end.
     #[test]
-    fn test_a_tailing_tie_is_congruent_for_either_end() {
+    fn test_a_tailing_tie_goes_to_the_kept_read_s_own_end() {
         let filter = ATailing::default();
-        let m = Molecule::new(A, 30, 1, 1);
-        assert!(filter.is_congruent(A, &m));
-        assert!(filter.is_congruent(T, &m));
-        assert!(!filter.is_congruent(C, &m));
+        let forward = Molecule::new(A, 30, 1, 1);
+        assert!(filter.is_congruent(T, &forward));
+        assert!(!filter.is_congruent(A, &forward));
+        let reverse = Molecule {
+            reverse: true,
+            ..forward
+        };
+        assert!(filter.is_congruent(A, &reverse));
+        assert!(!filter.is_congruent(T, &reverse));
+        assert!(!filter.is_congruent(C, &reverse));
     }
 }

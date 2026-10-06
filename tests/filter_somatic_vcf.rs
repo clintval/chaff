@@ -669,3 +669,34 @@ fn test_overlapping_mates_and_deletions_against_fgbio() {
         ]
     );
 }
+
+/// A site equally far from both template ends counts as nearer the 5' end of
+/// the read fgbio keeps, the template's first read there. The alternate pairs
+/// here start their reverse read first, so their T reads as an A at that
+/// read's own end and is no A-tailing artifact, as fgbio 4.1.1 has it.
+#[test]
+fn test_a_tailing_breaks_a_tie_at_the_first_read_s_own_end_as_fgbio() {
+    let dir = TempDir::new().unwrap();
+    let mut reads = SamBuilder::new().read_length(RLEN);
+    for start in 68..=107 {
+        reads.add_pair(Pair::filled(start, start + RLEN, 'A', RLEN));
+    }
+    let tie = Pair::at(100, 99)
+        .bases1("T".repeat(15))
+        .bases2("T".repeat(16))
+        .cigar1("15M")
+        .cigar2("16M");
+    for _ in 0..3 {
+        reads.add_pair(tie.clone());
+    }
+    let mut vcf = VcfBuilder::new(&["tumor"]);
+    vcf.add(Variant::new(107, &["A", "T"], vec![gt("tumor", "0/1")]));
+    let input = vcf.write(&dir.path().join("tie.vcf"));
+    let options = FilterOptions {
+        filters: vec![FilterKind::ATailing],
+        a_tailing: ATailing { distance: 10 },
+        ..options(None, PriorMode::Fgbio)
+    };
+    let records = run(&dir, &input, &reads, options).unwrap();
+    assert_eq!(float(&records[0], ATailing::INFO), Some(1.0));
+}

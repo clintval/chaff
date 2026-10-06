@@ -16,8 +16,8 @@ use anyhow::{Context as _, Result};
 use noodles::core::Position;
 use noodles::sam::alignment::record::Flags;
 use streampile::{
-    AgreementStrategy, AlignmentRecord, DisagreementStrategy, PileupTemplate, RecordSource,
-    StreamingPileupBuilder,
+    AgreementStrategy, AlignmentRecord, DisagreementStrategy, EntryKind, PileupEntry,
+    PileupTemplate, RecordSource, StreamingPileupBuilder,
 };
 
 /// How the quality of agreeing mates is called: the higher of the two.
@@ -44,6 +44,10 @@ pub struct Molecule {
     /// The template's bases between the site and its rightmost base, the
     /// reverse strand's 5' end, when known: 0 at that base.
     pub right: Option<usize>,
+    /// Whether the read fgbio keeps for the template, its first read here at
+    /// the quality floor, is reverse: a site equally far from both ends is
+    /// nearer that read's own 5' end.
+    pub reverse: bool,
 }
 
 impl Molecule {
@@ -54,6 +58,7 @@ impl Molecule {
             quality,
             left: Some(left),
             right: Some(right),
+            reverse: false,
         }
     }
 
@@ -134,7 +139,7 @@ impl<S: RecordSource> Evidence for PileupEvidence<'_, S> {
         let pileup = self.builder.pileup(contig, usize::from(pos) - 1)?;
         let mut molecules = Vec::new();
         for template in pileup.templates(AGREEMENT, DISAGREEMENT) {
-            let molecule = molecule(&template)
+            let molecule = molecule(&template, pileup.min_base_quality())
                 .with_context(|| format!("reading template ends at {contig}:{pos}"))?;
             molecules.extend(molecule);
         }
@@ -148,20 +153,26 @@ impl<S: RecordSource> Evidence for PileupEvidence<'_, S> {
 /// outside it.
 fn molecule<R: AlignmentRecord>(
     template: &PileupTemplate<'_, R>,
+    min_base_quality: u8,
 ) -> streampile::Result<Option<Molecule>> {
+    let deleted = |e: &PileupEntry<'_, R>| e.is_deletion() || e.is_skip();
     let (base, quality) = match (template.base(), template.quality()) {
         (Some(base), Some(quality)) => (base, quality),
-        _ if template.entries().any(|e| e.is_deletion() || e.is_skip()) => (DELETION, 0),
+        _ if template.entries().any(|e| deleted(&e)) => (DELETION, 0),
         _ => return Ok(None),
     };
     let Some((left, right)) = distances(template)? else {
         return Ok(None);
     };
+    let kept = template
+        .entries()
+        .find(|e| deleted(e) || (e.kind() == EntryKind::Base && e.passes(min_base_quality)));
     Ok(Some(Molecule {
         base,
         quality,
         left,
         right,
+        reverse: kept.is_some_and(|e| e.is_reverse()),
     }))
 }
 
@@ -266,10 +277,11 @@ mod tests {
     ) -> Vec<(String, usize)> {
         let mut builder = options.configure(reads.to_pileup_builder());
         let pileup = builder.pileup("chr1", site - 1).unwrap();
+        let floor = pileup.min_base_quality();
         pileup
             .templates(AGREEMENT, DISAGREEMENT)
             .iter()
-            .filter(|template| molecule(template).unwrap().is_some())
+            .filter(|template| molecule(template, floor).unwrap().is_some())
             .map(|template| (template.name().to_string(), template.entries().count()))
             .collect()
     }
