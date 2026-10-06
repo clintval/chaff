@@ -879,6 +879,40 @@ mod tests {
         assert!(message.contains("has G"), "{message}");
     }
 
+    /// A call whose molecules all sit far from the template ends takes no NaN
+    /// into the prior, so the other call in its stratum keeps its posterior.
+    #[test]
+    fn test_a_call_far_from_every_end_leaves_its_stratum_finite() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(10, &["G", "T"], vec![gt("tumor", "0/1")]));
+        vcf.add(Variant::new(20, &["G", "T"], vec![gt("tumor", "0/1")]));
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let output = dir.path().join("out.vcf");
+        let mut table = MoleculeTable::new();
+        let mut near: Vec<Molecule> = (0..40).map(|d| Molecule::new(b'G', 30, d, 60)).collect();
+        near.push(Molecule::new(b'T', 30, 3, 60));
+        table.insert("chr1", 10, near);
+        let mut far = vec![Molecule::new(b'G', 30, 900, 900); 40];
+        far.push(Molecule::new(b'T', 30, 900, 900));
+        table.insert("chr1", 20, far);
+        let options = FilterOptions {
+            filters: vec![FilterKind::EndRepairFillIn],
+            end_repair_fill_in: EndRepairFillIn {
+                distance: 15,
+                scale: Some(1.0),
+            },
+            ..FilterOptions::default()
+        };
+        let rows = filter_vcf(&input, &output, &mut table, None, &options).unwrap();
+        let (_, records) = read_records(&output);
+        for record in &records {
+            let erfap = float(record, EndRepairFillIn::INFO).unwrap();
+            assert!(erfap.is_finite(), "{erfap}");
+        }
+        assert!(rows[0].artifact_fraction.unwrap().is_finite());
+    }
+
     #[test]
     fn test_copied_damage_requires_a_reference() {
         let dir = tempfile::tempdir().unwrap();

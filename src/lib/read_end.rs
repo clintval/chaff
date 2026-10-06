@@ -93,8 +93,11 @@ pub fn window_score(
 /// ln((1 - e) w(d) / W + e)
 /// ```
 ///
-/// since a base error lands anywhere a reference molecule could. Returns
-/// `None` when alternate distances exist but no reference distance does.
+/// since a base error lands anywhere a reference molecule could. The weights
+/// are taken relative to the nearest reference molecule's and the terms summed
+/// in log space, so the ratio is finite however far a molecule sits from the
+/// end. Returns `None` when alternate distances exist but no reference
+/// distance does.
 pub fn tilt_log_likelihood_ratio(
     ref_distances: &[usize],
     alt: &[(usize, u8)],
@@ -103,19 +106,23 @@ pub fn tilt_log_likelihood_ratio(
     if alt.is_empty() {
         return Some(0.0);
     }
-    if ref_distances.is_empty() {
-        return None;
-    }
-    let w = |d: usize| (-(d as f64) / scale).exp();
-    let mean = ref_distances.iter().map(|&d| w(d)).sum::<f64>() / ref_distances.len() as f64;
+    let nearest = *ref_distances.iter().min()? as f64;
+    let ln_w = |d: usize| -(d as f64 - nearest) / scale;
+    let sum: f64 = ref_distances.iter().map(|&d| ln_w(d).exp()).sum();
+    let ln_mean = (sum / ref_distances.len() as f64).ln();
     Some(
         alt.iter()
             .map(|&(d, q)| {
                 let e = error_probability(q);
-                ((1.0 - e) * w(d) / mean + e).ln()
+                ln_add_exp((-e).ln_1p() + ln_w(d) - ln_mean, e.ln())
             })
             .sum(),
     )
+}
+
+/// `ln(exp(a) + exp(b))`, without overflow.
+fn ln_add_exp(a: f64, b: f64) -> f64 {
+    a.max(b) + (-(a - b).abs()).exp().ln_1p()
 }
 
 /// The [`tilt_log_likelihood_ratio`] of a call's reference and alternate
@@ -732,6 +739,21 @@ mod tests {
         assert!(far < 0.0, "{far}");
         assert_eq!(tilt_log_likelihood_ratio(&refs, &[], 15.0), Some(0.0));
         assert_eq!(tilt_log_likelihood_ratio(&[], &[(1, 30)], 15.0), None);
+    }
+
+    /// Weights of distances hundreds of scales from the end underflow in
+    /// linear space; the ratio stays finite and keeps its sign.
+    #[test]
+    fn test_tilt_ratio_is_finite_far_from_the_end() {
+        let refs = [800, 900];
+        let flat = tilt_log_likelihood_ratio(&refs, &[(850, 30)], 1.0).unwrap();
+        let near = tilt_log_likelihood_ratio(&refs, &[(0, 30)], 1.0).unwrap();
+        let far = tilt_log_likelihood_ratio(&refs, &[(5000, 30)], 1.0).unwrap();
+        assert!(flat.is_finite() && near.is_finite() && far.is_finite());
+        assert!(near > 700.0, "{near}");
+        assert!(far < 0.0, "{far}");
+        let shifted = tilt_log_likelihood_ratio(&[0, 100], &[(50, 30)], 1.0).unwrap();
+        assert!((flat - shifted).abs() < 1e-9, "{flat} vs {shifted}");
     }
 
     #[test]
