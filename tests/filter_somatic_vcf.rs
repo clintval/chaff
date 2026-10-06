@@ -571,3 +571,34 @@ fn test_the_streampile_engine_matches_the_test_pileup(#[case] prior: PriorMode) 
     assert_annotated_as_fgbio(&records);
     assert_eq!(records, read_vcf(&expected.output).1);
 }
+
+/// A read of an FR pair without its mate's CIGAR stops the run, and the binary
+/// names the read and the site and exits 1.
+#[test]
+fn test_a_read_without_a_mate_cigar_fails_the_run_naming_it() {
+    let dir = TempDir::new().unwrap();
+    let (tumor, _) = tumor_vcfs(dir.path());
+    let recs = SamBuilder::new().read_length(RLEN).add_pair(Pair {
+        name: Some(String::from("q1")),
+        ..Pair::filled(81, 101, 'C', RLEN)
+    });
+    let mut reads = SamBuilder::new().read_length(RLEN).coordinate_sorted();
+    reads.extend(recs.into_iter().map(SamBuilder::without_mate_cigar));
+    let bam = reads.write_bam(&dir.path().join("reads.bam"));
+    let output = assert_cmd::Command::cargo_bin("chaff")
+        .unwrap()
+        .env("NO_COLOR", "1")
+        .arg("--input")
+        .arg(&tumor)
+        .arg("--bam")
+        .arg(&bam)
+        .arg("--output")
+        .arg(dir.path().join("filtered.vcf"))
+        .args(["--sample", "tumor", "--filters", "end-repair-fill-in"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("chr1:100"), "{stderr}");
+    assert!(stderr.contains("read q1 has no MC tag"), "{stderr}");
+}
