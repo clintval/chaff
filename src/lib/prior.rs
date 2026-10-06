@@ -1,21 +1,27 @@
 //! Priors on whether a call is an artifact, and the posterior they give.
 //!
-//! The default prior is learned. Each call `i` in a stratum carries a
-//! likelihood ratio `exp(l_i) = P(molecules | artifact) / P(molecules |
-//! mutation)`. The calls form a two-component mixture with an unknown artifact
-//! fraction `pi`, which expectation-maximization estimates per sample and per
-//! stratum, the way GATK's LearnReadOrientationModel learns its artifact
-//! priors:
+//! The default prior is learned. Each call `i` carries a likelihood ratio
+//! `exp(l_i) = P(molecules | artifact) / P(molecules | mutation)`. A set of
+//! calls forms a two-component mixture with an unknown artifact fraction
+//! `pi`, estimated per sample the way GATK's LearnReadOrientationModel learns
+//! its artifact priors: as the fixed point of expectation-maximization,
 //!
 //! ```text
 //! E-step: r_i = 1 / (1 + exp(-(l_i + logit(pi))))
-//! M-step: pi  = (sum_i r_i + c) / (n + 2c)
+//! M-step: pi  = (sum_i r_i + k m) / (n + k)
 //! ```
 //!
-//! The pseudocount `c` is a Beta(c + 1, c + 1) prior on `pi`, so `pi` is the
-//! maximum a posteriori estimate and stays strictly between 0 and 1 when a
-//! stratum holds few calls. The objective is concave in `pi`, so the fixed
-//! point is unique, and chaff solves for it directly rather than iterating.
+//! which is the maximum a posteriori `pi` under a [`BetaPrior`] of `k`
+//! pseudo-calls at mean `m`, `Beta(k m + 1, k (1 - m) + 1)`. The objective is
+//! concave in `pi`, so the fixed point is unique, and chaff solves for it
+//! directly rather than iterating.
+//!
+//! The prior is learned twice. Each filter first learns one fraction from all
+//! of its calls under the weak [`FILTER_PRIOR`], `Beta(2, 2)`. Each stratum
+//! then learns its own under [`STRATUM_PRIOR_STRENGTH`] pseudo-calls at its
+//! filter's fraction, so a stratum of one or two calls mostly inherits the
+//! filter's fraction rather than moving its prior toward its own calls, and a
+//! stratum of hundreds keeps nearly its own.
 //!
 //! fgbio's prior is kept for parity: a mutation prior of `min((2 * maf)^2,
 //! 0.9999)`, where `maf` is the call's alternate molecule fraction, or one over
@@ -27,8 +33,27 @@ use std::fmt;
 
 use clap::ValueEnum;
 
-/// The pseudocount on each side of the learned artifact fraction.
-pub const PSEUDOCOUNT: f64 = 1.0;
+/// A Beta prior on an artifact fraction: `strength` pseudo-calls at `mean`
+/// over a flat `Beta(1, 1)`, `Beta(strength mean + 1, strength (1 - mean) + 1)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BetaPrior {
+    /// The fraction the pseudo-calls hold.
+    pub mean: f64,
+    /// The number of pseudo-calls.
+    pub strength: f64,
+}
+
+/// The prior on a filter's fraction: two pseudo-calls at one half, `Beta(2,
+/// 2)`, which keeps the fraction strictly between 0 and 1.
+pub const FILTER_PRIOR: BetaPrior = BetaPrior {
+    mean: 0.5,
+    strength: 2.0,
+};
+
+/// The pseudo-calls a stratum's prior holds at its filter's fraction: ten, so
+/// a stratum's own calls outweigh its filter's once it holds more than ten, and
+/// a lone call moves its stratum at most one eleventh of the way to itself.
+pub const STRATUM_PRIOR_STRENGTH: f64 = 10.0;
 
 /// Which prior turns a likelihood ratio into a posterior.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -89,12 +114,12 @@ pub fn fgbio_artifact_prior(alt_molecules: u32, ref_molecules: u32, depth: u32) 
     1.0 - prior_mutation
 }
 
-/// The maximum a posteriori artifact fraction of a stratum from the calls' log
-/// likelihood ratios. The fixed point EM converges to solves
-/// `sum_i r_i + c = pi (n + 2c)`, whose left side less its right falls as `pi`
-/// rises, so bisection finds it to machine precision however slowly EM would
-/// creep there. An empty stratum gets the prior mean, one half.
-pub fn learn_artifact_fraction(log_likelihood_ratios: &[f64], pseudocount: f64) -> f64 {
+/// The maximum a posteriori artifact fraction of a set of calls from their log
+/// likelihood ratios under `prior`. The fixed point EM converges to solves
+/// `sum_i r_i + k m = pi (n + k)`, whose left side less its right falls as
+/// `pi` rises, so bisection finds it to machine precision however slowly EM
+/// would creep there. Without calls it is the prior's mean.
+pub fn learn_artifact_fraction(log_likelihood_ratios: &[f64], prior: BetaPrior) -> f64 {
     let n = log_likelihood_ratios.len() as f64;
     let excess = |pi: f64| {
         let odds = logit(pi);
@@ -102,7 +127,7 @@ pub fn learn_artifact_fraction(log_likelihood_ratios: &[f64], pseudocount: f64) 
             .iter()
             .map(|l| sigmoid(l + odds))
             .sum();
-        responsibility + pseudocount - pi * (n + 2.0 * pseudocount)
+        responsibility + prior.strength * prior.mean - pi * (n + prior.strength)
     };
     let (mut low, mut high) = (0.0f64, 1.0f64);
     loop {
@@ -159,7 +184,7 @@ mod tests {
 
     #[test]
     fn test_learned_fraction_of_an_empty_stratum_is_one_half() {
-        assert_eq!(learn_artifact_fraction(&[], PSEUDOCOUNT), 0.5);
+        assert_eq!(learn_artifact_fraction(&[], FILTER_PRIOR), 0.5);
     }
 
     #[test]
@@ -167,8 +192,8 @@ mod tests {
         let informative = [20.0, 20.0, -20.0, -20.0, -20.0, -20.0];
         let mut with_flat = informative.to_vec();
         with_flat.extend([0.0; 50]);
-        let a = learn_artifact_fraction(&informative, PSEUDOCOUNT);
-        let b = learn_artifact_fraction(&with_flat, PSEUDOCOUNT);
+        let a = learn_artifact_fraction(&informative, FILTER_PRIOR);
+        let b = learn_artifact_fraction(&with_flat, FILTER_PRIOR);
         assert!(close(a, 3.0 / 8.0, 1e-6), "{a}");
         assert!(close(a, b, 1e-6), "{a} vs {b}");
     }
@@ -181,7 +206,7 @@ mod tests {
             let strength = 2.0 + f64::from(i % 7) * 0.5;
             llrs.push(if artifact { strength } else { -strength });
         }
-        let pi = learn_artifact_fraction(&llrs, PSEUDOCOUNT);
+        let pi = learn_artifact_fraction(&llrs, FILTER_PRIOR);
         assert!(close(pi, 0.2, 0.05), "{pi}");
     }
 
@@ -191,13 +216,30 @@ mod tests {
     fn test_learned_fraction_reaches_its_fixed_point_among_many_flat_calls() {
         let mut llrs = vec![0.0; 100_000];
         llrs.extend([20.0; 10]);
-        let pi = learn_artifact_fraction(&llrs, PSEUDOCOUNT);
+        let pi = learn_artifact_fraction(&llrs, FILTER_PRIOR);
         assert!(close(pi, 11.0 / 12.0, 1e-7), "{pi}");
+    }
+
+    /// Ten pseudo-calls at the filter's fraction hold a lone call's stratum
+    /// near it, and a stratum of a thousand calls near its own fraction.
+    #[test]
+    fn test_a_stratum_prior_shrinks_toward_its_filter_by_ten_calls() {
+        let prior = BetaPrior {
+            mean: 0.1,
+            strength: STRATUM_PRIOR_STRENGTH,
+        };
+        assert!(close(learn_artifact_fraction(&[], prior), 0.1, 1e-12));
+        let lone = learn_artifact_fraction(&[50.0], prior);
+        assert!(close(lone, 2.0 / 11.0, 1e-9), "{lone}");
+        let mut llrs = vec![50.0; 500];
+        llrs.extend([-50.0; 500]);
+        let many = learn_artifact_fraction(&llrs, prior);
+        assert!(close(many, 501.0 / 1010.0, 1e-9), "{many}");
     }
 
     #[test]
     fn test_learned_fraction_of_one_strong_artifact_call() {
-        let pi = learn_artifact_fraction(&[50.0], PSEUDOCOUNT);
+        let pi = learn_artifact_fraction(&[50.0], FILTER_PRIOR);
         assert!(close(pi, 2.0 / 3.0, 1e-9), "{pi}");
     }
 }

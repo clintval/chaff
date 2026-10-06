@@ -295,7 +295,8 @@ mod tests {
     use crate::evidence::{Evidence, PileupEvidence, PileupOptions};
     use crate::io::vcf_float;
     use crate::prior::{
-        fgbio_artifact_prior, learn_artifact_fraction, posterior_mutation, PSEUDOCOUNT,
+        fgbio_artifact_prior, learn_artifact_fraction, posterior_mutation, BetaPrior, FILTER_PRIOR,
+        STRATUM_PRIOR_STRENGTH,
     };
 
     const A: u8 = b'A';
@@ -329,7 +330,11 @@ mod tests {
     /// The posterior chaff reports for a VCF holding only this call.
     fn learned_posterior(score: &Score) -> f64 {
         let llr = score.log_likelihood_ratio.unwrap();
-        let prior = learn_artifact_fraction(&[llr], PSEUDOCOUNT);
+        let filter = BetaPrior {
+            mean: learn_artifact_fraction(&[llr], FILTER_PRIOR),
+            strength: STRATUM_PRIOR_STRENGTH,
+        };
+        let prior = learn_artifact_fraction(&[llr], filter);
         posterior_mutation(llr, prior)
     }
 
@@ -640,8 +645,8 @@ mod tests {
 
     /// fgbio: "... should compute a significant p-value when data is heavily
     /// biased". Intended difference: with a prior learned from this lone call
-    /// (about 2/3) rather than `(2 * maf)^2` (about 0.0015), five congruent
-    /// molecules at a congruent reference fraction of 0.1 give about 5e-6, not
+    /// (about 0.7) rather than `(2 * maf)^2` (about 0.0015), five congruent
+    /// molecules at a congruent reference fraction of 0.1 give about 4e-6, not
     /// fgbio's 1.5e-8.
     #[test]
     fn test_a_tailing_significant_when_biased() {
@@ -657,7 +662,7 @@ mod tests {
 
     /// fgbio: "... should compute an intermediate p-value when data is heavily
     /// biased for both ref and alt". Intended difference: with the learned
-    /// prior the posterior stays intermediate, about 0.006, where fgbio's prior
+    /// prior the posterior stays intermediate, about 0.005, where fgbio's prior
     /// drives it below 1e-4.
     #[test]
     fn test_a_tailing_intermediate_when_both_alleles_are_biased() {

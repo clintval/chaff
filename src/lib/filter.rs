@@ -30,7 +30,8 @@ use crate::evidence::{Evidence, Molecule, PileupEvidence, PileupOptions};
 use crate::io::{add_filter, add_info, vcf_float, VariantReader, VariantWriter};
 use crate::metrics::{null_fraction, write_metrics, StratumMetrics};
 use crate::prior::{
-    fgbio_artifact_prior, learn_artifact_fraction, posterior_mutation, PriorMode, PSEUDOCOUNT,
+    fgbio_artifact_prior, learn_artifact_fraction, posterior_mutation, BetaPrior, PriorMode,
+    FILTER_PRIOR, STRATUM_PRIOR_STRENGTH,
 };
 use crate::read_end::{is_filtered, ATailing, EndRepairFillIn, Score};
 use crate::reference::Reference;
@@ -457,28 +458,48 @@ fn score_call(
     Ok(annotations)
 }
 
+/// The learned artifact fractions of each filter and each of its strata.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Fractions {
+    filters: BTreeMap<FilterKind, f64>,
+    strata: BTreeMap<Stratum, f64>,
+}
+
 /// Learn the priors and fill in every annotation's posterior, returning the
-/// learned artifact fraction of each filter and stratum.
-fn assign_posteriors(calls: &mut [Vec<Annotation>], prior: PriorMode) -> BTreeMap<Stratum, f64> {
-    let mut ratios: BTreeMap<Stratum, Vec<f64>> = BTreeMap::new();
+/// learned artifact fractions.
+fn assign_posteriors(calls: &mut [Vec<Annotation>], prior: PriorMode) -> Fractions {
+    let mut filters: BTreeMap<FilterKind, Vec<f64>> = BTreeMap::new();
+    let mut strata: BTreeMap<Stratum, Vec<f64>> = BTreeMap::new();
     for annotation in calls.iter().flatten() {
         if let Some(llr) = annotation.score.log_likelihood_ratio {
-            ratios
+            filters.entry(annotation.kind).or_default().push(llr);
+            strata
                 .entry((annotation.kind, annotation.stratum.clone()))
                 .or_default()
                 .push(llr);
         }
     }
-    let fractions: BTreeMap<Stratum, f64> = ratios
+    let filters: BTreeMap<FilterKind, f64> = filters
         .into_iter()
-        .map(|(key, llrs)| (key, learn_artifact_fraction(&llrs, PSEUDOCOUNT)))
+        .map(|(kind, llrs)| (kind, learn_artifact_fraction(&llrs, FILTER_PRIOR)))
         .collect();
+    let strata = strata
+        .into_iter()
+        .map(|(key, llrs)| {
+            let prior = BetaPrior {
+                mean: filters[&key.0],
+                strength: STRATUM_PRIOR_STRENGTH,
+            };
+            (key, learn_artifact_fraction(&llrs, prior))
+        })
+        .collect();
+    let fractions = Fractions { filters, strata };
     for annotation in calls.iter_mut().flatten() {
         let Some(llr) = annotation.score.log_likelihood_ratio else {
             continue;
         };
         let artifact_prior = match prior {
-            PriorMode::Learned => fractions[&(annotation.kind, annotation.stratum.clone())],
+            PriorMode::Learned => fractions.strata[&(annotation.kind, annotation.stratum.clone())],
             PriorMode::Fgbio => annotation.fgbio_prior,
         };
         annotation.posterior = Some(posterior_mutation(llr, artifact_prior));
@@ -619,9 +640,10 @@ pub fn filter_vcf(
 fn metrics_rows(
     sample: &str,
     calls: &[Vec<Annotation>],
-    fractions: &BTreeMap<Stratum, f64>,
+    fractions: &Fractions,
     options: &FilterOptions,
 ) -> Vec<StratumMetrics> {
+    let learned = options.prior == PriorMode::Learned;
     let mut rows: BTreeMap<Stratum, (StratumMetrics, Vec<(u32, f64)>)> = BTreeMap::new();
     for annotation in calls.iter().flatten() {
         let key = (annotation.kind, annotation.stratum.clone());
@@ -630,10 +652,12 @@ fn metrics_rows(
                 sample: sample.to_string(),
                 filter: annotation.kind.to_string(),
                 stratum: annotation.stratum.clone(),
-                artifact_fraction: match options.prior {
-                    PriorMode::Learned => fractions.get(&key).copied(),
-                    PriorMode::Fgbio => None,
-                },
+                artifact_fraction: learned
+                    .then(|| fractions.strata.get(&key).copied())
+                    .flatten(),
+                filter_artifact_fraction: learned
+                    .then(|| fractions.filters.get(&annotation.kind).copied())
+                    .flatten(),
                 ..StratumMetrics::default()
             };
             (row, Vec::new())

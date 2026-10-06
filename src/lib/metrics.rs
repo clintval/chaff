@@ -45,6 +45,10 @@ pub struct StratumMetrics {
     /// per-call prior.
     #[serde(serialize_with = "six_digits_or_empty")]
     pub artifact_fraction: Option<f64>,
+    /// The learned artifact fraction of all the filter's calls, which each
+    /// stratum's prior shrinks toward; empty under fgbio's per-call prior.
+    #[serde(serialize_with = "six_digits_or_empty")]
+    pub filter_artifact_fraction: Option<f64>,
     /// The sum over calls of the posterior probability of an artifact.
     #[serde(serialize_with = "six_digits")]
     pub expected_artifacts: f64,
@@ -258,9 +262,9 @@ mod tests {
             .skip(1)
             .map(|l| l.split('\t').collect())
             .collect();
-        assert_eq!(rows[0][5..7], ["0.333333", "0.666667"]);
-        assert_eq!(rows[0][9], "5.0");
-        assert_eq!(rows[0][14], "0.0107422");
+        assert_eq!(rows[0][5..8], ["0.333333", "", "0.666667"]);
+        assert_eq!(rows[0][10], "5.0");
+        assert_eq!(rows[0][15], "0.0107422");
         assert_eq!(rows[1][5], "");
     }
 

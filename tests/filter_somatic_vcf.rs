@@ -443,7 +443,7 @@ fn test_apply_filters_with_thresholds_under_the_fgbio_prior() {
 /// fgbio: "apply filters if filter-specific p-value thresholds are supplied".
 /// Intended difference: under the learned prior, 3 to 5 alternate molecules
 /// within 15 bp of an end, where 37.5% of the reference molecules also are,
-/// leave ERFAP at 0.027 and 0.0037, above the 0.001 threshold; fgbio's
+/// leave ERFAP at 0.023 and 0.0033, above the 0.001 threshold; fgbio's
 /// `(2 * maf)^2` prior alone drives them under it. A-tailing still filters 100
 /// and 400, whose alternate molecules all sit where 5% of reference ones do.
 #[test]
@@ -468,7 +468,7 @@ fn test_apply_filters_with_thresholds_under_the_learned_prior_spares_weak_end_re
         .collect();
     assert_eq!(
         erfap,
-        vec![Some(0.027), Some(1.0), None, Some(3.718e-3), Some(3.718e-3)]
+        vec![Some(0.023), Some(1.0), None, Some(3.3e-3), Some(3.3e-3)]
     );
 }
 

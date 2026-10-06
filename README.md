@@ -40,11 +40,11 @@ grep -v '^#' calls.chaff.vcf | cut -f 1,2,4,5,7,8 | column -t
 ```
 
 ```text
-chr1  100  C    A  CopiedDamageArtifact  CDAP=0.025;CDLR=1.31;CDAC=3,3;CDRC=120,240;ATAP=0.916;ERFAP=0.027
+chr1  100  C    A  CopiedDamageArtifact  CDAP=0.042;CDLR=1.31;CDAC=3,3;CDRC=120,240;ATAP=0.963;ERFAP=0.023
 chr1  200  G    A  .                     CDAP=0.999;CDLR=-2.869;CDAC=10,20;CDRC=120,240;ATAP=1;ERFAP=1
 chr1  300  AAA  A  .                     .
-chr1  400  A    T  .                     ATAP=1;ERFAP=0.003718
-chr1  500  C    G  .                     ERFAP=0.003718
+chr1  400  A    T  .                     ATAP=1;ERFAP=0.0033
+chr1  500  C    G  .                     ERFAP=0.0033
 ```
 
 All 3 alternate molecules at 100 sit nearer the lesion strand's 5' end (`CDAC=3,3`), where half of the reference molecules sit (`CDRC=120,240`).
@@ -63,16 +63,16 @@ grep '^##FILTER=<ID=CopiedDamage' calls.chaff.vcf
 
 ### Reading the Metrics
 
-The `--metrics` file has one row per filter and stratum, with the learned artifact fraction, the expected number of artifact calls, and a test of whether more alternate molecules sit where the artifact puts them than each call's own reference molecules predict:
+The `--metrics` file has one row per filter and stratum, with the stratum's and the filter's learned artifact fractions and a test of whether more alternate molecules sit where the artifact puts them than each call's own reference molecules predict:
 
 ```console
-cut -f 2-7,15 tumor.chaff.tsv | head -3 | column -t
+cut -f 2,3,6,7,16 tumor.chaff.tsv | head -3 | column -t
 ```
 
 ```text
-filter         stratum      calls  filtered  artifact_fraction  expected_artifacts  asymmetry_p_value
-copied-damage  C>T:non-CpG  1      0         0.333559           0.000675555         0.588099
-copied-damage  G>T:CpG      1      1         0.65834            0.97502             0.125
+filter         stratum      artifact_fraction  filter_artifact_fraction  asymmetry_p_value
+copied-damage  C>T:non-CpG  0.443744           0.488011                  0.588099
+copied-damage  G>T:CpG      0.530754           0.488011                  0.125
 ```
 
 ### Comparing to fgbio
@@ -99,7 +99,7 @@ chr1  400  A    T  EndRepairFillInArtifact  ATAP=0.715;ERFAP=0.00001239
 chr1  500  C    G  EndRepairFillInArtifact  ERFAP=0.00001239
 ```
 
-The default learned prior leaves 100, 400, and 500 at `ERFAP=0.027`, `0.003718`, and `0.003718`, above 0.001: their 3 to 5 alternate molecules sit within 15 bp of a template end, but so do 37.5% of the reference molecules.
+The default learned prior leaves 100, 400, and 500 at `ERFAP=0.023`, `0.0033`, and `0.0033`, above 0.001: their 3 to 5 alternate molecules sit within 15 bp of a template end, but so do 37.5% of the reference molecules.
 
 ## Choosing Filters
 
@@ -144,7 +144,7 @@ An option of a filter that `--filters` leaves out is a usage error, and so is `-
 
 ## Priors
 
-- `learned` (default): EM learns the artifact fraction `π` per sample and stratum, with `r_i = σ(LLR_i + logit π)` and `π = (Σ r_i + 1) / (n + 2)`. Strata are the damage class and CpG context for `copied-damage`, and the six pyrimidine substitution classes for the others.
+- `learned` (default): EM learns each filter's artifact fraction `π_f` per sample from all its calls, `π_f = (Σ r_i + 1) / (n + 2)` with `r_i = σ(LLR_i + logit π_f)`, then each stratum's `π` from its own calls and 10 pseudo-calls at `π_f`, `π = (Σ r_i + 10 π_f) / (n + 10)`, so a stratum of one or two calls mostly inherits `π_f`. Strata are the damage class and CpG context for `copied-damage`, and the six pyrimidine substitution classes for the others.
 - `fgbio`: fgbio's per-call mutation prior, `min((2 * maf)^2, 0.9999)`.
 
 ## Differences From fgbio
