@@ -37,7 +37,7 @@
 //! The `fgbio` model keeps fgbio's prior for parity: a mutation prior of `min((2 * maf)^2,
 //! 0.9999)`, where `maf` is the call's alternate molecule fraction, or one over
 //! the depth when no alternate molecule is seen. At the low allele fractions of
-//! duplex sequencing it is near zero, which makes any call whose alternate
+//! Duplex Sequencing it is near zero, which makes any call whose alternate
 //! molecules all sit inside the window an artifact.
 
 /// A Beta prior on an artifact fraction: `strength` pseudo-calls at `mean`
