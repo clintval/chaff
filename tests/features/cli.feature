@@ -37,7 +37,7 @@ Feature: CLI contract
     And stderr contains "--bam <BAM>"
 
   Scenario: a damage class and its reverse complement cannot both be given
-    When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --copied-damage-classes C>T,G>A`
+    When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam -r ref.fa --copied-damage-classes C>T,G>A`
     Then the exit code is 2
     And stderr contains "error: damage classes C>T and G>A describe the same change on opposite strands"
 
@@ -62,8 +62,8 @@ Feature: CLI contract
 
   Scenario: the copied damage filter needs a reference
     When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --sample tumor`
-    Then the exit code is 1
-    And stderr contains "needs a reference FASTA"
+    Then the exit code is 2
+    And stderr contains "error: the copied-damage filter needs a reference FASTA: '--ref <FASTA>'"
 
   Scenario: the BAM must be coordinate sorted
     When I run `chaff -i calls.vcf -o out.vcf -b unsorted.bam --filters a-tailing --sample tumor`
@@ -72,8 +72,8 @@ Feature: CLI contract
 
   Scenario: the input VCF cannot be standard input
     When I run `chaff -i - -o out.vcf -b sorted.bam --filters a-tailing`
-    Then the exit code is 1
-    And stderr contains "must be a file"
+    Then the exit code is 2
+    And stderr contains "error: invalid value '-' for '--input <VCF>': the input is read twice, so it must be a file, not standard input"
 
   Scenario: an option of a filter left out of --filters is an error
     When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --sample tumor --filters a-tailing --copied-damage-threshold 0.05`

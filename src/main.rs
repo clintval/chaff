@@ -115,7 +115,7 @@ struct Cli {
     /// Input VCF/BCF of somatic calls, coordinate-sorted.
     ///
     /// Read twice (once to learn priors, once to write), so it must be a file.
-    #[arg(short = 'i', long, value_name = "VCF", verbatim_doc_comment)]
+    #[arg(short = 'i', long, value_name = "VCF", value_parser = file, verbatim_doc_comment)]
     input: PathBuf,
 
     /// Output VCF/BCF; the format follows the extension.
@@ -273,6 +273,14 @@ fn positive(text: &str) -> Result<f64, String> {
     }
 }
 
+/// Parse a path to a file, refusing `-` for standard input.
+fn file(text: &str) -> Result<PathBuf, String> {
+    match text {
+        "-" => Err("the input is read twice, so it must be a file, not standard input".into()),
+        _ => Ok(PathBuf::from(text)),
+    }
+}
+
 /// Parse a probability from zero to one.
 fn probability(text: &str) -> Result<f64, String> {
     match text.parse::<f64>() {
@@ -301,7 +309,8 @@ fn filter_options(kind: FilterKind) -> &'static [&'static str] {
 
 impl Cli {
     /// Reject, as usage errors of `cmd`, an option typed on the command line for
-    /// a filter `--filters` leaves out, and damage classes that repeat a change.
+    /// a filter `--filters` leaves out, the copied damage filter without a
+    /// reference, and damage classes that repeat a change.
     fn validate(&self, matches: &ArgMatches, cmd: &mut Command) -> Result<(), clap::Error> {
         for kind in FilterKind::ALL {
             if self.filters.contains(&kind) {
@@ -321,6 +330,12 @@ impl Cli {
                 );
                 return Err(cmd.error(ErrorKind::ArgumentConflict, message));
             }
+        }
+        if self.filters.contains(&FilterKind::CopiedDamage) && self.reference.is_none() {
+            return Err(cmd.error(
+                ErrorKind::MissingRequiredArgument,
+                "the copied-damage filter needs a reference FASTA: '--ref <FASTA>'",
+            ));
         }
         validate_classes(&self.copied_damage_classes)
             .map_err(|error| cmd.error(ErrorKind::ValueValidation, error))
@@ -562,9 +577,14 @@ mod tests {
     use super::*;
 
     fn args(extra: &[&str]) -> Result<FilterArgs, clap::Error> {
-        let base = ["chaff", "-i", "in.vcf", "-o", "out.vcf", "-b", "in.bam"];
+        let base = ["chaff", "-o", "out.vcf", "-b", "in.bam"];
+        let input: &[&str] = match extra.contains(&"-i") {
+            true => &[],
+            false => &["-i", "in.vcf"],
+        };
+        let extra: Vec<&str> = input.iter().chain(extra).copied().collect();
         let mut cmd = Cli::command().color(clap::ColorChoice::Never);
-        let matches = cmd.try_get_matches_from_mut(base.iter().chain(extra))?;
+        let matches = cmd.try_get_matches_from_mut(base.iter().chain(&extra))?;
         let cli = Cli::from_arg_matches(&matches)?;
         cli.validate(&matches, &mut cmd)?;
         Ok(cli.into_args())
@@ -589,8 +609,26 @@ mod tests {
     }
 
     #[test]
+    fn test_the_copied_damage_filter_without_a_reference_is_a_usage_error() {
+        let error = args(&["--filters", "copied-damage,a-tailing"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+        assert_eq!(error.exit_code(), 2);
+        let message = "the copied-damage filter needs a reference FASTA: '--ref <FASTA>'";
+        assert!(error.to_string().contains(message), "{error}");
+    }
+
+    #[test]
+    fn test_standard_input_is_a_usage_error() {
+        let error = args(&["-i", "-", "--ref", "ref.fa"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+        assert_eq!(error.exit_code(), 2);
+        let message = "invalid value '-' for '--input <VCF>': the input is read twice";
+        assert!(error.to_string().contains(message), "{error}");
+    }
+
+    #[test]
     fn test_a_damage_class_and_its_reverse_complement_are_a_usage_error() {
-        let error = args(&["--copied-damage-classes", "C>T,G>A"]).unwrap_err();
+        let error = args(&["--ref", "ref.fa", "--copied-damage-classes", "C>T,G>A"]).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::ValueValidation);
         assert_eq!(error.exit_code(), 2);
         let message = "damage classes C>T and G>A describe the same change on opposite strands";
@@ -615,7 +653,6 @@ mod tests {
     }
 
     #[rstest]
-    #[case(&[])]
     #[case(&["--filters", "a-tailing"])]
     #[case(&["--ref", "ref.fa"])]
     #[case(&["--filters", "copied-damage", "--ref", "ref.fa"])]
