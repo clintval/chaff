@@ -129,7 +129,7 @@ chaff \
 ```
 
 The distances, scale, read floors, and prior are left at their defaults.
-An option of a filter that `--filters` leaves out is an error.
+An option of a filter that `--filters` leaves out is a usage error, and so is `--ref` without `copied-damage`.
 
 ## Filters
 

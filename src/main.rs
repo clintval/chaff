@@ -136,7 +136,7 @@ struct Cli {
 
     /// Indexed reference FASTA (`.fai` alongside) for CpG context.
     ///
-    /// Required by the `copied-damage` filter.
+    /// Required by the `copied-damage` filter, and an error without it.
     #[arg(short = 'r', long = "ref", value_name = "FASTA", verbatim_doc_comment)]
     reference: Option<PathBuf>,
 
@@ -281,10 +281,11 @@ fn probability(text: &str) -> Result<f64, String> {
     }
 }
 
-/// The argument IDs of each filter's options.
+/// The argument IDs of each filter's options and inputs.
 fn filter_options(kind: FilterKind) -> &'static [&'static str] {
     match kind {
         FilterKind::CopiedDamage => &[
+            "reference",
             "copied_damage_classes",
             "copied_damage_scale",
             "copied_damage_threshold",
@@ -575,6 +576,7 @@ mod tests {
     #[case(&["--filters", "copied-damage", "--a-tailing-distance", "2"], "the argument '--a-tailing-distance <BP>' applies only to the a-tailing filter")]
     #[case(&["--filters", "copied-damage", "--a-tailing-p-value", "0.01"], "the argument '--a-tailing-threshold <P>' applies only to the a-tailing filter")]
     #[case(&["--filters", "a-tailing", "--end-repair-fill-in-scale", "15"], "the argument '--end-repair-fill-in-scale <BP>' applies only to the end-repair-fill-in filter")]
+    #[case(&["--filters", "a-tailing,end-repair-fill-in", "--ref", "ref.fa"], "the argument '--ref <FASTA>' applies only to the copied-damage filter")]
     fn test_an_option_of_a_filter_left_out_is_a_usage_error(
         #[case] extra: &[&str],
         #[case] message: &str,
@@ -603,18 +605,20 @@ mod tests {
             .collect();
         for kind in FilterKind::ALL {
             let prefix = format!("{}_", kind.to_string().replace('-', "_"));
-            let named: Vec<&str> = ids
-                .iter()
-                .map(String::as_str)
-                .filter(|id| id.starts_with(&prefix))
-                .collect();
-            assert_eq!(named, filter_options(kind), "{kind}");
+            for id in ids.iter().filter(|id| id.starts_with(&prefix)) {
+                assert!(filter_options(kind).contains(&id.as_str()), "{kind}: {id}");
+            }
+            for id in filter_options(kind) {
+                assert!(ids.iter().any(|known| known == id), "{kind}: {id}");
+            }
         }
     }
 
     #[rstest]
     #[case(&[])]
     #[case(&["--filters", "a-tailing"])]
+    #[case(&["--ref", "ref.fa"])]
+    #[case(&["--filters", "copied-damage", "--ref", "ref.fa"])]
     #[case(&["--filters", "a-tailing", "--a-tailing-distance", "4", "--a-tailing-threshold", "0.001"])]
     #[case(&["--filters", "end-repair-fill-in", "--end-repair-fill-in-distance", "10", "--end-repair-fill-in-scale", "15"])]
     fn test_options_of_enabled_filters_and_defaults_are_accepted(#[case] extra: &[&str]) {

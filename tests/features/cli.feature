@@ -80,6 +80,11 @@ Feature: CLI contract
     Then the exit code is 2
     And stderr contains "error: the argument '--copied-damage-threshold <P>' applies only to the copied-damage filter, which '--filters' leaves out"
 
+  Scenario: a reference without the copied damage filter is an error
+    When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --sample tumor --filters a-tailing --ref ref.fa`
+    Then the exit code is 2
+    And stderr contains "error: the argument '--ref <FASTA>' applies only to the copied-damage filter, which '--filters' leaves out"
+
   Scenario: the end repair fill-in scale replaces the window only in the posterior
     When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --sample tumor --filters end-repair-fill-in --end-repair-fill-in-distance 10 --end-repair-fill-in-scale 15`
     Then the exit code is 0
