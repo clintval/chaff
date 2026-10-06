@@ -151,7 +151,7 @@ An option of a filter that `--filters` leaves out is a usage error, and so is `-
 
 - The learned prior: fgbio's mutation prior is near zero at duplex allele fractions, so alternate molecules inside the window make a call an artifact however many reference molecules sit there too.
 - End repair extends a recessed 3' end across a 5' overhang; fgbio's docs describe filling a 3' overhang.
-- The far template end comes from the mate's `MC` tag, which chaff requires; fgbio measures it by insert size, and chaff never reads `TLEN`.
+- Distances from both template ends count template bases: chaff walks both reads' CIGARs, the mate's from its `MC` tag, as [fgbio #1172](https://github.com/fulcrumgenomics/fgbio/pull/1172) does for clipping, so an indel counts by its length. Soft clips count and hard clips do not. fgbio measures the far end by insert size, and chaff never reads `TLEN`.
 - Overlapping mates count once, and mates that disagree count as neither allele; fgbio keeps the first read of each name.
 - A call with alternate but no reference molecules gets no INFO value; fgbio writes `NaN`.
 - The BAM is always streamed, never queried by index.
