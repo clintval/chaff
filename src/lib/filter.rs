@@ -26,9 +26,9 @@ use noodles::vcf::variant::RecordBuf;
 
 use crate::call::Genotype;
 use crate::classes::{sbs6, Context};
+use crate::copied_damage::{CopiedDamage, DamageSite};
 use crate::evidence::{Evidence, Molecule, PileupEvidence, PileupSource};
 use crate::io::{add_filter, add_info, vcf_float, VariantReader, VariantWriter};
-use crate::lesion_copy::{LesionCopy, LesionSite};
 use crate::metrics::{write_metrics, StratumMetrics};
 use crate::prior::{
     fgbio_artifact_prior, learn_artifact_fraction, posterior_mutation, PriorMode, PSEUDOCOUNT,
@@ -41,7 +41,7 @@ use crate::template::ReadFilter;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ValueEnum)]
 pub enum FilterKind {
     /// Damage copied onto the other strand before strand tagging.
-    LesionCopy,
+    CopiedDamage,
     /// Adenines added to an over-digested recessed 3' end during A-tailing.
     ATailing,
     /// Damage copied into a filled-in recessed 3' end during end repair.
@@ -51,7 +51,7 @@ pub enum FilterKind {
 impl FilterKind {
     /// Every filter, in output order.
     pub const ALL: [FilterKind; 3] = [
-        FilterKind::LesionCopy,
+        FilterKind::CopiedDamage,
         FilterKind::ATailing,
         FilterKind::EndRepairFillIn,
     ];
@@ -60,7 +60,7 @@ impl FilterKind {
 impl fmt::Display for FilterKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FilterKind::LesionCopy => write!(f, "lesion-copy"),
+            FilterKind::CopiedDamage => write!(f, "copied-damage"),
             FilterKind::EndRepairFillIn => write!(f, "end-repair-fill-in"),
             FilterKind::ATailing => write!(f, "a-tailing"),
         }
@@ -76,10 +76,10 @@ pub struct FilterOptions {
     pub filters: Vec<FilterKind>,
     /// The prior that turns likelihood ratios into posteriors.
     pub prior: PriorMode,
-    /// The lesion copy model.
-    pub lesion_copy: LesionCopy,
-    /// Apply `LesionCopyArtifact` at or below this posterior.
-    pub lesion_copy_threshold: Option<f64>,
+    /// The copied damage model.
+    pub copied_damage: CopiedDamage,
+    /// Apply `CopiedDamageArtifact` at or below this posterior.
+    pub copied_damage_threshold: Option<f64>,
     /// The end repair fill-in model.
     pub end_repair_fill_in: EndRepairFillIn,
     /// Apply `EndRepairFillInArtifact` at or below this posterior.
@@ -96,8 +96,8 @@ impl Default for FilterOptions {
             sample: None,
             filters: FilterKind::ALL.to_vec(),
             prior: PriorMode::Learned,
-            lesion_copy: LesionCopy::default(),
-            lesion_copy_threshold: None,
+            copied_damage: CopiedDamage::default(),
+            copied_damage_threshold: None,
             end_repair_fill_in: EndRepairFillIn::default(),
             end_repair_fill_in_threshold: None,
             a_tailing: ATailing::default(),
@@ -113,7 +113,7 @@ impl FilterOptions {
 
     fn threshold(&self, kind: FilterKind) -> Option<f64> {
         match kind {
-            FilterKind::LesionCopy => self.lesion_copy_threshold,
+            FilterKind::CopiedDamage => self.copied_damage_threshold,
             FilterKind::EndRepairFillIn => self.end_repair_fill_in_threshold,
             FilterKind::ATailing => self.a_tailing_threshold,
         }
@@ -121,7 +121,7 @@ impl FilterOptions {
 
     fn filter_name(kind: FilterKind) -> &'static str {
         match kind {
-            FilterKind::LesionCopy => LesionCopy::FILTER,
+            FilterKind::CopiedDamage => CopiedDamage::FILTER,
             FilterKind::EndRepairFillIn => EndRepairFillIn::FILTER,
             FilterKind::ATailing => ATailing::FILTER,
         }
@@ -144,52 +144,52 @@ impl FilterOptions {
     /// Add the INFO and FILTER lines of every enabled filter to a header.
     pub fn add_header_lines(&self, header: &mut vcf::Header) {
         let prior = self.prior_text();
-        if self.enabled(FilterKind::LesionCopy) {
+        if self.enabled(FilterKind::CopiedDamage) {
             let classes: Vec<String> = self
-                .lesion_copy
+                .copied_damage
                 .classes
                 .iter()
                 .map(ToString::to_string)
                 .collect();
             let model = format!(
-                "lesion classes {} and a {} bp copy scale",
+                "damage classes {} and a {} bp copy scale",
                 classes.join(","),
-                self.lesion_copy.scale
+                self.copied_damage.scale
             );
             add_info(
                 header,
-                LesionCopy::INFO_POSTERIOR,
+                CopiedDamage::INFO_POSTERIOR,
                 Number::Count(1),
                 Type::Float,
-                &format!("Posterior probability that the call is a true mutation rather than a lesion copied onto both strands, with {model} and {prior}."),
+                &format!("Posterior probability that the call is a true mutation rather than damage copied onto both strands, with {model} and {prior}."),
             );
             add_info(
                 header,
-                LesionCopy::INFO_RATIO,
+                CopiedDamage::INFO_RATIO,
                 Number::Count(1),
                 Type::Float,
-                "Log10 likelihood ratio of the lesion copy artifact to a true mutation.",
+                "Log10 likelihood ratio of the copied damage artifact to a true mutation.",
             );
             add_info(
                 header,
-                LesionCopy::INFO_ALT,
+                CopiedDamage::INFO_ALT,
                 Number::Count(2),
                 Type::Integer,
                 "Alternate molecules nearer the lesion strand's 5' end than its 3' end, and all alternate molecules measured.",
             );
             add_info(
                 header,
-                LesionCopy::INFO_REF,
+                CopiedDamage::INFO_REF,
                 Number::Count(2),
                 Type::Integer,
                 "Reference molecules nearer the lesion strand's 5' end than its 3' end, and all reference molecules measured.",
             );
             add_filter(
                 header,
-                LesionCopy::FILTER,
+                CopiedDamage::FILTER,
                 &format!(
-                    "Call is likely a lesion copied onto both strands, with {model}, {}.",
-                    self.threshold_text(FilterKind::LesionCopy)
+                    "Call is likely damage copied onto both strands, with {model}, {}.",
+                    self.threshold_text(FilterKind::CopiedDamage)
                 ),
             );
         }
@@ -247,7 +247,7 @@ pub struct FilterArgs {
     pub output: PathBuf,
     /// The coordinate-sorted BAM of the sample.
     pub bam: PathBuf,
-    /// The indexed reference FASTA, needed by the lesion copy filter.
+    /// The indexed reference FASTA, needed by the copied damage filter.
     pub reference: Option<PathBuf>,
     /// The per-sample metrics TSV.
     pub metrics: Option<PathBuf>,
@@ -322,7 +322,7 @@ impl CoordinateOrder {
 /// Whether a filter applies to a genotype.
 fn applies(kind: FilterKind, gt: &Genotype) -> bool {
     match kind {
-        FilterKind::LesionCopy => LesionCopy::applies_to(gt),
+        FilterKind::CopiedDamage => CopiedDamage::applies_to(gt),
         FilterKind::EndRepairFillIn => EndRepairFillIn::applies_to(gt),
         FilterKind::ATailing => ATailing::applies_to(gt),
     }
@@ -384,22 +384,22 @@ fn score_call(
                 substitution.clone(),
                 options.a_tailing.score(molecules, site, ref_base, alt_base),
             )),
-            FilterKind::LesionCopy => match options.lesion_copy.classify(ref_base, alt_base) {
+            FilterKind::CopiedDamage => match options.copied_damage.classify(ref_base, alt_base) {
                 None => None,
                 Some((class, strand)) => {
                     let reference = reference
                         .as_deref_mut()
-                        .context("the lesion copy filter needs a reference FASTA")?;
+                        .context("the copied damage filter needs a reference FASTA")?;
                     let (prev, base, next) = reference.context(contig, pos)?;
-                    let lesion = LesionSite {
+                    let damage = DamageSite {
                         class,
                         strand,
                         context: Context::of(prev, base, next),
                     };
                     let score = options
-                        .lesion_copy
+                        .copied_damage
                         .score(molecules, site, ref_base, alt_base, strand);
-                    Some((lesion.stratum(), score))
+                    Some((damage.stratum(), score))
                 }
             },
         };
@@ -465,7 +465,7 @@ fn annotate_record(record: &mut RecordBuf, annotations: &[Annotation], options: 
                 };
                 info.insert(key.to_string(), Some(Value::Float(vcf_float(posterior))));
             }
-            FilterKind::LesionCopy => {
+            FilterKind::CopiedDamage => {
                 let score = &annotation.score;
                 let pair = |a: u32, b: u32| {
                     Some(Value::Array(Array::Integer(vec![
@@ -477,20 +477,20 @@ fn annotate_record(record: &mut RecordBuf, annotations: &[Annotation], options: 
                     (annotation.posterior, score.log_likelihood_ratio)
                 {
                     info.insert(
-                        LesionCopy::INFO_POSTERIOR.to_string(),
+                        CopiedDamage::INFO_POSTERIOR.to_string(),
                         Some(Value::Float(vcf_float(posterior))),
                     );
                     info.insert(
-                        LesionCopy::INFO_RATIO.to_string(),
+                        CopiedDamage::INFO_RATIO.to_string(),
                         Some(Value::Float(vcf_float(llr / std::f64::consts::LN_10))),
                     );
                 }
                 info.insert(
-                    LesionCopy::INFO_ALT.to_string(),
+                    CopiedDamage::INFO_ALT.to_string(),
                     pair(score.alt_congruent, score.alt_molecules),
                 );
                 info.insert(
-                    LesionCopy::INFO_REF.to_string(),
+                    CopiedDamage::INFO_REF.to_string(),
                     pair(score.ref_congruent, score.ref_molecules),
                 );
             }
@@ -523,8 +523,8 @@ pub fn filter_vcf(
     if input == Path::new("-") {
         bail!("the input VCF/BCF is read twice, so it must be a file, not standard input");
     }
-    if options.enabled(FilterKind::LesionCopy) && reference.is_none() {
-        bail!("the lesion copy filter needs a reference FASTA (--ref)");
+    if options.enabled(FilterKind::CopiedDamage) && reference.is_none() {
+        bail!("the copied damage filter needs a reference FASTA (--ref)");
     }
     if options.filters.is_empty() {
         log::warn!("every filter is disabled, so chaff will copy the input unchanged");
@@ -694,8 +694,8 @@ pub fn validate_inputs(args: &FilterArgs) -> Result<sam::Header> {
         Some(path) => {
             Reference::open(path)?;
         }
-        None if args.options.enabled(FilterKind::LesionCopy) => {
-            bail!("the lesion copy filter needs a reference FASTA (--ref)")
+        None if args.options.enabled(FilterKind::CopiedDamage) => {
+            bail!("the copied damage filter needs a reference FASTA (--ref)")
         }
         None => {}
     }
@@ -784,7 +784,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lesion_copy_end_to_end_on_a_molecule_table() {
+    fn test_copied_damage_end_to_end_on_a_molecule_table() {
         let dir = tempfile::tempdir().unwrap();
         let reference = write_fasta(dir.path(), "chr1", &"ACGTTCAA".repeat(250));
         let mut vcf = VcfBuilder::new(&["tumor"]);
@@ -810,25 +810,25 @@ mod tests {
             table.insert("chr1", pos as usize, molecules);
         }
         let options = FilterOptions {
-            filters: vec![FilterKind::LesionCopy],
-            lesion_copy_threshold: Some(0.05),
+            filters: vec![FilterKind::CopiedDamage],
+            copied_damage_threshold: Some(0.05),
             ..FilterOptions::default()
         };
         let mut reference = Reference::open(&reference).unwrap();
         let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
 
         let (header, records) = read_records(&output);
-        assert!(header.infos().contains_key(LesionCopy::INFO_POSTERIOR));
-        assert!(header.filters().contains_key(LesionCopy::FILTER));
+        assert!(header.infos().contains_key(CopiedDamage::INFO_POSTERIOR));
+        assert!(header.filters().contains_key(CopiedDamage::FILTER));
         assert!(!header.infos().contains_key(EndRepairFillIn::INFO));
         let artifact = &records[0];
         let mutation = &records[1];
-        assert!(float(artifact, LesionCopy::INFO_POSTERIOR).unwrap() < 0.05);
-        assert!(artifact.filters().as_ref().contains(LesionCopy::FILTER));
-        assert!(float(mutation, LesionCopy::INFO_POSTERIOR).unwrap() > 0.5);
-        assert!(!mutation.filters().as_ref().contains(LesionCopy::FILTER));
+        assert!(float(artifact, CopiedDamage::INFO_POSTERIOR).unwrap() < 0.05);
+        assert!(artifact.filters().as_ref().contains(CopiedDamage::FILTER));
+        assert!(float(mutation, CopiedDamage::INFO_POSTERIOR).unwrap() > 0.5);
+        assert!(!mutation.filters().as_ref().contains(CopiedDamage::FILTER));
         assert_eq!(
-            artifact.info().get(LesionCopy::INFO_ALT),
+            artifact.info().get(CopiedDamage::INFO_ALT),
             Some(Some(&Value::Array(Array::Integer(vec![Some(6), Some(6)]))))
         );
 
@@ -868,7 +868,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lesion_copy_requires_a_reference() {
+    fn test_copied_damage_requires_a_reference() {
         let dir = tempfile::tempdir().unwrap();
         let input = VcfBuilder::new(&["tumor"]).write(&dir.path().join("in.vcf"));
         let error = filter_vcf(

@@ -1,6 +1,6 @@
 //! Substitution classes, lesion strands, and sequence context.
 //!
-//! A lesion class such as `C>T` names the base on the damaged strand and what
+//! A damage class such as `C>T` names the base on the damaged strand and what
 //! that base reads as after polymerase copies it. A call explains a class on
 //! either strand: `C>T` on the forward strand (REF `C`, ALT `T`) puts the lesion
 //! on the forward strand, and `G>A` (its reverse complement) puts it on the
@@ -38,16 +38,16 @@ pub enum Strand {
     Reverse,
 }
 
-/// A lesion class: a base on the damaged strand and the base it reads as.
+/// A damage class: a base on the damaged strand and the base it reads as.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct LesionClass {
+pub struct DamageClass {
     /// The undamaged base on the lesion strand, e.g. `C` for deamination.
     pub lesion: u8,
     /// The base the lesion reads as, e.g. `T` for deaminated cytosine.
     pub reads_as: u8,
 }
 
-impl LesionClass {
+impl DamageClass {
     /// Cytosine deamination, or deamination of 5-methylcytosine: `C>T`.
     pub const DEAMINATION: Self = Self {
         lesion: b'C',
@@ -81,23 +81,23 @@ impl LesionClass {
     }
 }
 
-impl fmt::Display for LesionClass {
+impl fmt::Display for DamageClass {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}>{}", self.lesion as char, self.reads_as as char)
     }
 }
 
-impl FromStr for LesionClass {
+impl FromStr for DamageClass {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self> {
         let upper = s.trim().to_ascii_uppercase();
         let bytes = upper.as_bytes();
         if bytes.len() != 3 || bytes[1] != b'>' || !is_dna(bytes[0]) || !is_dna(bytes[2]) {
-            bail!("a lesion class is two bases joined by '>', like C>T, but found: {s}");
+            bail!("a damage class is two bases joined by '>', like C>T, but found: {s}");
         }
         if bytes[0] == bytes[2] {
-            bail!("a lesion class must change the base, but found: {s}");
+            bail!("a damage class must change the base, but found: {s}");
         }
         Ok(Self {
             lesion: bytes[0],
@@ -108,11 +108,11 @@ impl FromStr for LesionClass {
 
 /// Reject a class list with a duplicate, counting a class and its reverse
 /// complement as the same class.
-pub fn validate_classes(classes: &[LesionClass]) -> Result<()> {
+pub fn validate_classes(classes: &[DamageClass]) -> Result<()> {
     for (i, a) in classes.iter().enumerate() {
         for b in &classes[i + 1..] {
             if a == b || *a == b.reverse_complement() {
-                bail!("lesion classes {a} and {b} describe the same change on opposite strands");
+                bail!("damage classes {a} and {b} describe the same change on opposite strands");
             }
         }
     }
@@ -177,9 +177,9 @@ mod tests {
     #[case("C>T", b'C', b'T')]
     #[case("g>t", b'G', b'T')]
     #[case(" A>G ", b'A', b'G')]
-    fn test_lesion_class_parses(#[case] text: &str, #[case] lesion: u8, #[case] reads_as: u8) {
-        let class: LesionClass = text.parse().unwrap();
-        assert_eq!(class, LesionClass { lesion, reads_as });
+    fn test_damage_class_parses(#[case] text: &str, #[case] lesion: u8, #[case] reads_as: u8) {
+        let class: DamageClass = text.parse().unwrap();
+        assert_eq!(class, DamageClass { lesion, reads_as });
     }
 
     #[rstest]
@@ -187,25 +187,25 @@ mod tests {
     #[case("CT")]
     #[case("C>N")]
     #[case("CC>T")]
-    fn test_lesion_class_rejects_malformed(#[case] text: &str) {
-        assert!(text.parse::<LesionClass>().is_err());
+    fn test_damage_class_rejects_malformed(#[case] text: &str) {
+        assert!(text.parse::<DamageClass>().is_err());
     }
 
     #[test]
-    fn test_lesion_class_display_round_trips() {
-        assert_eq!(LesionClass::DEAMINATION.to_string(), "C>T");
-        assert_eq!(LesionClass::OXIDATION.to_string(), "G>T");
+    fn test_damage_class_display_round_trips() {
+        assert_eq!(DamageClass::DEAMINATION.to_string(), "C>T");
+        assert_eq!(DamageClass::OXIDATION.to_string(), "G>T");
     }
 
     #[rstest]
-    #[case(LesionClass::DEAMINATION, b'C', b'T', Some(Strand::Forward))]
-    #[case(LesionClass::DEAMINATION, b'G', b'A', Some(Strand::Reverse))]
-    #[case(LesionClass::DEAMINATION, b'C', b'A', None)]
-    #[case(LesionClass::OXIDATION, b'G', b'T', Some(Strand::Forward))]
-    #[case(LesionClass::OXIDATION, b'C', b'A', Some(Strand::Reverse))]
-    #[case(LesionClass::OXIDATION, b'G', b'A', None)]
+    #[case(DamageClass::DEAMINATION, b'C', b'T', Some(Strand::Forward))]
+    #[case(DamageClass::DEAMINATION, b'G', b'A', Some(Strand::Reverse))]
+    #[case(DamageClass::DEAMINATION, b'C', b'A', None)]
+    #[case(DamageClass::OXIDATION, b'G', b'T', Some(Strand::Forward))]
+    #[case(DamageClass::OXIDATION, b'C', b'A', Some(Strand::Reverse))]
+    #[case(DamageClass::OXIDATION, b'G', b'A', None)]
     fn test_lesion_strand(
-        #[case] class: LesionClass,
+        #[case] class: DamageClass,
         #[case] ref_base: u8,
         #[case] alt_base: u8,
         #[case] expected: Option<Strand>,
@@ -215,10 +215,10 @@ mod tests {
 
     #[test]
     fn test_validate_classes_rejects_reverse_complement_duplicates() {
-        let classes = vec![LesionClass::DEAMINATION, "G>A".parse().unwrap()];
+        let classes = vec![DamageClass::DEAMINATION, "G>A".parse().unwrap()];
         assert!(validate_classes(&classes).is_err());
-        assert!(validate_classes(&[LesionClass::DEAMINATION, LesionClass::DEAMINATION]).is_err());
-        assert!(validate_classes(&[LesionClass::DEAMINATION, LesionClass::OXIDATION]).is_ok());
+        assert!(validate_classes(&[DamageClass::DEAMINATION, DamageClass::DEAMINATION]).is_err());
+        assert!(validate_classes(&[DamageClass::DEAMINATION, DamageClass::OXIDATION]).is_ok());
     }
 
     #[rstest]

@@ -22,7 +22,7 @@ Feature: CLI contract
   Scenario: documents every filter and the prior
     When I run `chaff --help`
     Then the exit code is 0
-    And stdout contains "lesion-copy"
+    And stdout contains "copied-damage"
     And stdout contains "end-repair-fill-in"
     And stdout contains "a-tailing"
     And stdout contains "--prior"
@@ -36,8 +36,8 @@ Feature: CLI contract
     Then the exit code is 2
     And stderr contains "--bam <BAM>"
 
-  Scenario: a lesion class and its reverse complement cannot both be given
-    When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --lesion-copy-classes C>T,G>A`
+  Scenario: a damage class and its reverse complement cannot both be given
+    When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --copied-damage-classes C>T,G>A`
     Then the exit code is 1
     And stderr contains "describe the same change on opposite strands"
 
@@ -60,7 +60,7 @@ Feature: CLI contract
     Then the exit code is 1
     And stderr contains "WhoDis"
 
-  Scenario: the lesion copy filter needs a reference
+  Scenario: the copied damage filter needs a reference
     When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --sample tumor`
     Then the exit code is 1
     And stderr contains "needs a reference FASTA"

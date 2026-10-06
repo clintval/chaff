@@ -3,7 +3,7 @@
 //!
 //! For each stratum the counts pool every annotated call's molecules. A
 //! molecule is congruent when it sits where the artifact would put it: nearer
-//! the lesion strand's 5' end than its 3' end for the lesion copy filter
+//! the lesion strand's 5' end than its 3' end for the copied damage filter
 //! (NanoSeq's strand assignment by nearest 5' end), within the distance of the
 //! relevant template end for the read-end filters.
 //!
@@ -28,7 +28,7 @@ use statrs::distribution::{Binomial, DiscreteCDF};
 pub struct StratumMetrics {
     /// The sample whose molecules were measured.
     pub sample: String,
-    /// The filter: `lesion-copy`, `end-repair-fill-in`, or `a-tailing`.
+    /// The filter: `copied-damage`, `end-repair-fill-in`, or `a-tailing`.
     pub filter: String,
     /// The stratum the artifact fraction is learned in.
     pub stratum: String,
@@ -157,7 +157,7 @@ mod tests {
     fn row() -> StratumMetrics {
         StratumMetrics {
             sample: "s1".into(),
-            filter: "lesion-copy".into(),
+            filter: "copied-damage".into(),
             stratum: "C>T:CpG".into(),
             calls: 3,
             filtered: 1,
@@ -208,7 +208,7 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2);
         assert!(lines[0].starts_with("sample\tfilter\tstratum\tcalls"));
-        assert!(lines[1].starts_with("s1\tlesion-copy\tC>T:CpG\t3\t1\t0.4"));
+        assert!(lines[1].starts_with("s1\tcopied-damage\tC>T:CpG\t3\t1\t0.4"));
     }
 
     #[test]

@@ -38,7 +38,7 @@ cargo install --git https://github.com/clintval/chaff
 
 ## Quick Start
 
-Annotate the calls of one sample, apply the lesion copy FILTER at a posterior of 0.05 or below, and write the per-sample metrics:
+Annotate the calls of one sample, apply the copied damage FILTER at a posterior of 0.05 or below, and write the per-sample metrics:
 
 ```bash
 chaff \
@@ -48,7 +48,7 @@ chaff \
     --sample "tumor" \
     --output "calls.chaff.vcf.gz" \
     --metrics "tumor.chaff.tsv" \
-    --lesion-copy-threshold 0.05
+    --copied-damage-threshold 0.05
 ```
 
 The VCF and the BAM must be coordinate sorted; neither needs an index, because `chaff` merge-joins them in one stream.
@@ -63,28 +63,28 @@ Each call gets a likelihood ratio of artifact to mutation, and the INFO field re
 
 | Filter | INFO | FILTER | Applies to |
 | --- | --- | --- | --- |
-| `lesion-copy` | `LCAP`, `LCLR`, `LCAC`, `LCRC` | `LesionCopyArtifact` | heterozygous SNVs in a lesion class |
+| `copied-damage` | `CDAP`, `CDLR`, `CDAC`, `CDRC` | `CopiedDamageArtifact` | heterozygous SNVs in a damage class |
 | `a-tailing` | `ATAP` | `ATailingArtifact` | heterozygous SNVs to `A` or `T` |
 | `end-repair-fill-in` | `ERFAP` | `EndRepairFillInArtifact` | heterozygous SNVs |
 
-A FILTER is applied only with a threshold (`--lesion-copy-threshold`, `--a-tailing-threshold`, `--end-repair-fill-in-threshold`), at or below it.
+A FILTER is applied only with a threshold (`--copied-damage-threshold`, `--a-tailing-threshold`, `--end-repair-fill-in-threshold`), at or below it.
 
-###### Lesion Copy
+###### Copied Damage
 
 A lesion on one strand, such as a deaminated cytosine or an 8-oxoguanine, is templated into the other strand when polymerase resynthesizes it by end-repair fill-in, nick translation, or gap filling before the strands are tagged.
 Both strands then carry the change, and duplex consensus agrees on it.
 Resynthesis runs 5' to 3' along the new strand, so copies sit near the 5' end of the lesion strand and are depleted near its 3' end, over tens to more than a hundred bases.
 
-The lesion strand comes from the substitution class (`--lesion-copy-classes`, default `C>T,G>T`): `C>T` puts the lesion on the strand carrying the reference `C`, so a forward-strand `C>T` and a reverse-strand `G>A` are the same class; `G>T` puts it on the strand carrying the reference `G`.
+The lesion strand comes from the substitution class (`--copied-damage-classes`, default `C>T,G>T`): `C>T` puts the lesion on the strand carrying the reference `C`, so a forward-strand `C>T` and a reverse-strand `G>A` are the same class; `G>T` puts it on the strand carrying the reference `G`.
 For each molecule with both template ends known, `d` is the distance of the site from the lesion strand's 5' end.
-A lesion at distance `d` is copied with probability `w(d) = exp(-d / s)`, an exponential resynthesis length with mean `s` (`--lesion-copy-scale`, default 30 bp).
+A lesion at distance `d` is copied with probability `w(d) = exp(-d / s)`, an exponential resynthesis length with mean `s` (`--copied-damage-scale`, default 30 bp).
 The artifact's alternate distances follow the reference distances tilted by `w`, so with `W` the mean of `w` over the reference molecules and `e` an alternate base's error probability, the log likelihood ratio is
 
 ```
 LLR = sum over alternate molecules of ln((1 - e) * w(d) / W + e)
 ```
 
-`LCLR` reports it in log10 units; `LCAC` and `LCRC` count the alternate and reference molecules nearer the lesion strand's 5' end than its 3' end, out of all measured.
+`CDLR` reports it in log10 units; `CDAC` and `CDRC` count the alternate and reference molecules nearer the lesion strand's 5' end than its 3' end, out of all measured.
 Calls are stratified by class and by CpG context from the reference.
 
 ###### End Repair Fill-in
@@ -103,7 +103,7 @@ The likelihoods are fgbio's.
 ## Priors
 
 By default the prior is learned.
-Within each sample and stratum (lesion class and CpG context for `lesion-copy`, the six pyrimidine substitution classes for the others), the calls form a two-component mixture with an unknown artifact fraction `pi`, estimated by expectation-maximization as GATK's `LearnReadOrientationModel` learns its priors:
+Within each sample and stratum (damage class and CpG context for `copied-damage`, the six pyrimidine substitution classes for the others), the calls form a two-component mixture with an unknown artifact fraction `pi`, estimated by expectation-maximization as GATK's `LearnReadOrientationModel` learns its priors:
 
 ```
 E-step: r_i = 1 / (1 + exp(-(LLR_i + logit(pi))))
@@ -127,7 +127,7 @@ The posterior probability of a true mutation is then `1 / (1 + exp(LLR_i + logit
 
 ## Metrics
 
-`--metrics` writes one row per filter and stratum: calls, filtered calls, the learned artifact fraction, the expected number of artifact calls, and the alternate and reference molecules congruent with the artifact (for `lesion-copy`, nearer the lesion strand's 5' end).
+`--metrics` writes one row per filter and stratum: calls, filtered calls, the learned artifact fraction, the expected number of artifact calls, and the alternate and reference molecules congruent with the artifact (for `copied-damage`, nearer the lesion strand's 5' end).
 The `asymmetry_p_value` is a one-sided binomial test of the congruent alternate molecules against the congruent fraction of the reference molecules, NanoSeq's test with the reference molecules in place of a fixed one half.
 
 ## Development and Testing

@@ -4,10 +4,10 @@
 
 pub mod call;
 pub mod classes;
+pub mod copied_damage;
 pub mod evidence;
 pub mod filter;
 pub mod io;
-pub mod lesion_copy;
 pub mod metrics;
 pub mod prior;
 pub mod read_end;

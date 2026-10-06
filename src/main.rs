@@ -4,9 +4,9 @@ use std::process;
 use std::path::PathBuf;
 
 use anyhow::{Error, Result};
-use chaff::classes::{validate_classes, LesionClass};
+use chaff::classes::{validate_classes, DamageClass};
+use chaff::copied_damage::CopiedDamage;
 use chaff::filter::{run_filter, FilterArgs, FilterKind, FilterOptions};
-use chaff::lesion_copy::LesionCopy;
 use chaff::prior::PriorMode;
 use chaff::read_end::{ATailing, EndRepairFillIn};
 use chaff::template::ReadFilter;
@@ -73,7 +73,7 @@ pub(crate) const CARGO_STYLING: Styles = Styles::styled()
 ///
 /// FILTERS
 ///
-///   lesion-copy          damage copied onto the other strand before strand
+///   copied-damage        damage copied onto the other strand before strand
 ///                        tagging: alternates crowd the lesion strand's 5' end
 ///   end-repair-fill-in   damage copied into a filled-in recessed 3' end:
 ///                        alternates crowd either template end (fgbio ERFAP)
@@ -87,10 +87,10 @@ pub(crate) const CARGO_STYLING: Styles = Styles::styled()
 ///   chaff -i calls.vcf.gz -b tumor.bam -r ref.fa -o out.vcf.gz \
 ///       --metrics tumor.chaff.tsv
 ///
-///  2. Apply the lesion copy FILTER at a posterior of 0.05 or below:
+///  2. Apply the copied damage FILTER at a posterior of 0.05 or below:
 ///
 ///   chaff -i calls.vcf.gz -b tumor.bam -r ref.fa -o out.vcf.gz \
-///       --lesion-copy-threshold 0.05
+///       --copied-damage-threshold 0.05
 ///
 ///  3. Reproduce fgbio FilterSomaticVcf, including its prior:
 ///
@@ -131,7 +131,7 @@ struct Cli {
 
     /// Indexed reference FASTA (`.fai` alongside) for CpG context.
     ///
-    /// Required by the `lesion-copy` filter.
+    /// Required by the `copied-damage` filter.
     #[arg(short = 'r', long = "ref", value_name = "FASTA", verbatim_doc_comment)]
     reference: Option<PathBuf>,
 
@@ -173,7 +173,7 @@ struct Cli {
 
     /// The filters to run, comma-separated.
     ///
-    ///   --filters lesion-copy                     only the lesion copy filter
+    ///   --filters copied-damage                   only the copied damage filter
     ///   --filters end-repair-fill-in,a-tailing    only the fgbio filters
     #[arg(
         long,
@@ -200,7 +200,7 @@ struct Cli {
     )]
     prior: PriorMode,
 
-    /// Lesion classes as lesion base `>` read base, comma-separated.
+    /// Damage classes as damaged base `>` read base, comma-separated.
     ///
     /// A class matches on either strand: `C>T` covers REF/ALT `C/T` (lesion on
     /// the forward strand) and `G/A` (lesion on the reverse strand).
@@ -214,15 +214,15 @@ struct Cli {
         default_values = ["C>T", "G>T"],
         verbatim_doc_comment
     )]
-    lesion_copy_classes: Vec<LesionClass>,
+    copied_damage_classes: Vec<DamageClass>,
 
     /// Mean length in bases of the resynthesis that copies a lesion.
     #[arg(long, value_name = "BP", default_value_t = 30.0, value_parser = positive, verbatim_doc_comment)]
-    lesion_copy_scale: f64,
+    copied_damage_scale: f64,
 
-    /// Apply `LesionCopyArtifact` at or below this posterior.
+    /// Apply `CopiedDamageArtifact` at or below this posterior.
     #[arg(long, value_name = "P", value_parser = probability, verbatim_doc_comment)]
-    lesion_copy_threshold: Option<f64>,
+    copied_damage_threshold: Option<f64>,
 
     /// Distance from a template end within which end repair fill-in acts.
     #[arg(long, value_name = "BP", default_value_t = 15, verbatim_doc_comment)]
@@ -276,16 +276,16 @@ fn probability(text: &str) -> Result<f64, String> {
 impl Cli {
     /// Validate the options and gather them into [`FilterArgs`].
     fn into_args(self) -> Result<FilterArgs> {
-        validate_classes(&self.lesion_copy_classes)?;
+        validate_classes(&self.copied_damage_classes)?;
         let options = FilterOptions {
             sample: self.sample,
             filters: self.filters,
             prior: self.prior,
-            lesion_copy: LesionCopy {
-                classes: self.lesion_copy_classes,
-                scale: self.lesion_copy_scale,
+            copied_damage: CopiedDamage {
+                classes: self.copied_damage_classes,
+                scale: self.copied_damage_scale,
             },
-            lesion_copy_threshold: self.lesion_copy_threshold,
+            copied_damage_threshold: self.copied_damage_threshold,
             end_repair_fill_in: EndRepairFillIn {
                 distance: self.end_repair_fill_in_distance,
                 scale: self.end_repair_fill_in_scale,

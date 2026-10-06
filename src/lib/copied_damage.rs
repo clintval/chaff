@@ -1,4 +1,4 @@
-//! The lesion copy filter: damage that polymerase copied onto the other strand
+//! The copied damage filter: damage that polymerase copied onto the other strand
 //! before the strands were tagged.
 //!
 //! A lesion on one strand, such as a deaminated cytosine or an 8-oxoguanine,
@@ -26,59 +26,59 @@
 //! [`crate::read_end::tilt_log_likelihood_ratio`] for the per-molecule terms.
 
 use crate::call::Genotype;
-use crate::classes::{Context, LesionClass, Strand};
+use crate::classes::{Context, DamageClass, Strand};
 use crate::evidence::Molecule;
 use crate::read_end::{tilt_log_likelihood_ratio, Score};
 
-/// The lesion copy filter.
+/// The copied damage filter.
 #[derive(Clone, Debug, PartialEq)]
-pub struct LesionCopy {
-    /// The lesion classes to test.
-    pub classes: Vec<LesionClass>,
+pub struct CopiedDamage {
+    /// The damage classes to test.
+    pub classes: Vec<DamageClass>,
     /// The mean resynthesis length in bases.
     pub scale: f64,
 }
 
-impl Default for LesionCopy {
+impl Default for CopiedDamage {
     fn default() -> Self {
         Self {
-            classes: vec![LesionClass::DEAMINATION, LesionClass::OXIDATION],
+            classes: vec![DamageClass::DEAMINATION, DamageClass::OXIDATION],
             scale: 30.0,
         }
     }
 }
 
-/// The lesion class, strand, and context one call is tested under.
+/// The damage class, lesion strand, and CpG context one call is tested under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LesionSite {
+pub struct DamageSite {
     /// The class that explains the call.
-    pub class: LesionClass,
+    pub class: DamageClass,
     /// The strand carrying the lesion.
     pub strand: Strand,
     /// Whether the lesion base sits in a CpG.
     pub context: Context,
 }
 
-impl LesionSite {
+impl DamageSite {
     /// The stratum label, e.g. `C>T:CpG`.
     pub fn stratum(&self) -> String {
         format!("{}:{}", self.class, self.context)
     }
 }
 
-impl LesionCopy {
+impl CopiedDamage {
     /// The INFO key for the posterior probability of a true mutation.
-    pub const INFO_POSTERIOR: &'static str = "LCAP";
+    pub const INFO_POSTERIOR: &'static str = "CDAP";
     /// The INFO key for the log10 likelihood ratio, artifact to mutation.
-    pub const INFO_RATIO: &'static str = "LCLR";
+    pub const INFO_RATIO: &'static str = "CDLR";
     /// The INFO key for the alternate molecules nearer the lesion strand's 5'
     /// end, and all alternate molecules measured.
-    pub const INFO_ALT: &'static str = "LCAC";
+    pub const INFO_ALT: &'static str = "CDAC";
     /// The INFO key for the reference molecules nearer the lesion strand's 5'
     /// end, and all reference molecules measured.
-    pub const INFO_REF: &'static str = "LCRC";
+    pub const INFO_REF: &'static str = "CDRC";
     /// The FILTER name.
-    pub const FILTER: &'static str = "LesionCopyArtifact";
+    pub const FILTER: &'static str = "CopiedDamageArtifact";
 
     /// Heterozygous calls whose every called allele is one base.
     pub fn applies_to(gt: &Genotype) -> bool {
@@ -87,7 +87,7 @@ impl LesionCopy {
 
     /// The first configured class that explains `ref_base>alt_base`, with the
     /// strand it puts the lesion on.
-    pub fn classify(&self, ref_base: u8, alt_base: u8) -> Option<(LesionClass, Strand)> {
+    pub fn classify(&self, ref_base: u8, alt_base: u8) -> Option<(DamageClass, Strand)> {
         self.classes
             .iter()
             .find_map(|class| class.lesion_strand(ref_base, alt_base).map(|s| (*class, s)))
@@ -162,22 +162,22 @@ mod tests {
 
     #[test]
     fn test_classify_picks_the_class_and_strand() {
-        let filter = LesionCopy::default();
+        let filter = CopiedDamage::default();
         assert_eq!(
             filter.classify(C, T),
-            Some((LesionClass::DEAMINATION, Strand::Forward))
+            Some((DamageClass::DEAMINATION, Strand::Forward))
         );
         assert_eq!(
             filter.classify(G, A),
-            Some((LesionClass::DEAMINATION, Strand::Reverse))
+            Some((DamageClass::DEAMINATION, Strand::Reverse))
         );
         assert_eq!(
             filter.classify(G, T),
-            Some((LesionClass::OXIDATION, Strand::Forward))
+            Some((DamageClass::OXIDATION, Strand::Forward))
         );
         assert_eq!(
             filter.classify(C, A),
-            Some((LesionClass::OXIDATION, Strand::Reverse))
+            Some((DamageClass::OXIDATION, Strand::Reverse))
         );
         assert_eq!(filter.classify(T, C), None);
     }
@@ -186,34 +186,34 @@ mod tests {
     fn test_distance_from_the_lesion_strand_five_prime_end() {
         let m = Molecule::new(C, 30, 101, 200);
         assert_eq!(
-            LesionCopy::distance(&m, 101, Strand::Forward),
+            CopiedDamage::distance(&m, 101, Strand::Forward),
             Some((0, 100))
         );
         assert_eq!(
-            LesionCopy::distance(&m, 101, Strand::Reverse),
+            CopiedDamage::distance(&m, 101, Strand::Reverse),
             Some((99, 100))
         );
         assert_eq!(
-            LesionCopy::distance(&m, 200, Strand::Reverse),
+            CopiedDamage::distance(&m, 200, Strand::Reverse),
             Some((0, 100))
         );
-        assert_eq!(LesionCopy::distance(&m, 201, Strand::Forward), None);
+        assert_eq!(CopiedDamage::distance(&m, 201, Strand::Forward), None);
         let half = Molecule { end: None, ..m };
-        assert_eq!(LesionCopy::distance(&half, 150, Strand::Forward), None);
+        assert_eq!(CopiedDamage::distance(&half, 150, Strand::Forward), None);
     }
 
     #[test]
     fn test_five_prime_proximal_splits_the_molecule_in_half() {
-        assert!(LesionCopy::is_five_prime_proximal(0, 100));
-        assert!(LesionCopy::is_five_prime_proximal(49, 100));
-        assert!(!LesionCopy::is_five_prime_proximal(50, 100));
-        assert!(!LesionCopy::is_five_prime_proximal(2, 5));
-        assert!(LesionCopy::is_five_prime_proximal(1, 5));
+        assert!(CopiedDamage::is_five_prime_proximal(0, 100));
+        assert!(CopiedDamage::is_five_prime_proximal(49, 100));
+        assert!(!CopiedDamage::is_five_prime_proximal(50, 100));
+        assert!(!CopiedDamage::is_five_prime_proximal(2, 5));
+        assert!(CopiedDamage::is_five_prime_proximal(1, 5));
     }
 
     #[test]
     fn test_alternates_near_the_lesion_five_prime_end_favor_the_artifact() {
-        let filter = LesionCopy::default();
+        let filter = CopiedDamage::default();
         let mut molecules = spread_references(C);
         for d in [2, 5, 9, 14, 20] {
             molecules.push(Molecule::new(T, 90, 1000 - d, 1000 - d + 149));
@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn test_the_same_alternates_favor_a_mutation_on_the_other_strand() {
-        let filter = LesionCopy::default();
+        let filter = CopiedDamage::default();
         let mut molecules = spread_references(G);
         for d in [2, 5, 9, 14, 20] {
             molecules.push(Molecule::new(A, 90, 1000 - d, 1000 - d + 149));
@@ -238,7 +238,7 @@ mod tests {
 
     #[test]
     fn test_alternates_spread_like_the_references_favor_a_mutation() {
-        let filter = LesionCopy::default();
+        let filter = CopiedDamage::default();
         let mut molecules = spread_references(C);
         for d in (0..150).step_by(10) {
             molecules.push(Molecule::new(T, 90, 1000 - d, 1000 - d + 149));
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn test_capture_skew_shared_by_both_alleles_is_absorbed() {
-        let filter = LesionCopy::default();
+        let filter = CopiedDamage::default();
         let skewed = |base| -> Vec<Molecule> {
             (0..20)
                 .map(|offset| Molecule::new(base, 90, 1000 - offset, 1000 - offset + 149))
@@ -264,7 +264,7 @@ mod tests {
 
     #[test]
     fn test_molecules_without_both_ends_are_not_measured() {
-        let filter = LesionCopy::default();
+        let filter = CopiedDamage::default();
         let molecules = vec![
             Molecule {
                 end: None,
@@ -280,9 +280,9 @@ mod tests {
     }
 
     #[test]
-    fn test_lesion_site_stratum() {
-        let site = LesionSite {
-            class: LesionClass::DEAMINATION,
+    fn test_damage_site_stratum() {
+        let site = DamageSite {
+            class: DamageClass::DEAMINATION,
             strand: Strand::Reverse,
             context: Context::CpG,
         };
