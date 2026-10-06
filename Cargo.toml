@@ -14,7 +14,7 @@ keywords = ["bioinformatics", "somatic", "duplex", "artifact", "vcf"]
 codegen-units = 1
 lto = "fat"
 
-# Shipped artifacts (bioconda etc.): the release settings plus no debug info and a stripped binary.
+# Distribution builds: the release settings plus no debug info and a stripped binary.
 [profile.dist]
 inherits = "release"
 codegen-units = 1

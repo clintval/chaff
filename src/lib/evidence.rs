@@ -2,7 +2,7 @@
 //!
 //! The statistics see each template once, as a [`Molecule`]: the base it holds
 //! at the site, that base's quality, and the template ends the reads reveal.
-//! [`Evidence`] is the seam between the statistics and the reads.
+//! [`Evidence`] separates the statistics from the reads.
 //! [`PileupEvidence`] fills it from any [`PileupSource`], a streaming pileup
 //! engine that lists the reads covering a position with the offset of their
 //! aligned base there. The engine owns record streaming and CIGAR walking; this

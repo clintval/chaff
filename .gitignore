@@ -17,7 +17,7 @@
 # claude code
 .claude/*
 
-# local planning docs (kept out of the remote)
+# local notes (kept out of the remote)
 /docs/
 
 # editor settings
