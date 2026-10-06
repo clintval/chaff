@@ -7,128 +7,157 @@
 
 Separate somatic variant calls from library-preparation damage artifacts.
 
-## Introduction
+## Installation
 
-Duplex and UMI sequencing suppress most sequencing and amplification errors, but not damage that library preparation copies onto both strands of a molecule before the strands are tagged.
-The tool `chaff` scores each somatic call by where its alternate allele sits on the molecules that carry it, compared with the molecules that carry the reference allele at the same site.
-It reimplements fgbio's [`FilterSomaticVcf`](https://fulcrumgenomics.github.io/fgbio/tools/latest/FilterSomaticVcf.html) without the JVM and adds a strand-aware filter for damage that polymerase copied onto both strands.
-
-<details>
-<summary>
-Its filters build on prior work.
-</summary>
-
-<br>
-
-- [Briggs et al. 2007](https://doi.org/10.1073/pnas.0704665104): damage in single-stranded overhangs is copied by end repair, so C>T sits at 5' ends and G>A at 3' ends
-- [Abascal et al. 2021](https://doi.org/10.1038/s41586-021-03477-4) (NanoSeq): strand assignment by the nearest 5' end, and a binomial test of the asymmetry
-- [Xiong et al. 2022](https://doi.org/10.1093/nar/gkab855) (Duplex-Repair): resynthesis from 3' ends copies damage into the complementary strand
-- [Jiang et al. 2020](https://doi.org/10.1101/gr.261396.120): jagged single-stranded ends of plasma DNA, and how far end-repair fill-in reaches into them
-- [Chen et al. 2017](https://doi.org/10.1126/science.aai8690): oxidative damage (8-oxoguanine) as a widespread source of G>T artifacts
-- [fgbio `FilterSomaticVcf`](https://github.com/fulcrumgenomics/fgbio): the end repair fill-in (`ERFAP`) and A-tailing (`ATAP`) filters
-- [GATK `LearnReadOrientationModel`](https://gatk.broadinstitute.org/hc/en-us/articles/360037593911-LearnReadOrientationModel): learning artifact priors from all calls with EM
-
-</details>
-
-Install from source:
-
-```bash
+```console
 cargo install --git https://github.com/clintval/chaff
 ```
 
-## Quick Start
+## Quickstart
 
-Annotate the calls of one sample, apply the copied damage FILTER at a posterior of 0.05 or below, and write the per-sample metrics:
+`chaff` scores each somatic call by where its alternate molecules sit on their templates, against the reference molecules at the same site.
+The VCF and the BAM must be coordinate sorted, and neither needs an index.
+Each template counts once, and a read whose mate maps to the same contig needs the `MC` tag.
+The examples run on fgbio's `FilterSomaticVcf` test data in [`tests/data`](tests/data): five tumor/normal calls on `chr1` and the tumor's reads.
 
-```bash
+### Scoring Calls
+
+```console
 chaff \
-    --input "calls.vcf.gz" \
-    --bam "tumor.bam" \
-    --ref "reference.fa" \
-    --sample "tumor" \
-    --output "calls.chaff.vcf.gz" \
-    --metrics "tumor.chaff.tsv" \
+    --input tests/data/calls.vcf \
+    --bam tests/data/tumor.bam \
+    --ref tests/data/ref.fa \
+    --sample tumor \
+    --output calls.chaff.vcf \
+    --metrics tumor.chaff.tsv \
     --copied-damage-threshold 0.05
 ```
 
-The VCF and the BAM must be coordinate sorted; neither needs an index, because `chaff` merge-joins them in one stream.
-Every template counts once: overlapping mates become one molecule, and duplicate, secondary, and supplementary reads are left out.
+Each filter writes the posterior probability that the call is a true mutation (`CDAP`, `ATAP`, `ERFAP`) and applies its FILTER at or below its threshold:
+
+```console
+grep -v '^#' calls.chaff.vcf | cut -f 1,2,4,5,7,8 | column -t
+```
+
+```text
+chr1  100  C    A  CopiedDamageArtifact  CDAP=0.025;CDLR=1.31;CDAC=3,3;CDRC=120,240;ATAP=0.916;ERFAP=0.027
+chr1  200  G    A  .                     CDAP=0.999;CDLR=-2.869;CDAC=10,20;CDRC=120,240;ATAP=1;ERFAP=1
+chr1  300  AAA  A  .                     .
+chr1  400  A    T  .                     ATAP=1;ERFAP=0.003718
+chr1  500  C    G  .                     ERFAP=0.003718
+```
+
+All 3 alternate molecules at 100 sit nearer the lesion strand's 5' end (`CDAC=3,3`), where half of the reference molecules sit (`CDRC=120,240`).
+The 20 alternate molecules at 200 split like the reference molecules (`CDAC=10,20`), so that call is likely a true mutation.
+The deletion at 300 is not scored.
+
+The header records each filter's model, prior, and threshold:
+
+```console
+grep '^##FILTER=<ID=CopiedDamage' calls.chaff.vcf
+```
+
+```text
+##FILTER=<ID=CopiedDamageArtifact,Description="Call is likely damage copied onto both strands, with damage classes C>T,G>T and a 30 bp copy scale, at or below a posterior of 0.05.">
+```
+
+### Reading the Metrics
+
+`--metrics` writes one row per filter and stratum, with the learned artifact fraction, the expected number of artifact calls, and a binomial test of the alternate molecules against the reference molecules:
+
+```console
+cut -f 2-7,14 tumor.chaff.tsv | head -3 | column -t
+```
+
+```text
+filter         stratum      calls  filtered  artifact_fraction  expected_artifacts  asymmetry_p_value
+copied-damage  C>T:non-CpG  1      0         0.333559           0.000675555         0.588099
+copied-damage  G>T:CpG      1      1         0.65834            0.97502             0.125
+```
+
+### Comparing to fgbio
+
+`--prior fgbio` reproduces fgbio's values and FILTERs:
+
+```console
+chaff \
+    --input tests/data/calls.vcf \
+    --bam tests/data/tumor.bam \
+    --sample tumor \
+    --output fgbio.vcf \
+    --filters end-repair-fill-in,a-tailing \
+    --end-repair-fill-in-threshold 0.001 \
+    --prior fgbio
+grep -v '^#' fgbio.vcf | cut -f 1,2,4,5,7,8 | column -t
+```
+
+```text
+chr1  100  C    A  EndRepairFillInArtifact  ATAP=0.003732;ERFAP=0.00003218
+chr1  200  G    A  .                        ATAP=1;ERFAP=1
+chr1  300  AAA  A  .                        .
+chr1  400  A    T  EndRepairFillInArtifact  ATAP=0.715;ERFAP=0.00001239
+chr1  500  C    G  EndRepairFillInArtifact  ERFAP=0.00001239
+```
+
+The default learned prior leaves 100, 400, and 500 at `ERFAP=0.027`, `0.003718`, and `0.003718`, above 0.001: their 3 to 5 alternate molecules sit within 15 bp of a template end, but so do 37.5% of the reference molecules.
+
+## Choosing Filters
+
+Each filter models one library-preparation step, so turn on the ones your preparation has.
+
+| Filter | When the preparation | Tune |
+| --- | --- | --- |
+| `end-repair-fill-in` | blunts fragment ends with end repair after shearing or enzymatic fragmentation | `--end-repair-fill-in-distance` |
+| `a-tailing` | A-tails ends for T-overhang adapter ligation | `--a-tailing-distance` |
+| `copied-damage` | has a polymerase work on double-stranded DNA before the strands are tagged: end-repair fill-in, nick translation, or gap filling | `--copied-damage-classes` (`C>T` for deamination from heat, storage, or formalin; `G>T` for oxidation from shearing or heat) and `--copied-damage-scale` |
+
+A sheared or enzymatically fragmented, end-repaired, A-tailed duplex library with suspected deamination:
+
+```console
+chaff \
+    --input calls.vcf.gz \
+    --bam tumor.bam \
+    --ref ref.fa \
+    --sample tumor \
+    --output calls.chaff.vcf.gz \
+    --metrics tumor.chaff.tsv \
+    --filters copied-damage,end-repair-fill-in,a-tailing \
+    --copied-damage-classes C>T \
+    --copied-damage-threshold 0.05 \
+    --end-repair-fill-in-threshold 0.001 \
+    --a-tailing-threshold 0.001
+```
+
+The distances, scale, read floors, and prior are left at their defaults.
+An option of a filter that `--filters` leaves out is an error.
 
 ## Filters
 
-Each filter compares the alternate molecules of a call with its reference molecules.
-Under a true mutation both alleles sit on the molecules the same way, so the reference molecules at a site calibrate the null and absorb capture and fragment-length skew.
-Under an artifact the alternate molecules crowd the template end that made the artifact.
-Each call gets a likelihood ratio of artifact to mutation, and the INFO field reports the posterior probability that the call is a true mutation: lower values mean a likely artifact, as in fgbio.
-
-| Filter | INFO | FILTER | Applies to |
+| Filter | INFO | FILTER | Scores |
 | --- | --- | --- | --- |
 | `copied-damage` | `CDAP`, `CDLR`, `CDAC`, `CDRC` | `CopiedDamageArtifact` | heterozygous SNVs in a damage class |
 | `a-tailing` | `ATAP` | `ATailingArtifact` | heterozygous SNVs to `A` or `T` |
 | `end-repair-fill-in` | `ERFAP` | `EndRepairFillInArtifact` | heterozygous SNVs |
 
-A FILTER is applied only with a threshold (`--copied-damage-threshold`, `--a-tailing-threshold`, `--end-repair-fill-in-threshold`), at or below it.
-
-###### Copied Damage
-
-A lesion on one strand, such as a deaminated cytosine or an 8-oxoguanine, is templated into the other strand when polymerase resynthesizes it by end-repair fill-in, nick translation, or gap filling before the strands are tagged.
-Both strands then carry the change, and duplex consensus agrees on it.
-Resynthesis runs 5' to 3' along the new strand, so copies sit near the 5' end of the lesion strand and are depleted near its 3' end, over tens to more than a hundred bases.
-
-The lesion strand comes from the substitution class (`--copied-damage-classes`, default `C>T,G>T`): `C>T` puts the lesion on the strand carrying the reference `C`, so a forward-strand `C>T` and a reverse-strand `G>A` are the same class; `G>T` puts it on the strand carrying the reference `G`.
-For each molecule with both template ends known, `d` is the distance of the site from the lesion strand's 5' end.
-A lesion at distance `d` is copied with probability `w(d) = exp(-d / s)`, an exponential resynthesis length with mean `s` (`--copied-damage-scale`, default 30 bp).
-The artifact's alternate distances follow the reference distances tilted by `w`, so with `W` the mean of `w` over the reference molecules and `e` an alternate base's error probability, the log likelihood ratio is
-
-```
-LLR = sum over alternate molecules of ln((1 - e) * w(d) / W + e)
-```
-
-`CDLR` reports it in log10 units; `CDAC` and `CDRC` count the alternate and reference molecules nearer the lesion strand's 5' end than its 3' end, out of all measured.
-Calls are stratified by class and by CpG context from the reference.
-
-###### End Repair Fill-in
-
-End repair blunts a fragment: polymerase extends a recessed 3' end across the opposite strand's 5' overhang, and an exonuclease trims a 3' overhang.
-Damage in the single-stranded 5' overhang is copied into the extended strand, so after amplification both strands carry the change near a template end.
-A molecule is congruent when the site is within `--end-repair-fill-in-distance` (default 15) of its nearest template end, and the likelihoods are fgbio's.
-With `--end-repair-fill-in-scale` the window becomes the decay model above, measured from the nearest end.
-
-###### A-tailing
-
-End repair can over-digest a 3' end and leave it recessed; A-tailing then fills it with adenines.
-On the forward strand that is a `T` within `--a-tailing-distance` (default 2) of the leftmost template end or an `A` within it of the rightmost one.
-The likelihoods are fgbio's.
+- `copied-damage`: a copy reaches distance `d` from the lesion strand's 5' end with probability `w(d) = exp(-d / s)`, so `LLR = Σ ln((1 - e) w(d) / W + e)` over the alternate molecules, with `W` the mean `w(d)` of the reference molecules and `e` the base error. `CDLR` is the LLR in log10 units, and `CDAC` and `CDRC` count the molecules nearer the lesion strand's 5' end, out of all measured.
+- `a-tailing` and `end-repair-fill-in`: fgbio's windowed likelihoods. `--end-repair-fill-in-scale` replaces the window with the decay above, from the nearest template end, in the posterior.
 
 ## Priors
 
-By default the prior is learned.
-Within each sample and stratum (damage class and CpG context for `copied-damage`, the six pyrimidine substitution classes for the others), the calls form a two-component mixture with an unknown artifact fraction `pi`, estimated by expectation-maximization as GATK's `LearnReadOrientationModel` learns its priors:
-
-```
-E-step: r_i = 1 / (1 + exp(-(LLR_i + logit(pi))))
-M-step: pi  = (sum r_i + 1) / (n + 2)
-```
-
-The `+1` and `+2` are a Beta(2, 2) prior that keeps `pi` inside (0, 1) when a stratum holds few calls.
-The posterior probability of a true mutation is then `1 / (1 + exp(LLR_i + logit(pi)))`.
-
-`--prior fgbio` uses fgbio's per-call mutation prior, `min((2 * maf)^2, 0.9999)`, and reproduces fgbio's `ERFAP` and `ATAP` values.
+- `learned` (default): EM learns the artifact fraction `π` per sample and stratum, with `r_i = σ(LLR_i + logit π)` and `π = (Σ r_i + 1) / (n + 2)`. Strata are the damage class and CpG context for `copied-damage`, and the six pyrimidine substitution classes for the others.
+- `fgbio`: fgbio's per-call mutation prior, `min((2 * maf)^2, 0.9999)`.
 
 ## Differences From fgbio
 
-- **The prior.** fgbio's `(2 * maf)^2` prior is near zero at duplex allele fractions, so any call whose alternate molecules all sit inside the window becomes an artifact however often the reference molecules sit there too. The learned prior needs the molecules themselves to carry the evidence. `--prior fgbio` restores fgbio's.
-- **The end repair mechanism.** fgbio describes fill-in of single-stranded 3' overhangs. Polymerase cannot extend a 3' overhang; it extends a recessed 3' end opposite a 5' overhang, and the damage copied is in that 5' overhang.
-- **Template ends.** fgbio measures from the read's own 5' end and from the far end by insert size. `chaff` uses the unclipped 5' ends of both mates, the mate's from the `MC` tag, which a read with a mapped mate must carry; it never reads `TLEN`.
-- **Overlapping mates.** fgbio keeps the first read of each name. `chaff` keeps one molecule per template: mates that agree keep the higher quality, and mates that disagree count as neither allele.
-- **Missing evidence.** fgbio writes `NaN` when a call has alternate molecules but no reference molecules, and a posterior from `1 / depth` when it has neither. `chaff` leaves the INFO field out in the first case and reports the prior in the second.
-- **Access.** fgbio can query an indexed BAM; `chaff` always streams.
-- **Number formatting.** Values match fgbio's to the four significant digits fgbio prints, but are written in decimal rather than scientific notation.
+- The learned prior: fgbio's mutation prior is near zero at duplex allele fractions, so alternate molecules inside the window make a call an artifact however many reference molecules sit there too.
+- End repair extends a recessed 3' end across a 5' overhang; fgbio's docs describe filling a 3' overhang.
+- The far template end comes from the mate's `MC` tag, which chaff requires; fgbio measures it by insert size, and chaff never reads `TLEN`.
+- Overlapping mates count once, and mates that disagree count as neither allele; fgbio keeps the first read of each name.
+- A call with alternate but no reference molecules gets no INFO value; fgbio writes `NaN`.
+- The BAM is always streamed, never queried by index.
+- Values keep htsjdk's rounding but are written in decimal: `0.00003218` for fgbio's `3.218e-05`.
 
-## Metrics
-
-`--metrics` writes one row per filter and stratum: calls, filtered calls, the learned artifact fraction, the expected number of artifact calls, and the alternate and reference molecules congruent with the artifact (for `copied-damage`, nearer the lesion strand's 5' end).
-The `asymmetry_p_value` is a one-sided binomial test of the congruent alternate molecules against the congruent fraction of the reference molecules, NanoSeq's test with the reference molecules in place of a fixed one half.
+chaff builds on [Briggs et al. 2007](https://doi.org/10.1073/pnas.0704665104), [NanoSeq](https://doi.org/10.1038/s41586-021-03477-4), [Duplex-Repair](https://doi.org/10.1093/nar/gkab855), [fgbio](https://github.com/fulcrumgenomics/fgbio), and GATK's [`LearnReadOrientationModel`](https://gatk.broadinstitute.org/hc/en-us/articles/360037593911-LearnReadOrientationModel).
 
 ## Development and Testing
 
