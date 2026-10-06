@@ -135,5 +135,5 @@ fn test_the_readme_choosing_filters_example_parses() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains("failed to open VCF"), "{stderr}");
+    assert!(stderr.contains("failed to open BAM"), "{stderr}");
 }

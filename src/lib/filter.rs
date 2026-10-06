@@ -11,11 +11,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{anyhow, bail, Context as _, Result};
 use clap::ValueEnum;
 use log::info;
 use noodles::core::Position;
-use noodles::sam;
 use noodles::vcf;
 use noodles::vcf::header::record::value::map::info::{Number, Type};
 use noodles::vcf::variant::record_buf::info::field::value::Array;
@@ -411,12 +410,12 @@ fn score_call(
                 substitution.clone(),
                 options.a_tailing.score(molecules, ref_base, alt_base),
             )),
-            FilterKind::CopiedDamage => match options.copied_damage.classify(ref_base, alt_base) {
-                None => None,
-                Some((class, strand)) => {
-                    let reference = reference
-                        .as_deref_mut()
-                        .context("the copied damage filter needs a reference FASTA")?;
+            FilterKind::CopiedDamage => match (
+                options.copied_damage.classify(ref_base, alt_base),
+                reference.as_deref_mut(),
+            ) {
+                (None, _) | (_, None) => None,
+                (Some((class, strand)), Some(reference)) => {
                     let (prev, base, next) = reference.context(contig, pos)?;
                     let damage = DamageSite {
                         class,
@@ -532,9 +531,6 @@ pub fn filter_vcf(
     mut reference: Option<&mut Reference>,
     options: &FilterOptions,
 ) -> Result<Vec<StratumMetrics>> {
-    if input == Path::new("-") {
-        bail!("the input VCF/BCF is read twice, so it must be a file, not standard input");
-    }
     if options.enabled(FilterKind::CopiedDamage) && reference.is_none() {
         bail!("the copied damage filter needs a reference FASTA (--ref)");
     }
@@ -652,15 +648,6 @@ fn metrics_rows(
     rows.into_values().map(StratumMetrics::finish).collect()
 }
 
-/// Whether a SAM header declares coordinate sort order.
-pub fn is_coordinate_sorted(header: &sam::Header) -> bool {
-    use noodles::sam::header::record::value::map::header::tag::SORT_ORDER;
-    header
-        .header()
-        .and_then(|hd| hd.other_fields().get(&SORT_ORDER))
-        .is_some_and(|so| so == "coordinate")
-}
-
 /// Filter the calls with molecules from `evidence`, writing the metrics when
 /// asked.
 pub fn run_filter_with(args: &FilterArgs, evidence: &mut dyn Evidence) -> Result<()> {
@@ -688,52 +675,23 @@ pub fn run_filter_on<S: RecordSource>(
     run_filter_with(args, &mut evidence)
 }
 
-/// Check the inputs `args` names before any molecule is read: the VCF/BCF
-/// header and sample, the reference, and the BAM's sort order.
-pub fn validate_inputs(args: &FilterArgs) -> Result<sam::Header> {
-    if args.input == Path::new("-") {
-        bail!("the input VCF/BCF is read twice, so it must be a file, not standard input");
-    }
-    let mut reader = VariantReader::open(&args.input)?;
-    let header = reader
-        .read_header()
-        .context("failed to read the VCF/BCF header")?;
-    resolve_sample(&header, args.options.sample.as_deref())?;
-    match &args.reference {
-        Some(path) => {
-            Reference::open(path)?;
-        }
-        None if args.options.enabled(FilterKind::CopiedDamage) => {
-            bail!("the copied damage filter needs a reference FASTA (--ref)")
-        }
-        None => {}
-    }
-    let mut reader = noodles::bam::io::reader::Builder
-        .build_from_path(&args.bam)
-        .with_context(|| format!("failed to open BAM: {:?}", args.bam))?;
-    let bam_header = reader
-        .read_header()
-        .context("failed to read the BAM header")?;
-    if !is_coordinate_sorted(&bam_header) {
-        bail!(
-            "the BAM must be coordinate sorted (@HD SO:coordinate): {:?}",
-            args.bam
-        );
-    }
-    Ok(bam_header)
-}
-
 /// Filter the calls with the BAM named by `args`, streamed once through
 /// streampile.
 pub fn run_filter(args: &FilterArgs) -> Result<()> {
-    validate_inputs(args)?;
     let mut reader = noodles::bam::io::reader::Builder
         .build_from_path(&args.bam)
         .with_context(|| format!("failed to open BAM: {:?}", args.bam))?;
     let header = reader
         .read_header()
         .context("failed to read the BAM header")?;
-    run_filter_on(args, StreamingPileupBuilder::new(reader, &header)?)
+    let builder = StreamingPileupBuilder::new(reader, &header).map_err(|error| match error {
+        streampile::Error::NotCoordinateSorted { .. } => anyhow!(
+            "the BAM must be coordinate sorted (@HD SO:coordinate): {:?}",
+            args.bam
+        ),
+        error => error.into(),
+    })?;
+    run_filter_on(args, builder)
 }
 
 #[cfg(test)]
