@@ -20,7 +20,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use csv::{Terminator, WriterBuilder};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use statrs::distribution::{Binomial, DiscreteCDF};
 
 /// One metrics row.
@@ -38,23 +38,44 @@ pub struct StratumMetrics {
     pub filtered: u64,
     /// The learned artifact fraction of the stratum, empty under fgbio's
     /// per-call prior.
+    #[serde(serialize_with = "six_digits_or_empty")]
     pub artifact_fraction: Option<f64>,
     /// The sum over calls of the posterior probability of an artifact.
+    #[serde(serialize_with = "six_digits")]
     pub expected_artifacts: f64,
     /// Alternate molecules measured.
     pub alt_molecules: u64,
     /// Alternate molecules congruent with the artifact.
     pub alt_congruent: u64,
     /// `alt_congruent / alt_molecules`.
+    #[serde(serialize_with = "six_digits_or_empty")]
     pub alt_congruent_fraction: Option<f64>,
     /// Reference molecules measured.
     pub ref_molecules: u64,
     /// Reference molecules congruent with the artifact.
     pub ref_congruent: u64,
     /// `ref_congruent / ref_molecules`.
+    #[serde(serialize_with = "six_digits_or_empty")]
     pub ref_congruent_fraction: Option<f64>,
     /// The one-sided binomial asymmetry p-value.
+    #[serde(serialize_with = "six_digits_or_empty")]
     pub asymmetry_p_value: Option<f64>,
+}
+
+/// Serialize `value` rounded to six significant digits.
+fn six_digits<S: Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_f64(format!("{value:.5e}").parse().unwrap_or(*value))
+}
+
+/// Serialize `value` rounded to six significant digits, or an empty field for `None`.
+fn six_digits_or_empty<S: Serializer>(
+    value: &Option<f64>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match value {
+        Some(value) => six_digits(value, serializer),
+        None => serializer.serialize_none(),
+    }
 }
 
 /// `P(X >= k)` for `X ~ Binomial(n, p)`.
@@ -188,6 +209,31 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].starts_with("sample\tfilter\tstratum\tcalls"));
         assert!(lines[1].starts_with("s1\tlesion-copy\tC>T:CpG\t3\t1\t0.4"));
+    }
+
+    #[test]
+    fn test_write_metrics_rounds_values_to_six_significant_digits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("metrics.tsv");
+        let learned = StratumMetrics {
+            artifact_fraction: Some(1.0 / 3.0),
+            expected_artifacts: 2.0 / 3.0,
+            ..row()
+        };
+        let fgbio = StratumMetrics {
+            artifact_fraction: None,
+            ..row()
+        };
+        write_metrics(&path, &[learned.finish(), fgbio.finish()]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rows: Vec<Vec<&str>> = text
+            .lines()
+            .skip(1)
+            .map(|l| l.split('\t').collect())
+            .collect();
+        assert_eq!(rows[0][5..7], ["0.333333", "0.666667"]);
+        assert_eq!(rows[0][13], "0.0107422");
+        assert_eq!(rows[1][5], "");
     }
 
     #[test]
