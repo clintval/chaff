@@ -15,7 +15,7 @@
 //! The pseudocount `c` is a Beta(c + 1, c + 1) prior on `pi`, so `pi` is the
 //! maximum a posteriori estimate and stays strictly between 0 and 1 when a
 //! stratum holds few calls. The objective is concave in `pi`, so the fixed
-//! point is unique.
+//! point is unique, and chaff solves for it directly rather than iterating.
 //!
 //! fgbio's prior is kept for parity: a mutation prior of `min((2 * maf)^2,
 //! 0.9999)`, where `maf` is the call's alternate molecule fraction, or one over
@@ -89,25 +89,33 @@ pub fn fgbio_artifact_prior(alt_molecules: u32, ref_molecules: u32, depth: u32) 
     1.0 - prior_mutation
 }
 
-/// The maximum a posteriori artifact fraction of a stratum, by EM over the
-/// calls' log likelihood ratios. An empty stratum gets the prior mean, one half.
+/// The maximum a posteriori artifact fraction of a stratum from the calls' log
+/// likelihood ratios. The fixed point EM converges to solves
+/// `sum_i r_i + c = pi (n + 2c)`, whose left side less its right falls as `pi`
+/// rises, so bisection finds it to machine precision however slowly EM would
+/// creep there. An empty stratum gets the prior mean, one half.
 pub fn learn_artifact_fraction(log_likelihood_ratios: &[f64], pseudocount: f64) -> f64 {
     let n = log_likelihood_ratios.len() as f64;
-    let mut pi = 0.5;
-    for _ in 0..10_000 {
+    let excess = |pi: f64| {
         let odds = logit(pi);
         let responsibility: f64 = log_likelihood_ratios
             .iter()
             .map(|l| sigmoid(l + odds))
             .sum();
-        let next = (responsibility + pseudocount) / (n + 2.0 * pseudocount);
-        let converged = (next - pi).abs() < 1e-12;
-        pi = next;
-        if converged {
-            break;
+        responsibility + pseudocount - pi * (n + 2.0 * pseudocount)
+    };
+    let (mut low, mut high) = (0.0f64, 1.0f64);
+    loop {
+        let pi = 0.5 * (low + high);
+        if pi <= low || pi >= high {
+            return pi;
+        }
+        if excess(pi) > 0.0 {
+            low = pi;
+        } else {
+            high = pi;
         }
     }
-    pi
 }
 
 #[cfg(test)]
@@ -175,6 +183,16 @@ mod tests {
         }
         let pi = learn_artifact_fraction(&llrs, PSEUDOCOUNT);
         assert!(close(pi, 0.2, 0.05), "{pi}");
+    }
+
+    /// Uninformative calls slow EM to a crawl: 100,000 calls at a ratio of 0
+    /// and 10 at 20 have their fixed point at `(10 + 1) / (10 + 2)`.
+    #[test]
+    fn test_learned_fraction_reaches_its_fixed_point_among_many_flat_calls() {
+        let mut llrs = vec![0.0; 100_000];
+        llrs.extend([20.0; 10]);
+        let pi = learn_artifact_fraction(&llrs, PSEUDOCOUNT);
+        assert!(close(pi, 11.0 / 12.0, 1e-7), "{pi}");
     }
 
     #[test]
