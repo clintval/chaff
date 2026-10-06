@@ -6,7 +6,9 @@
 //! the reads. [`PileupEvidence`] fills it from a streampile pileup builder that
 //! leaves out the reads [`PileupOptions`] reject and calls the bases of
 //! overlapping mates into one: mates that agree keep the higher quality, and
-//! mates that disagree become an `N`, which counts as neither allele.
+//! mates that disagree become an `N`, which counts as neither allele. A
+//! template that holds a deletion at the site is a [`DELETION`], which counts
+//! as neither allele but in the depth, as fgbio counts it.
 
 use std::collections::HashMap;
 
@@ -24,12 +26,17 @@ const AGREEMENT: AgreementStrategy = AgreementStrategy::MaxQual;
 /// How the base of disagreeing mates is called: an `N`.
 const DISAGREEMENT: DisagreementStrategy = DisagreementStrategy::MaskBoth;
 
+/// The base of a template that holds a deletion at the site, as a VCF writes a
+/// spanning deletion.
+pub const DELETION: u8 = b'*';
+
 /// One template's observation at a site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Molecule {
-    /// The upper-cased base on the forward strand, `N` when the mates disagree.
+    /// The upper-cased base on the forward strand, `N` when the mates
+    /// disagree, or [`DELETION`].
     pub base: u8,
-    /// The base quality.
+    /// The base quality, 0 for a deletion.
     pub quality: u8,
     /// The template's bases between the site and its leftmost base, the
     /// forward strand's 5' end, when known: 0 at that base.
@@ -136,13 +143,16 @@ impl<S: RecordSource> Evidence for PileupEvidence<'_, S> {
 }
 
 /// The molecule a template shows: the base its reads at the quality floor
-/// call, and the site's distances from the template's ends, or `None` for a
-/// template with no such base or a site outside it.
+/// call, or else a deletion any of its reads holds, and the site's distances
+/// from the template's ends, or `None` for a template with neither or a site
+/// outside it.
 fn molecule<R: AlignmentRecord>(
     template: &PileupTemplate<'_, R>,
 ) -> streampile::Result<Option<Molecule>> {
-    let (Some(base), Some(quality)) = (template.base(), template.quality()) else {
-        return Ok(None);
+    let (base, quality) = match (template.base(), template.quality()) {
+        (Some(base), Some(quality)) => (base, quality),
+        _ if template.entries().any(|e| e.is_deletion() || e.is_skip()) => (DELETION, 0),
+        _ => return Ok(None),
     };
     let Some((left, right)) = distances(template)? else {
         return Ok(None);
@@ -611,6 +621,17 @@ mod tests {
         let calls: Vec<(u8, u8)> = molecules.iter().map(|m| (m.base, m.quality)).collect();
         assert_eq!(calls, [(b'A', 40), (b'N', 2), (b'A', 30)]);
         assert_eq!(molecules[0], Molecule::new(b'A', 40, 29, 40));
+    }
+
+    /// A template holding a deletion at the site is a deletion, neither allele.
+    #[test]
+    fn test_a_template_holding_a_deletion_is_a_deletion_molecule() {
+        let mut reads = SamBuilder::new().read_length(50);
+        reads.add_pair(Pair::at(101, 151).cigar1("20M5D30M"));
+        let molecules = molecules_at(&reads, PileupOptions::default(), 122);
+        let bases: Vec<u8> = molecules.iter().map(|m| m.base).collect();
+        assert_eq!(bases, [DELETION]);
+        assert_eq!(molecules[0].left, Some(20));
     }
 
     /// Secondary, duplicate, supplementary, and unmapped reads are left out,

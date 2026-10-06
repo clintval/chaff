@@ -603,3 +603,69 @@ fn test_spanning_deletions_and_two_alternate_alleles_as_fgbio_calls_them() {
         .collect();
     assert_eq!(filtered, vec![false, false, true, true]);
 }
+
+/// Reads with a C>A at 100 whose alternate mates overlap there at qualities
+/// 25 and 40, a G>T at 200 where 30 of 110 templates hold a deletion and none
+/// a T, and a C>A at 300 where one pair's mates disagree, A against C.
+fn overlap_and_deletion_reads() -> SamBuilder {
+    let mut b = SamBuilder::new().read_length(RLEN);
+    let unequal = Pair::filled(86, 100, 'A', RLEN)
+        .quals1(vec![25; RLEN])
+        .quals2(vec![40; RLEN]);
+    let deleted = Pair::filled(181, 230, 'G', RLEN).cigar1("19M5D21M");
+    let disagreeing = Pair::at(286, 300)
+        .bases1("A".repeat(RLEN))
+        .bases2("C".repeat(RLEN));
+    for start in 61..=80 {
+        for _ in 0..3 {
+            b.add_pair(Pair::filled(start, start + 20, 'C', RLEN));
+            b.add_pair(Pair::filled(start + 200, start + 220, 'C', RLEN));
+        }
+    }
+    for start in 161..=200 {
+        for _ in 0..2 {
+            b.add_pair(Pair::filled(start, start + RLEN, 'G', RLEN));
+        }
+    }
+    for _ in 0..5 {
+        b.add_pair(unequal.clone());
+    }
+    for _ in 0..30 {
+        b.add_pair(deleted.clone());
+    }
+    for _ in 0..3 {
+        b.add_pair(Pair::filled(286, 300, 'A', RLEN));
+    }
+    b.add_pair(disagreeing);
+    b
+}
+
+/// Under fgbio's prior, a deletion at the site counts in the depth as in
+/// fgbio, so the G>T at 200 without a T gets fgbio 4.1.1's `(2 / 110)^2`.
+/// Overlapping mates differ by design: fgbio 4.1.1 keeps the first read, so it
+/// scores the A at 100 at quality 25 (7.788e-15) where chaff takes the higher
+/// 40, and it counts the disagreeing pair at 300 as an A (1.594e-14) where
+/// chaff counts neither allele.
+#[test]
+fn test_overlapping_mates_and_deletions_against_fgbio() {
+    let dir = TempDir::new().unwrap();
+    let mut vcf = VcfBuilder::new(&["tumor"]);
+    for (pos, alleles) in [(100, ["C", "A"]), (200, ["G", "T"]), (300, ["C", "A"])] {
+        vcf.add(Variant::new(pos, &alleles, vec![gt("tumor", "0/1")]));
+    }
+    let input = vcf.write(&dir.path().join("parity.vcf"));
+    let reads = overlap_and_deletion_reads();
+    let records = run(&dir, &input, &reads, options(None, PriorMode::Fgbio)).unwrap();
+    let values: Vec<(Option<f32>, Option<f32>)> = records
+        .iter()
+        .map(|r| (float(r, ATailing::INFO), float(r, EndRepairFillIn::INFO)))
+        .collect();
+    assert_eq!(
+        values,
+        vec![
+            (Some(1.0), Some(0.0)),
+            (Some(3.306e-4), Some(3.306e-4)),
+            (Some(1.0), Some(9.181e-12)),
+        ]
+    );
+}
