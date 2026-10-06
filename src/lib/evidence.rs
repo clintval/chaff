@@ -67,8 +67,8 @@ pub trait Evidence {
 pub struct PileupOptions {
     /// Reads below this mapping quality are left out.
     pub min_mapping_quality: u8,
-    /// Templates whose called base is below this quality are left out, unless
-    /// every read's base is at it, as for mates that disagree, called `N`.
+    /// Reads whose base is below this quality take no part in their
+    /// template's base.
     pub min_base_quality: u8,
     /// Keep only paired reads whose mate is also mapped.
     pub paired_reads_only: bool,
@@ -127,7 +127,7 @@ impl<S: RecordSource> Evidence for PileupEvidence<'_, S> {
         let pileup = self.builder.pileup(contig, usize::from(pos) - 1)?;
         let mut molecules = Vec::new();
         for template in pileup.templates(AGREEMENT, DISAGREEMENT) {
-            let molecule = molecule(&template, pileup.min_base_quality())
+            let molecule = molecule(&template)
                 .with_context(|| format!("reading template ends at {contig}:{pos}"))?;
             molecules.extend(molecule);
         }
@@ -135,25 +135,15 @@ impl<S: RecordSource> Evidence for PileupEvidence<'_, S> {
     }
 }
 
-/// The molecule a template shows: its called base and the site's distances
-/// from the template's ends, or `None` for a template with no base, a site
-/// outside it, or a base under the quality floor. A base is at the floor when
-/// its called quality is, or when every read's base here is, so mates that
-/// disagree are an `N`, which counts as neither allele.
+/// The molecule a template shows: the base its reads at the quality floor
+/// call, and the site's distances from the template's ends, or `None` for a
+/// template with no such base or a site outside it.
 fn molecule<R: AlignmentRecord>(
     template: &PileupTemplate<'_, R>,
-    min_base_quality: u8,
 ) -> streampile::Result<Option<Molecule>> {
     let (Some(base), Some(quality)) = (template.base(), template.quality()) else {
         return Ok(None);
     };
-    if !template.passes(min_base_quality)
-        && !template
-            .entries()
-            .all(|entry| entry.passes(min_base_quality))
-    {
-        return Ok(None);
-    }
     let Some((left, right)) = distances(template)? else {
         return Ok(None);
     };
@@ -269,11 +259,7 @@ mod tests {
         pileup
             .templates(AGREEMENT, DISAGREEMENT)
             .iter()
-            .filter(|template| {
-                molecule(template, pileup.min_base_quality())
-                    .unwrap()
-                    .is_some()
-            })
+            .filter(|template| molecule(template).unwrap().is_some())
             .map(|template| (template.name().to_string(), template.entries().count()))
             .collect()
     }
@@ -678,7 +664,7 @@ mod tests {
 
     /// Mates that agree are one molecule at the higher quality, and mates that
     /// disagree are an `N`, which counts as neither allele. A mate under the
-    /// quality floor still takes part, so its disagreement leaves no molecule.
+    /// quality floor takes no part, so the other mate's base stands.
     #[test]
     fn test_overlapping_mates_are_called_into_one_molecule() {
         let mut reads = SamBuilder::new().read_length(50);
@@ -693,7 +679,7 @@ mod tests {
         }
         let molecules = molecules_at(&reads, PileupOptions::default(), 130);
         let calls: Vec<(u8, u8)> = molecules.iter().map(|m| (m.base, m.quality)).collect();
-        assert_eq!(calls, [(b'A', 40), (b'N', 2)]);
+        assert_eq!(calls, [(b'A', 40), (b'N', 2), (b'A', 30)]);
         assert_eq!(molecules[0], Molecule::new(b'A', 40, 29, 40));
     }
 

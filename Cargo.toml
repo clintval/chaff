@@ -42,7 +42,7 @@ noodles = { version = "0.115", features = ["bam", "bcf", "bgzf", "core", "fasta"
 noodles-bgzf = { version = "0.51", features = ["libdeflate"] }
 serde = { version = "1", features = ["derive"] }
 statrs = "0.18"
-streampile = { git = "https://github.com/clintval/streampile", rev = "de4a34a78c87d1fffa49a0f838d3fb0c9bb73666" }
+streampile = { git = "https://github.com/clintval/streampile", rev = "d2e8a18dc31d74d6ca5206610383b70a70917cbe" }
 
 [dev-dependencies]
 assert_cmd = "2"
@@ -51,7 +51,7 @@ csv = "1"
 cucumber = "0.21"
 futures = "0.3"
 rstest = "0.26"
-streampile = { git = "https://github.com/clintval/streampile", rev = "de4a34a78c87d1fffa49a0f838d3fb0c9bb73666", features = ["testing"] }
+streampile = { git = "https://github.com/clintval/streampile", rev = "d2e8a18dc31d74d6ca5206610383b70a70917cbe", features = ["testing"] }
 tempfile = "3"
 
 [[test]]
