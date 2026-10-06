@@ -228,18 +228,68 @@ pub fn vcf_float(value: f64) -> f32 {
     if !value.is_finite() {
         return value as f32;
     }
-    let rounded = if value >= 1.0 {
-        (value * 100.0).round() / 100.0
+    if value >= 1.0 {
+        round_half_up(value, -2)
     } else if value >= 0.01 {
-        (value * 1000.0).round() / 1000.0
+        round_half_up(value, -3)
     } else if value.abs() >= 1e-20 {
-        let exponent = value.abs().log10().floor();
-        let scale = 10f64.powf(3.0 - exponent);
-        (value * scale).round() / scale
+        significant(value, 4)
     } else {
         0.0
-    };
-    rounded as f32
+    }
+}
+
+/// Round a value to `digits` significant digits, half up.
+pub fn significant(value: f64, digits: i32) -> f32 {
+    if value == 0.0 || !value.is_finite() {
+        return value as f32;
+    }
+    round_half_up(value, decimal_exponent(value) - digits + 1)
+}
+
+/// The power of ten of a nonzero value's first significant digit.
+fn decimal_exponent(value: f64) -> i32 {
+    let text = format!("{:e}", value.abs());
+    text[text.find('e').expect("an exponent") + 1..]
+        .parse()
+        .expect("an integer exponent")
+}
+
+/// Round a value to its digit at `10^place`, half away from zero, on its
+/// shortest decimal representation, as Java's `String.format` rounds, so a tie
+/// such as 0.5005 rounds up although its double is a hair under it.
+fn round_half_up(value: f64, place: i32) -> f32 {
+    let text = format!("{:e}", value.abs());
+    let (mantissa, _) = text.split_once('e').expect("an exponent");
+    let digits: Vec<u8> = mantissa.bytes().filter(u8::is_ascii_digit).collect();
+    let kept = (decimal_exponent(value) - place + 1).max(0) as usize;
+    let mut rounded: Vec<u8> = (0..kept)
+        .map(|i| digits.get(i).copied().unwrap_or(b'0'))
+        .collect();
+    if digits.get(kept).is_some_and(|&next| next >= b'5') {
+        let mut i = rounded.len();
+        loop {
+            if i == 0 {
+                rounded.insert(0, b'1');
+                break;
+            }
+            i -= 1;
+            if rounded[i] == b'9' {
+                rounded[i] = b'0';
+            } else {
+                rounded[i] += 1;
+                break;
+            }
+        }
+    }
+    if rounded.is_empty() {
+        return 0.0;
+    }
+    let sign = if value < 0.0 { "-" } else { "" };
+    let digits = String::from_utf8(rounded).expect("ASCII digits");
+    format!("{sign}{digits}e{place}")
+        .parse()
+        .expect("a decimal number")
 }
 
 #[cfg(test)]
@@ -255,6 +305,20 @@ mod tests {
         assert_eq!(vcf_float(1.5e-25), 0.0);
         assert_eq!(vcf_float(-12.3456), -12.35);
         assert_eq!(vcf_float(-0.0012345), -0.001_235);
+    }
+
+    /// Java's `String.format` rounds the shortest decimal of a double half up,
+    /// so a tie such as 0.5005, stored a hair under it, still rounds up.
+    #[test]
+    fn test_vcf_float_rounds_decimal_ties_up_like_java() {
+        assert_eq!(vcf_float(0.5005), 0.501);
+        assert_eq!(vcf_float(0.0115), 0.012);
+        assert_eq!(vcf_float(1.005), 1.01);
+        assert_eq!(vcf_float(2.675), 2.68);
+        assert_eq!(vcf_float(9.995), 10.0);
+        assert_eq!(vcf_float(1.0005e-3), 0.001_001);
+        assert_eq!(vcf_float(9.9995e-3), 0.01);
+        assert_eq!(vcf_float(-1.0005e-3), -0.001_001);
     }
 
     /// The BGZF end-of-file marker block, the last write of a BGZF stream.
