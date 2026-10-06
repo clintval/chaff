@@ -3,7 +3,7 @@ use std::process;
 
 use std::path::PathBuf;
 
-use anyhow::{Error, Result};
+use anyhow::{bail, Error, Result};
 use chaff::classes::{validate_classes, DamageClass};
 use chaff::copied_damage::CopiedDamage;
 use chaff::filter::{run_filter, FilterArgs, FilterKind, FilterOptions};
@@ -11,7 +11,8 @@ use chaff::prior::PriorMode;
 use chaff::read_end::{ATailing, EndRepairFillIn};
 use chaff::template::ReadFilter;
 use clap::builder::styling::{AnsiColor, Effects, Style, Styles};
-use clap::{CommandFactory, FromArgMatches, Parser};
+use clap::parser::ValueSource;
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 use env_logger::Env;
 use log::error;
 use mimalloc::MiMalloc;
@@ -228,7 +229,10 @@ struct Cli {
     #[arg(long, value_name = "BP", default_value_t = 15, verbatim_doc_comment)]
     end_repair_fill_in_distance: u32,
 
-    /// Replace the distance window with a decay of this scale in bases.
+    /// Score with a decay of this scale in bases from the nearest template end
+    /// instead of the distance window.
+    ///
+    /// The distance window still sets the congruent molecules in the metrics.
     #[arg(long, value_name = "BP", value_parser = positive, verbatim_doc_comment)]
     end_repair_fill_in_scale: Option<f64>,
 
@@ -273,9 +277,40 @@ fn probability(text: &str) -> Result<f64, String> {
     }
 }
 
+/// The argument IDs of each filter's options.
+fn filter_options(kind: FilterKind) -> &'static [&'static str] {
+    match kind {
+        FilterKind::CopiedDamage => &[
+            "copied_damage_classes",
+            "copied_damage_scale",
+            "copied_damage_threshold",
+        ],
+        FilterKind::ATailing => &["a_tailing_distance", "a_tailing_threshold"],
+        FilterKind::EndRepairFillIn => &[
+            "end_repair_fill_in_distance",
+            "end_repair_fill_in_scale",
+            "end_repair_fill_in_threshold",
+        ],
+    }
+}
+
 impl Cli {
-    /// Validate the options and gather them into [`FilterArgs`].
-    fn into_args(self) -> Result<FilterArgs> {
+    /// Validate the options and gather them into [`FilterArgs`], rejecting an
+    /// option given on the command line for a filter `--filters` leaves out.
+    fn into_args(self, matches: &ArgMatches) -> Result<FilterArgs> {
+        for kind in FilterKind::ALL {
+            if self.filters.contains(&kind) {
+                continue;
+            }
+            for id in filter_options(kind) {
+                if matches.value_source(id) == Some(ValueSource::CommandLine) {
+                    bail!(
+                        "--{} applies only to the {kind} filter, which --filters leaves out",
+                        id.replace('_', "-")
+                    );
+                }
+            }
+        }
         validate_classes(&self.copied_damage_classes)?;
         let options = FilterOptions {
             sample: self.sample,
@@ -493,11 +528,64 @@ fn main() -> Result<(), Error> {
     let matches = cmd.get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
-    match cli.into_args().and_then(|args| run_filter(&args)) {
+    match cli.into_args(&matches).and_then(|args| run_filter(&args)) {
         Ok(()) => process::exit(0),
         Err(e) => {
             error!("{e:#}");
             process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    fn args(extra: &[&str]) -> Result<FilterArgs> {
+        let base = ["chaff", "-i", "in.vcf", "-o", "out.vcf", "-b", "in.bam"];
+        let matches = Cli::command().try_get_matches_from(base.iter().chain(extra))?;
+        Cli::from_arg_matches(&matches)?.into_args(&matches)
+    }
+
+    #[rstest]
+    #[case(&["--filters", "a-tailing", "--copied-damage-threshold", "0.05"], "--copied-damage-threshold applies only to the copied-damage filter")]
+    #[case(&["--filters", "a-tailing", "--copied-damage-classes", "C>T"], "--copied-damage-classes applies only to the copied-damage filter")]
+    #[case(&["--filters", "copied-damage", "--a-tailing-distance", "2"], "--a-tailing-distance applies only to the a-tailing filter")]
+    #[case(&["--filters", "copied-damage", "--a-tailing-p-value", "0.01"], "--a-tailing-threshold applies only to the a-tailing filter")]
+    #[case(&["--filters", "a-tailing", "--end-repair-fill-in-scale", "15"], "--end-repair-fill-in-scale applies only to the end-repair-fill-in filter")]
+    fn test_an_option_of_a_filter_left_out_is_an_error(
+        #[case] extra: &[&str],
+        #[case] message: &str,
+    ) {
+        let error = args(extra).unwrap_err();
+        assert!(error.to_string().contains(message), "{error}");
+    }
+
+    #[test]
+    fn test_filter_options_are_every_option_named_for_a_filter() {
+        let ids: Vec<String> = Cli::command()
+            .get_arguments()
+            .map(|arg| arg.get_id().to_string())
+            .collect();
+        for kind in FilterKind::ALL {
+            let prefix = format!("{}_", kind.to_string().replace('-', "_"));
+            let named: Vec<&str> = ids
+                .iter()
+                .map(String::as_str)
+                .filter(|id| id.starts_with(&prefix))
+                .collect();
+            assert_eq!(named, filter_options(kind), "{kind}");
+        }
+    }
+
+    #[rstest]
+    #[case(&[])]
+    #[case(&["--filters", "a-tailing"])]
+    #[case(&["--filters", "a-tailing", "--a-tailing-distance", "4", "--a-tailing-threshold", "0.001"])]
+    #[case(&["--filters", "end-repair-fill-in", "--end-repair-fill-in-distance", "10", "--end-repair-fill-in-scale", "15"])]
+    fn test_options_of_enabled_filters_and_defaults_are_accepted(#[case] extra: &[&str]) {
+        args(extra).unwrap();
     }
 }

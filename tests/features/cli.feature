@@ -74,3 +74,14 @@ Feature: CLI contract
     When I run `chaff -i - -o out.vcf -b sorted.bam --filters a-tailing`
     Then the exit code is 1
     And stderr contains "must be a file"
+
+  Scenario: an option of a filter left out of --filters is an error
+    When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --sample tumor --filters a-tailing --copied-damage-threshold 0.05`
+    Then the exit code is 1
+    And stderr contains "--copied-damage-threshold applies only to the copied-damage filter, which --filters leaves out"
+
+  Scenario: the end repair fill-in scale replaces the window only in the posterior
+    When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --sample tumor --filters end-repair-fill-in --end-repair-fill-in-distance 10 --end-repair-fill-in-scale 15`
+    Then the exit code is 0
+    When I run `chaff --help`
+    Then stdout contains "The distance window still sets the congruent molecules in the metrics."

@@ -755,6 +755,21 @@ mod tests {
     }
 
     #[test]
+    fn test_the_distance_window_sets_the_congruent_counts_under_a_scale() {
+        let molecules = molecules_at(&biased_reads(11..=25), 25);
+        let score = |distance| {
+            EndRepairFillIn {
+                distance,
+                scale: Some(15.0),
+            }
+            .score(&molecules, 25, G, T)
+        };
+        let (wide, narrow) = (score(15), score(5));
+        assert_eq!(wide.log_likelihood_ratio, narrow.log_likelihood_ratio);
+        assert_eq!((wide.alt_congruent, narrow.alt_congruent), (15, 5));
+    }
+
+    #[test]
     fn test_a_tailing_tie_is_congruent_for_either_end() {
         let filter = ATailing::default();
         let m = Molecule::new(A, 30, 10, 12);
