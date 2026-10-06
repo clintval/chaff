@@ -18,11 +18,6 @@ cargo install --git https://github.com/clintval/chaff
 A DNA fragment is two complementary strands, each running 5′ to 3′.
 Its *template ends* are its outermost bases, the 5′ ends of its two strands, and its *template* is the fragment as a read pair sees it.
 
-```text
-5′-CTGCCAGGATCC-3′   top strand
-3′-GACGGTCCTAGG-5′   bottom strand
-```
-
 A *lesion* is a damaged base on one strand that a polymerase copies as another base:
 
 - 5-methylcytosine deaminates to thymine, so a methylated CpG reads C>T.
@@ -33,15 +28,7 @@ Duplex Sequencing tags both strands of a fragment with a UMI and keeps a base on
 End repair can defeat that.
 Fragmentation leaves single-stranded overhangs, and end repair's polymerase extends each recessed 3′ end across the 5′ overhang opposite it, and from any nick, copying a lesion into the partner before the UMIs and adapters go on:
 
-```text
-      a C damaged to read as T
-      v
-5′-CTGTCAGGATCC-3′   top strand, overhanging at its 5′ end
-3′-      CCTAGG-5′   bottom strand, recessed at its 3′ end
-5′-CTGTCAGGATCC-3′
-3′-GACAGTCCTAGG-5′   end repair fills the bottom strand in, copying the T as an A
-      ^
-```
+![A C damaged to read as T sits near one strand's 5′ end, end repair fill-in copies it onto the partner strand as an A, the UMI adapters go on after the copy, and the duplex consensus of both strands agrees on a C>T.](docs/copied-damage.svg)
 
 Both strands now read T at the lesion, so the duplex consensus agrees on a C>T that looks real.
 The polymerase copies from the partner's recessed end toward the lesion strand's 5′ end, so copied lesions sit near the 5′ end of the strand that carries them and rarely near its 3′ end, while a true mutation's molecules sit wherever the reference molecules at the site do.
@@ -54,12 +41,9 @@ The other two artifacts sit on one strand.
 A base that end repair's polymerase misincorporates lies on the strand it extended, near that strand's 3′ end.
 A-tailing then adds a non-templated A to each 3′ end, for adapters with a T overhang to ligate to.
 Where end repair over-digested a 3′ end, that A stands in for a lost base, so copies of the strand begin with a T where another base belongs: a T near the template's left end or, from the other strand, an A near its right end.
+One fragment shows where each artifact sits, with the lesion and its copy, a misincorporated base, and an added A in red, and the bases end repair filled in in blue:
 
-```text
-5′-CTGCCAGGATCC-3′
-3′- ACGGTCCTAGG-5′   end repair over-digests the bottom strand's 3′ end
-3′-AACGGTCCTAGG-5′   A-tailing fills it with an A where a G belongs
-```
+![One fragment with the end each artifact sits near: copied damage near the lesion strand's 5′ end, end repair fill-in errors in the new bases near the extended strand's 3′ end, and an added A at the last base of a 3′ end.](docs/reference-points.svg)
 
 A duplex consensus outvotes an error on one strand, so copied damage is the filter for Duplex Sequencing, and end repair fill-in and A-tailing matter for single-strand consensus and for libraries without UMIs.
 
