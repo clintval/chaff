@@ -1,5 +1,6 @@
 //! Reference sequence context from an indexed FASTA.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 
@@ -10,6 +11,7 @@ use noodles::fasta;
 /// An indexed FASTA (`.fai` alongside it).
 pub struct Reference {
     reader: fasta::io::IndexedReader<fasta::io::BufReader<File>>,
+    lengths: HashMap<Vec<u8>, usize>,
 }
 
 impl Reference {
@@ -18,19 +20,21 @@ impl Reference {
         let reader = fasta::io::indexed_reader::Builder::default()
             .build_from_path(path)
             .with_context(|| format!("failed to open indexed FASTA (needs a .fai): {path:?}"))?;
-        Ok(Self { reader })
+        let lengths = reader
+            .index()
+            .as_ref()
+            .iter()
+            .map(|r| (r.name().to_vec(), r.length() as usize))
+            .collect();
+        Ok(Self { reader, lengths })
     }
 
     /// The forward-strand bases before, at, and after the 1-based `pos`,
     /// upper-cased; a neighbor past a contig end is `None`.
     pub fn context(&mut self, contig: &str, pos: usize) -> Result<(Option<u8>, u8, Option<u8>)> {
-        let length = self
-            .reader
-            .index()
-            .as_ref()
-            .iter()
-            .find(|r| r.name() == contig.as_bytes())
-            .map(|r| r.length() as usize)
+        let length = *self
+            .lengths
+            .get(contig.as_bytes())
             .with_context(|| format!("contig is not in the reference: {contig}"))?;
         if pos == 0 || pos > length {
             bail!("position is outside the reference contig: {contig}:{pos}");
