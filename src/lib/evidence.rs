@@ -78,6 +78,27 @@ pub trait PileupSource {
     fn pileup(&mut self, contig: &str, pos: Position) -> Result<Vec<ReadBase<'_, Self::Record>>>;
 }
 
+impl<S: streampile::RecordSource> PileupSource for streampile::StreamingPileupBuilder<'_, S> {
+    type Record = noodles::bam::Record;
+
+    fn header(&self) -> &sam::Header {
+        streampile::StreamingPileupBuilder::header(self)
+    }
+
+    fn pileup(&mut self, contig: &str, pos: Position) -> Result<Vec<ReadBase<'_, Self::Record>>> {
+        let pileup =
+            streampile::StreamingPileupBuilder::pileup(self, contig, usize::from(pos) - 1)?;
+        Ok(pileup
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .query_position()
+                    .map(|offset| ReadBase::new(entry.record(), offset))
+            })
+            .collect())
+    }
+}
+
 /// [`Evidence`] from a [`PileupSource`], after the read floors.
 #[derive(Debug)]
 pub struct PileupEvidence<P> {

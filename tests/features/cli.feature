@@ -48,8 +48,7 @@ Feature: CLI contract
 
   Scenario: fgbio's p-value flag names are accepted
     When I run `chaff filter -i calls.vcf -o out.vcf -b sorted.bam --filters a-tailing --a-tailing-p-value 0.01 --sample tumor`
-    Then the exit code is 1
-    And stderr contains "no streaming pileup engine"
+    Then the exit code is 0
 
   Scenario: a multi-sample VCF needs --sample
     When I run `chaff filter -i calls.vcf -o out.vcf -b sorted.bam --filters a-tailing`

@@ -16,6 +16,7 @@ use clap::ValueEnum;
 use log::info;
 use noodles::core::Position;
 use noodles::sam;
+use noodles::sam::alignment::record::Flags;
 use noodles::vcf;
 use noodles::vcf::header::record::value::map::info::{Number, Type};
 use noodles::vcf::variant::record_buf::info::field::value::Array;
@@ -713,13 +714,21 @@ pub fn validate_inputs(args: &FilterArgs) -> Result<sam::Header> {
     Ok(bam_header)
 }
 
-/// Run the `filter` command on the BAM named by `args`.
+/// Run the `filter` command on the BAM named by `args`, streamed once through
+/// streampile. The engine keeps QC-fail reads and both mates, as fgbio does:
+/// the read floors and the mate collapse are chaff's own.
 pub fn run_filter(args: &FilterArgs) -> Result<()> {
     validate_inputs(args)?;
-    bail!(
-        "no streaming pileup engine is linked into this build of chaff, so it cannot read molecules from {:?}",
-        args.bam
-    )
+    let mut reader = noodles::bam::io::reader::Builder
+        .build_from_path(&args.bam)
+        .with_context(|| format!("failed to open BAM: {:?}", args.bam))?;
+    let header = reader
+        .read_header()
+        .context("failed to read the BAM header")?;
+    let engine = streampile::StreamingPileupBuilder::new(reader, &header)?
+        .exclude_flags(Flags::SECONDARY | Flags::DUPLICATE | Flags::SUPPLEMENTARY)
+        .without_overlaps(false);
+    run_filter_on(args, engine)
 }
 
 #[cfg(test)]

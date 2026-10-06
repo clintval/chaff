@@ -10,14 +10,15 @@
 
 use std::path::{Path, PathBuf};
 
-use chaff::filter::{run_filter_on, FilterArgs, FilterKind, FilterOptions};
+use chaff::filter::{run_filter, run_filter_on, FilterArgs, FilterKind, FilterOptions};
 use chaff::io::VariantReader;
 use chaff::prior::PriorMode;
 use chaff::read_end::{ATailing, EndRepairFillIn};
 use chaff::template::ReadFilter;
-use chaff::testing::{gt, Pair, SamBuilder, Variant, VcfBuilder};
+use chaff::testing::{gt, write_fasta, Pair, SamBuilder, Variant, VcfBuilder};
 use noodles::vcf::variant::record_buf::info::field::Value;
 use noodles::vcf::variant::RecordBuf;
+use rstest::rstest;
 use tempfile::TempDir;
 
 const RLEN: usize = 40;
@@ -530,4 +531,43 @@ fn test_raise_an_error_if_the_reads_are_not_coordinate_sorted() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("coordinate sorted"), "{error}");
+}
+
+/// The streampile engine the binary streams the BAM through annotates every
+/// call, under every filter and either prior, exactly as the test pileup does.
+#[rstest]
+#[case(PriorMode::Fgbio)]
+#[case(PriorMode::Learned)]
+fn test_the_streampile_engine_matches_the_test_pileup(#[case] prior: PriorMode) {
+    let dir = TempDir::new().unwrap();
+    let (_, input) = tumor_vcfs(dir.path());
+    let mut sequence = vec![b'A'; 1000];
+    for (pos, base) in [(100, b'C'), (200, b'G'), (500, b'C')] {
+        sequence[pos - 1] = base;
+    }
+    let reference = write_fasta(dir.path(), "chr1", std::str::from_utf8(&sequence).unwrap());
+    let reads = tumor_bam();
+    let args = |output: &str, bam: PathBuf| FilterArgs {
+        input: input.clone(),
+        output: dir.path().join(output),
+        bam,
+        reference: Some(reference.clone()),
+        metrics: None,
+        read_filter: ReadFilter::default(),
+        options: FilterOptions {
+            sample: Some(String::from("tumor")),
+            prior,
+            ..FilterOptions::default()
+        },
+    };
+    let expected = args("expected.vcf", PathBuf::from("reads.bam"));
+    run_filter_on(&expected, reads.pileup()).unwrap();
+    let streamed = args(
+        "streamed.vcf",
+        reads.write_bam(&dir.path().join("reads.bam")),
+    );
+    run_filter(&streamed).unwrap();
+    let records = read_vcf(&streamed.output).1;
+    assert_annotated_as_fgbio(&records);
+    assert_eq!(records, read_vcf(&expected.output).1);
 }

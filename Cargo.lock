@@ -212,6 +212,7 @@ dependencies = [
  "rstest",
  "serde",
  "statrs",
+ "streampile",
  "tempfile",
 ]
 
@@ -1771,6 +1772,17 @@ dependencies = [
  "nalgebra",
  "num-traits",
  "rand",
+]
+
+[[package]]
+name = "streampile"
+version = "0.1.0"
+source = "git+https://github.com/clintval/streampile?rev=ab73ca290252e4368d71cf67789a73b703af5d84#ab73ca290252e4368d71cf67789a73b703af5d84"
+dependencies = [
+ "bstr",
+ "noodles",
+ "noodles-bgzf",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
