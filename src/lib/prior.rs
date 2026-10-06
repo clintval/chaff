@@ -1,6 +1,6 @@
 //! Priors on whether a call is an artifact, and the posterior they give.
 //!
-//! The default prior is learned. Each call `i` carries a likelihood ratio
+//! The `chaff` model learns its prior. Each call `i` carries a likelihood ratio
 //! `exp(l_i) = P(molecules | artifact) / P(molecules | mutation)`. A set of
 //! calls forms a two-component mixture with an unknown artifact fraction
 //! `pi`, estimated per sample the way GATK's LearnReadOrientationModel learns
@@ -23,15 +23,22 @@
 //! filter's fraction rather than moving its prior toward its own calls, and a
 //! stratum of hundreds keeps nearly its own.
 //!
-//! fgbio's prior is kept for parity: a mutation prior of `min((2 * maf)^2,
+//! The `chaff` model learns each decay filter's scale `s` with its fraction,
+//! as the maximum of the filter's marginal likelihood over `(pi, s)`: a
+//! profile over `s` with `pi` solved exactly at each, under a log-normal
+//! prior on `s` centered on the filter's default with a standard deviation of
+//! [`SCALE_PRIOR_SD`] in natural-log units, so a library of a few calls keeps
+//! a scale near the default rather than the one that makes its calls look most
+//! like artifacts. The scale is one per filter, shared by its strata, since how
+//! far a polymerase copies is a property of the library's enzymes and not of
+//! the substitution, and pooling the strata gives the fit the most artifact
+//! calls.
+//!
+//! The `fgbio` model keeps fgbio's prior for parity: a mutation prior of `min((2 * maf)^2,
 //! 0.9999)`, where `maf` is the call's alternate molecule fraction, or one over
 //! the depth when no alternate molecule is seen. At the low allele fractions of
 //! duplex sequencing it is near zero, which makes any call whose alternate
 //! molecules all sit inside the window an artifact.
-
-use std::fmt;
-
-use clap::ValueEnum;
 
 /// A Beta prior on an artifact fraction: `strength` pseudo-calls at `mean`
 /// over a flat `Beta(1, 1)`, `Beta(strength mean + 1, strength (1 - mean) + 1)`.
@@ -54,25 +61,6 @@ pub const FILTER_PRIOR: BetaPrior = BetaPrior {
 /// a stratum's own calls outweigh its filter's once it holds more than ten, and
 /// a lone call moves its stratum at most one eleventh of the way to itself.
 pub const STRATUM_PRIOR_STRENGTH: f64 = 10.0;
-
-/// Which prior turns a likelihood ratio into a posterior.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
-pub enum PriorMode {
-    /// Learn the artifact fraction per sample and stratum by EM.
-    #[default]
-    Learned,
-    /// fgbio's per-call `(2 * maf)^2` mutation prior, for parity.
-    Fgbio,
-}
-
-impl fmt::Display for PriorMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PriorMode::Learned => write!(f, "learned"),
-            PriorMode::Fgbio => write!(f, "fgbio"),
-        }
-    }
-}
 
 /// The logistic function, evaluated without overflow.
 pub fn sigmoid(x: f64) -> f64 {
@@ -140,6 +128,84 @@ pub fn learn_artifact_fraction(log_likelihood_ratios: &[f64], prior: BetaPrior) 
         } else {
             high = pi;
         }
+    }
+}
+
+/// The decay scales, in bases, a scale is learned between.
+pub const SCALE_RANGE: (f64, f64) = (1.0, 1000.0);
+
+/// The standard deviation, in natural-log units, of the log-normal prior on a
+/// learned scale: one, so a scale twice or half the default costs about a
+/// quarter of a nat.
+pub const SCALE_PRIOR_SD: f64 = 1.0;
+
+/// `ln(exp(a) + exp(b))`, without overflow.
+pub(crate) fn ln_add_exp(a: f64, b: f64) -> f64 {
+    a.max(b) + (-(a - b).abs()).exp().ln_1p()
+}
+
+/// The log marginal likelihood of a set of calls at artifact fraction `pi`,
+/// relative to every call being a mutation, plus the log density of `prior`:
+/// `sum_i ln(1 - pi + pi exp(l_i)) + k m ln(pi) + k (1 - m) ln(1 - pi)`.
+pub fn log_marginal_likelihood(log_likelihood_ratios: &[f64], pi: f64, prior: BetaPrior) -> f64 {
+    let (ln_pi, ln_rest) = (pi.ln(), (-pi).ln_1p());
+    let calls: f64 = log_likelihood_ratios
+        .iter()
+        .map(|l| ln_add_exp(ln_rest, ln_pi + l))
+        .sum();
+    calls + prior.strength * (prior.mean * ln_pi + (1.0 - prior.mean) * ln_rest)
+}
+
+/// The decay scale that maximizes a set of calls' marginal likelihood, with
+/// their artifact fraction under `prior` solved exactly at each scale, times a
+/// log-normal prior on the scale centered on `default`. `log_likelihood_ratios`
+/// gives the calls' ratios at a scale. The profile is searched over a log grid
+/// of [`SCALE_RANGE`] and refined by golden-section search around the grid's
+/// best; without a call to learn from, the scale is `default`.
+pub fn learn_scale(
+    log_likelihood_ratios: impl Fn(f64) -> Vec<f64>,
+    prior: BetaPrior,
+    default: f64,
+) -> f64 {
+    const STEPS: usize = 48;
+    let center = default.ln();
+    let profile = |ln_scale: f64| {
+        let llrs = log_likelihood_ratios(ln_scale.exp());
+        let pi = learn_artifact_fraction(&llrs, prior);
+        let shrink = -0.5 * ((ln_scale - center) / SCALE_PRIOR_SD).powi(2);
+        log_marginal_likelihood(&llrs, pi, prior) + shrink
+    };
+    if log_likelihood_ratios(default).is_empty() {
+        return default;
+    }
+    let (low, high) = (SCALE_RANGE.0.ln(), SCALE_RANGE.1.ln());
+    let grid: Vec<f64> = (0..=STEPS)
+        .map(|i| low + (high - low) * i as f64 / STEPS as f64)
+        .collect();
+    let values: Vec<f64> = grid.iter().map(|&x| profile(x)).collect();
+    let best = (0..=STEPS)
+        .max_by(|&i, &j| values[i].total_cmp(&values[j]))
+        .expect("the grid has points");
+    let ratio = (5f64.sqrt() - 1.0) / 2.0;
+    let (mut a, mut b) = (grid[best.saturating_sub(1)], grid[(best + 1).min(STEPS)]);
+    let (mut c, mut d) = (b - ratio * (b - a), a + ratio * (b - a));
+    let (mut fc, mut fd) = (profile(c), profile(d));
+    while b - a > 1e-6 {
+        if fc >= fd {
+            (b, d, fd) = (d, c, fc);
+            c = b - ratio * (b - a);
+            fc = profile(c);
+        } else {
+            (a, c, fc) = (c, d, fd);
+            d = a + ratio * (b - a);
+            fd = profile(d);
+        }
+    }
+    let refined = 0.5 * (a + b);
+    if profile(refined) >= values[best] {
+        refined.exp()
+    } else {
+        grid[best].exp()
     }
 }
 
@@ -235,6 +301,33 @@ mod tests {
         llrs.extend([-50.0; 500]);
         let many = learn_artifact_fraction(&llrs, prior);
         assert!(close(many, 501.0 / 1010.0, 1e-9), "{many}");
+    }
+
+    #[test]
+    fn test_log_marginal_likelihood_weighs_each_call_by_the_fraction() {
+        let prior = BetaPrior {
+            mean: 0.5,
+            strength: 0.0,
+        };
+        let pi: f64 = 0.25;
+        let expected = (0.75 + 0.25 * 3f64.exp()).ln() + (0.75 + 0.25 * (-2f64).exp()).ln();
+        let got = log_marginal_likelihood(&[3.0, -2.0], pi, prior);
+        assert!(close(got, expected, 1e-12), "{got}");
+        let weak = log_marginal_likelihood(&[], pi, FILTER_PRIOR);
+        assert!(close(weak, pi.ln() + (1.0 - pi).ln(), 1e-12), "{weak}");
+    }
+
+    /// Many calls whose ratio peaks at a scale of 20 bases teach nearly that
+    /// scale, one such call stays near the default, and a set without calls
+    /// keeps the default.
+    #[test]
+    fn test_learn_scale_finds_the_peak_of_the_profile() {
+        let llrs = |n| move |scale: f64| vec![4.0 - (scale.ln() - 20f64.ln()).powi(2); n];
+        let many = learn_scale(llrs(500), FILTER_PRIOR, 30.0);
+        assert!(close(many, 20.0, 0.1), "{many}");
+        let one = learn_scale(llrs(1), FILTER_PRIOR, 30.0);
+        assert!(one > many + 1.0 && one < 30.0, "{one}");
+        assert_eq!(learn_scale(|_| Vec::new(), FILTER_PRIOR, 30.0), 30.0);
     }
 
     #[test]

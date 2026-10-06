@@ -9,6 +9,7 @@ pub mod evidence;
 pub mod filter;
 pub mod io;
 pub mod metrics;
+pub mod model;
 pub mod prior;
 pub mod read_end;
 pub mod reference;

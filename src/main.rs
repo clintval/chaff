@@ -8,7 +8,7 @@ use chaff::classes::{validate_classes, DamageClass};
 use chaff::copied_damage::CopiedDamage;
 use chaff::evidence::PileupOptions;
 use chaff::filter::{run_filter, FilterArgs, FilterKind, FilterOptions};
-use chaff::prior::PriorMode;
+use chaff::model::{Distance, Model};
 use chaff::read_end::{ATailing, EndRepairFillIn};
 use clap::builder::styling::{AnsiColor, Effects, Style, Styles};
 use clap::error::ErrorKind;
@@ -71,14 +71,23 @@ pub(crate) const CARGO_STYLING: Styles = Styles::styled()
 ///  4. An artifact's molecules crowd the end that made the artifact
 ///  5. Each call gets a likelihood ratio, artifact to mutation
 ///  6. EM over all calls learns each stratum's artifact fraction (the prior)
+///     and each decay's scale
 ///  7. The posterior probability of a true mutation is written per call
+///
+/// MODELS
+///
+///   chaff   a learned prior, and decays with learned scales for end repair
+///           fill-in and copied damage; A-tailing uses a window
+///   fgbio   fgbio's (2 * maf)^2 prior and windows, as fgbio FilterSomaticVcf;
+///           copied damage, which fgbio lacks, still decays
 ///
 /// FILTERS
 ///
 ///   copied-damage        damage copied onto the other strand before strand
 ///                        tagging: alternates crowd the lesion strand's 5' end
-///   end-repair-fill-in   damage copied into a filled-in recessed 3' end:
-///                        alternates crowd either template end (fgbio ERFAP)
+///   end-repair-fill-in   errors in a filled-in recessed 3' end: alternates
+///                        crowd the 3' end of the strand each template was
+///                        copied from, or either end under fgbio (ERFAP)
 ///   a-tailing            adenines added to an over-digested 3' end: a T near
 ///                        the left end or an A near the right (fgbio ATAP)
 ///
@@ -97,9 +106,9 @@ pub(crate) const CARGO_STYLING: Styles = Styles::styled()
 ///       --copied-damage-classes C>T --copied-damage-threshold 0.05 \
 ///       --end-repair-fill-in-threshold 0.001 --a-tailing-threshold 0.001
 ///
-///  3. Reproduce fgbio FilterSomaticVcf, including its prior:
+///  3. Reproduce fgbio FilterSomaticVcf:
 ///
-///   chaff -i calls.vcf -b tumor.bam -o out.vcf --prior fgbio \
+///   chaff -i calls.vcf -b tumor.bam -o out.vcf --model fgbio \
 ///       --filters end-repair-fill-in,a-tailing
 #[derive(Debug, Parser)]
 #[command(
@@ -192,19 +201,20 @@ struct Cli {
     )]
     filters: Vec<FilterKind>,
 
-    /// The prior that turns a likelihood ratio into a posterior.
+    /// The model that scores calls: its prior and its distance models.
     ///
-    ///   learned   artifact fraction per sample and stratum, learned by EM
-    ///   fgbio     fgbio's per-call mutation prior, (2 * maf)^2, for parity
+    ///   chaff   artifact fractions learned per sample and stratum by EM, and
+    ///           decays for end repair fill-in and copied damage
+    ///   fgbio   fgbio's per-call (2 * maf)^2 prior and windows, for parity
     #[arg(
         long,
         value_enum,
-        value_name = "PRIOR",
-        default_value_t = PriorMode::Learned,
+        value_name = "MODEL",
+        default_value_t = Model::Chaff,
         hide_possible_values = true,
         verbatim_doc_comment
     )]
-    prior: PriorMode,
+    model: Model,
 
     /// Damage classes as damaged base `>` read base, comma-separated.
     ///
@@ -222,24 +232,38 @@ struct Cli {
     )]
     copied_damage_classes: Vec<DamageClass>,
 
-    /// Mean length in bases of the resynthesis that copies a lesion.
-    #[arg(long, value_name = "BP", default_value_t = 30.0, value_parser = positive, verbatim_doc_comment)]
-    copied_damage_scale: f64,
+    /// Decay scale in bases from the lesion strand's 5' end, or `learned`.
+    ///
+    /// The mean length a polymerase copies a lesion strand over, learned per
+    /// library under either model unless a number fixes it. Molecules within it
+    /// count as congruent in the metrics.
+    #[arg(
+        long,
+        value_name = "BP",
+        default_value = "learned",
+        verbatim_doc_comment
+    )]
+    copied_damage_distance: Distance,
 
     /// Apply `CopiedDamageArtifact` at or below this posterior.
     #[arg(long, value_name = "P", value_parser = probability, verbatim_doc_comment)]
     copied_damage_threshold: Option<f64>,
 
-    /// Distance from a template end within which end repair fill-in acts.
-    #[arg(long, value_name = "BP", default_value_t = 15, verbatim_doc_comment)]
-    end_repair_fill_in_distance: u32,
-
-    /// Score with a decay of this scale in bases from the nearest template end
-    /// instead of the distance window.
+    /// Distance in bases from a template end, or `learned`.
     ///
-    /// The distance window still sets the congruent molecules in the metrics.
-    #[arg(long, value_name = "BP", value_parser = positive, verbatim_doc_comment)]
-    end_repair_fill_in_scale: Option<f64>,
+    ///   --model chaff   the decay scale from the 3' end of the strand each
+    ///                   template was copied from, learned unless fixed
+    ///   --model fgbio   fgbio's window from the nearest template end, 15
+    ///                   unless fixed
+    ///
+    /// Molecules within it count as congruent in the metrics.
+    #[arg(
+        long,
+        value_name = "BP",
+        default_value = "learned",
+        verbatim_doc_comment
+    )]
+    end_repair_fill_in_distance: Distance,
 
     /// Apply `EndRepairFillInArtifact` at or below this posterior.
     #[arg(
@@ -251,7 +275,7 @@ struct Cli {
     )]
     end_repair_fill_in_threshold: Option<f64>,
 
-    /// Distance from a template end within which A-tailing acts.
+    /// Window in bases from the template end, under either model.
     #[arg(long, value_name = "BP", default_value_t = 2, verbatim_doc_comment)]
     a_tailing_distance: u32,
 
@@ -264,14 +288,6 @@ struct Cli {
         verbatim_doc_comment
     )]
     a_tailing_threshold: Option<f64>,
-}
-
-/// Parse a finite length greater than zero.
-fn positive(text: &str) -> Result<f64, String> {
-    match text.parse::<f64>() {
-        Ok(value) if value.is_finite() && value > 0.0 => Ok(value),
-        _ => Err(format!("expected a positive number, found: {text}")),
-    }
 }
 
 /// Parse a path to a file, refusing `-` for standard input.
@@ -328,6 +344,15 @@ impl Cli {
                 return Err(cmd.error(ErrorKind::ArgumentConflict, message));
             }
         }
+        if self.model == Model::Fgbio
+            && self.end_repair_fill_in_distance == Distance::Learned
+            && matches.value_source("end_repair_fill_in_distance") == Some(ValueSource::CommandLine)
+        {
+            return Err(cmd.error(
+                ErrorKind::ArgumentConflict,
+                "'--end-repair-fill-in-distance learned' needs '--model chaff'; under '--model fgbio' it is a window of bases",
+            ));
+        }
         if self.filters.contains(&FilterKind::CopiedDamage) && self.reference.is_none() {
             return Err(cmd.error(
                 ErrorKind::MissingRequiredArgument,
@@ -361,15 +386,14 @@ impl Cli {
         let options = FilterOptions {
             sample: self.sample,
             filters: self.filters,
-            prior: self.prior,
+            model: self.model,
             copied_damage: CopiedDamage {
                 classes: self.copied_damage_classes,
-                scale: self.copied_damage_scale,
+                distance: self.copied_damage_distance,
             },
             copied_damage_threshold: self.copied_damage_threshold,
             end_repair_fill_in: EndRepairFillIn {
                 distance: self.end_repair_fill_in_distance,
-                scale: self.end_repair_fill_in_scale,
             },
             end_repair_fill_in_threshold: self.end_repair_fill_in_threshold,
             a_tailing: ATailing {
@@ -611,7 +635,8 @@ mod tests {
     #[case(&["--filters", "a-tailing", "--copied-damage-classes", "C>T"], "the argument '--copied-damage-classes <CLASS>' applies only to the copied-damage filter")]
     #[case(&["--filters", "copied-damage", "--a-tailing-distance", "2"], "the argument '--a-tailing-distance <BP>' applies only to the a-tailing filter")]
     #[case(&["--filters", "copied-damage", "--a-tailing-p-value", "0.01"], "the argument '--a-tailing-threshold <P>' applies only to the a-tailing filter")]
-    #[case(&["--filters", "a-tailing", "--end-repair-fill-in-scale", "15"], "the argument '--end-repair-fill-in-scale <BP>' applies only to the end-repair-fill-in filter")]
+    #[case(&["--filters", "a-tailing", "--end-repair-fill-in-distance", "15"], "the argument '--end-repair-fill-in-distance <BP>' applies only to the end-repair-fill-in filter")]
+    #[case(&["--filters", "a-tailing", "--copied-damage-distance", "20"], "the argument '--copied-damage-distance <BP>' applies only to the copied-damage filter")]
     #[case(&["--filters", "a-tailing,end-repair-fill-in", "--ref", "ref.fa"], "the argument '--ref <FASTA>' applies only to the copied-damage filter")]
     fn test_an_option_of_a_filter_left_out_is_a_usage_error(
         #[case] extra: &[&str],
@@ -679,6 +704,34 @@ mod tests {
         args(&[&["-i", &input, "-o", "-"][..], &filters].concat()).unwrap();
     }
 
+    #[rstest]
+    #[case("0")]
+    #[case("-1")]
+    #[case("wide")]
+    fn test_a_distance_that_is_not_learned_or_positive_is_a_usage_error(#[case] value: &str) {
+        let option = format!("--end-repair-fill-in-distance={value}");
+        let error = args(&["--filters", "end-repair-fill-in", &option]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+        assert_eq!(error.exit_code(), 2);
+        let message = "expected 'learned' or a positive number of bases";
+        assert!(error.to_string().contains(message), "{error}");
+    }
+
+    #[test]
+    fn test_a_learned_end_repair_window_under_fgbio_is_a_usage_error() {
+        let extra = ["--filters", "end-repair-fill-in", "--model", "fgbio"];
+        let error = args(&[&extra[..], &["--end-repair-fill-in-distance", "learned"]].concat())
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+        assert_eq!(error.exit_code(), 2);
+        assert!(
+            error.to_string().contains("needs '--model chaff'"),
+            "{error}"
+        );
+        let window = args(&extra).unwrap().options.end_repair_fill_in.window();
+        assert_eq!(window, 15.0);
+    }
+
     #[test]
     fn test_a_damage_class_and_its_reverse_complement_are_a_usage_error() {
         let error = args(&["--ref", "ref.fa", "--copied-damage-classes", "C>T,G>A"]).unwrap_err();
@@ -710,7 +763,9 @@ mod tests {
     #[case(&["--ref", "ref.fa"])]
     #[case(&["--filters", "copied-damage", "--ref", "ref.fa"])]
     #[case(&["--filters", "a-tailing", "--a-tailing-distance", "4", "--a-tailing-threshold", "0.001"])]
-    #[case(&["--filters", "end-repair-fill-in", "--end-repair-fill-in-distance", "10", "--end-repair-fill-in-scale", "15"])]
+    #[case(&["--filters", "end-repair-fill-in", "--end-repair-fill-in-distance", "10"])]
+    #[case(&["--filters", "end-repair-fill-in", "--model", "fgbio", "--end-repair-fill-in-distance", "10"])]
+    #[case(&["--ref", "ref.fa", "--model", "fgbio", "--copied-damage-distance", "20"])]
     fn test_options_of_enabled_filters_and_defaults_are_accepted(#[case] extra: &[&str]) {
         args(extra).unwrap();
     }

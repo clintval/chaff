@@ -19,13 +19,13 @@ Feature: CLI contract
     Then the exit code is 0
     And stdout contains "chaff"
 
-  Scenario: documents every filter and the prior
+  Scenario: documents every filter and the model
     When I run `chaff --help`
     Then the exit code is 0
     And stdout contains "copied-damage"
     And stdout contains "end-repair-fill-in"
     And stdout contains "a-tailing"
-    And stdout contains "--prior"
+    And stdout contains "--model"
 
   Scenario: the input, output, and BAM are required
     When I run `chaff`
@@ -46,7 +46,7 @@ Feature: CLI contract
     Then the exit code is 2
     And stderr contains "expected a probability from 0 to 1"
 
-  Scenario: fgbio's p-value flag names are accepted
+  Scenario: fgbio's threshold option names are accepted as hidden aliases
     When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --filters a-tailing --a-tailing-p-value 0.01 --sample tumor`
     Then the exit code is 0
 

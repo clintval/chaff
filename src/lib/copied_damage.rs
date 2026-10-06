@@ -20,30 +20,41 @@
 //! Under a true mutation, the alternate molecules' distances follow the
 //! reference molecules' distances at the same site, which absorbs capture and
 //! fragment-length skew. Under the artifact, a lesion at distance `d` survives
-//! into a copy with probability `w(d) = exp(-d / scale)`, an exponentially
-//! distributed resynthesis length with mean `scale`; the alternate distances
+//! into a copy with probability `w(d) = exp(-d / distance)`, an exponentially
+//! distributed resynthesis length with mean `distance`; the alternate distances
 //! follow the reference distances tilted by `w`. See
 //! [`crate::read_end::tilt_log_likelihood_ratio`] for the per-molecule terms.
+//! The decay holds under both models, since fgbio has no such filter; its
+//! scale is learned per library unless fixed, and a molecule is congruent when
+//! `d` is less than it.
+//!
+//! The model sees only copies that start at a 5' end. A lesion copied from an
+//! internal nick, by nick translation or strand displacement, or across the
+//! gap an abasic site leaves, can sit anywhere in the template, so its
+//! alternate molecules look like a mutation's: per-call scores cannot separate
+//! them, and they show only as an excess of the damage class across a library.
 
 use crate::call::Genotype;
 use crate::classes::{Context, DamageClass, Strand};
 use crate::evidence::Molecule;
-use crate::read_end::{molecule_tilt_ratio, Score};
+use crate::model::Distance;
+use crate::read_end::{Distances, Score};
 
 /// The copied damage filter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CopiedDamage {
     /// The damage classes to test.
     pub classes: Vec<DamageClass>,
-    /// The mean resynthesis length in bases.
-    pub scale: f64,
+    /// The decay scale in bases from the lesion strand's 5' end, the mean
+    /// resynthesis length: learned by default.
+    pub distance: Distance,
 }
 
 impl Default for CopiedDamage {
     fn default() -> Self {
         Self {
             classes: vec![DamageClass::DEAMINATION, DamageClass::OXIDATION],
-            scale: 30.0,
+            distance: Distance::Learned,
         }
     }
 }
@@ -71,14 +82,17 @@ impl CopiedDamage {
     pub const INFO_POSTERIOR: &'static str = "CDAP";
     /// The INFO key for the log10 likelihood ratio, artifact to mutation.
     pub const INFO_RATIO: &'static str = "CDLR";
-    /// The INFO key for the alternate molecules nearer the lesion strand's 5'
-    /// end, and all alternate molecules measured.
+    /// The INFO key for the alternate molecules within the distance of the
+    /// lesion strand's 5' end, and all alternate molecules measured.
     pub const INFO_ALT: &'static str = "CDAC";
-    /// The INFO key for the reference molecules nearer the lesion strand's 5'
-    /// end, and all reference molecules measured.
+    /// The INFO key for the reference molecules within the distance of the
+    /// lesion strand's 5' end, and all reference molecules measured.
     pub const INFO_REF: &'static str = "CDRC";
     /// The FILTER name.
     pub const FILTER: &'static str = "CopiedDamageArtifact";
+
+    /// The decay scale without a call to learn it from, in bases.
+    pub const FALLBACK_SCALE: f64 = 30.0;
 
     /// The `CDLR` value of a natural-log likelihood ratio: its log10 at four
     /// significant digits, whatever its sign.
@@ -99,49 +113,41 @@ impl CopiedDamage {
             .find_map(|class| class.lesion_strand(ref_base, alt_base).map(|s| (*class, s)))
     }
 
-    /// The 0-based distance of the site from the lesion strand's 5' end and the
-    /// template length, in the template's bases, for a molecule with both ends
-    /// known.
-    pub fn distance(m: &Molecule, strand: Strand) -> Option<(usize, usize)> {
-        let d = match strand {
-            Strand::Forward => m.left?,
-            Strand::Reverse => m.right?,
-        };
-        Some((d, m.length()?))
+    /// The 0-based distance of the site from the lesion strand's 5' end, in the
+    /// template's bases, for a molecule with both ends known.
+    pub fn five_prime_distance(m: &Molecule, strand: Strand) -> Option<usize> {
+        m.length()?;
+        match strand {
+            Strand::Forward => m.left,
+            Strand::Reverse => m.right,
+        }
     }
 
-    /// Whether a distance is nearer the lesion strand's 5' end than its 3' end.
-    pub fn is_five_prime_proximal(d: usize, length: usize) -> bool {
-        2 * d + 1 < length
+    /// The distances from the lesion strand's 5' end that the decay scores a
+    /// call by.
+    pub fn distances(
+        &self,
+        molecules: &[Molecule],
+        ref_base: u8,
+        alt_base: u8,
+        strand: Strand,
+    ) -> Distances {
+        Distances::of(molecules, ref_base, alt_base, |m| {
+            Self::five_prime_distance(m, strand)
+        })
     }
 
-    /// The call's score: the tilt likelihood ratio and the 5'-proximal counts.
+    /// The call's score at a decay scale of `scale` bases.
     pub fn score(
         &self,
         molecules: &[Molecule],
         ref_base: u8,
         alt_base: u8,
         strand: Strand,
+        scale: f64,
     ) -> Score {
-        let mut score = Score::default();
-        for m in molecules {
-            let Some((d, length)) = Self::distance(m, strand) else {
-                continue;
-            };
-            let proximal = u32::from(Self::is_five_prime_proximal(d, length));
-            if m.base == ref_base {
-                score.ref_molecules += 1;
-                score.ref_congruent += proximal;
-            } else if m.base == alt_base {
-                score.alt_molecules += 1;
-                score.alt_congruent += proximal;
-            }
-        }
-        score.log_likelihood_ratio =
-            molecule_tilt_ratio(molecules, ref_base, alt_base, self.scale, |m| {
-                Self::distance(m, strand).map(|(d, _)| d)
-            });
-        score
+        self.distances(molecules, ref_base, alt_base, strand)
+            .score(scale)
     }
 }
 
@@ -194,27 +200,30 @@ mod tests {
     fn test_distance_from_the_lesion_strand_five_prime_end() {
         let first = Molecule::new(C, 30, 0, 99);
         assert_eq!(
-            CopiedDamage::distance(&first, Strand::Forward),
-            Some((0, 100))
+            CopiedDamage::five_prime_distance(&first, Strand::Forward),
+            Some(0)
         );
         assert_eq!(
-            CopiedDamage::distance(&first, Strand::Reverse),
-            Some((99, 100))
+            CopiedDamage::five_prime_distance(&first, Strand::Reverse),
+            Some(99)
         );
         let last = Molecule::new(C, 30, 99, 0);
         assert_eq!(
-            CopiedDamage::distance(&last, Strand::Reverse),
-            Some((0, 100))
+            CopiedDamage::five_prime_distance(&last, Strand::Reverse),
+            Some(0)
         );
         let half = Molecule {
             right: None,
             ..first
         };
-        assert_eq!(CopiedDamage::distance(&half, Strand::Forward), None);
+        assert_eq!(
+            CopiedDamage::five_prime_distance(&half, Strand::Forward),
+            None
+        );
     }
 
     /// A deletion between the site and the lesion strand's 5' end brings the
-    /// site nearer that end, in template bases, past the template's midpoint.
+    /// site nearer that end, in template bases, and within the distance.
     #[test]
     fn test_distance_counts_template_bases_across_a_deletion() {
         let mut builder = SamBuilder::new().read_length(50);
@@ -223,24 +232,27 @@ mod tests {
         }
         let mut evidence =
             PileupEvidence::new(builder.to_pileup_builder(), &PileupOptions::default());
-        let position = Position::try_from(146).unwrap();
+        let position = Position::try_from(132).unwrap();
         let molecules = evidence.molecules("chr1", position).unwrap();
         let distances: Vec<_> = molecules
             .iter()
-            .map(|m| CopiedDamage::distance(m, Strand::Forward).unwrap())
+            .map(|m| CopiedDamage::five_prime_distance(m, Strand::Forward).unwrap())
             .collect();
-        assert_eq!(distances, vec![(45, 90), (41, 86)]);
-        assert!(!CopiedDamage::is_five_prime_proximal(45, 90));
-        assert!(CopiedDamage::is_five_prime_proximal(41, 86));
+        assert_eq!(distances, vec![31, 27]);
     }
 
     #[test]
-    fn test_five_prime_proximal_splits_the_molecule_in_half() {
-        assert!(CopiedDamage::is_five_prime_proximal(0, 100));
-        assert!(CopiedDamage::is_five_prime_proximal(49, 100));
-        assert!(!CopiedDamage::is_five_prime_proximal(50, 100));
-        assert!(!CopiedDamage::is_five_prime_proximal(2, 5));
-        assert!(CopiedDamage::is_five_prime_proximal(1, 5));
+    fn test_congruent_molecules_are_within_the_scale() {
+        let filter = CopiedDamage::default();
+        let molecules: Vec<Molecule> = [0, 2, 3, 29, 30].map(|d| at(T, d)).into();
+        let mut with_refs = spread_references(C);
+        with_refs.extend(molecules);
+        let count = |scale| {
+            filter
+                .score(&with_refs, C, T, Strand::Forward, scale)
+                .alt_congruent
+        };
+        assert_eq!((count(30.0), count(2.5)), (4, 2));
     }
 
     #[test]
@@ -250,10 +262,10 @@ mod tests {
         for d in [2, 5, 9, 14, 20] {
             molecules.push(at(T, d));
         }
-        let score = filter.score(&molecules, C, T, Strand::Forward);
+        let score = filter.score(&molecules, C, T, Strand::Forward, 30.0);
         assert!(score.log_likelihood_ratio.unwrap() > 3.0, "{score:?}");
         assert_eq!((score.alt_congruent, score.alt_molecules), (5, 5));
-        assert_eq!((score.ref_congruent, score.ref_molecules), (75, 150));
+        assert_eq!((score.ref_congruent, score.ref_molecules), (30, 150));
     }
 
     #[test]
@@ -263,7 +275,7 @@ mod tests {
         for d in [2, 5, 9, 14, 20] {
             molecules.push(at(A, d));
         }
-        let score = filter.score(&molecules, G, A, Strand::Reverse);
+        let score = filter.score(&molecules, G, A, Strand::Reverse, 30.0);
         assert!(score.log_likelihood_ratio.unwrap() < -3.0, "{score:?}");
         assert_eq!(score.alt_congruent, 0);
     }
@@ -275,9 +287,9 @@ mod tests {
         for d in (0..150).step_by(10) {
             molecules.push(at(T, d));
         }
-        let score = filter.score(&molecules, C, T, Strand::Forward);
+        let score = filter.score(&molecules, C, T, Strand::Forward, 30.0);
         assert!(score.log_likelihood_ratio.unwrap() < -5.0, "{score:?}");
-        assert_eq!((score.alt_congruent, score.alt_molecules), (8, 15));
+        assert_eq!((score.alt_congruent, score.alt_molecules), (3, 15));
     }
 
     #[test]
@@ -286,7 +298,7 @@ mod tests {
         let skewed = |base| -> Vec<Molecule> { (0..20).map(|d| at(base, d)).collect() };
         let mut molecules = skewed(C);
         molecules.extend(skewed(T).into_iter().step_by(4));
-        let score = filter.score(&molecules, C, T, Strand::Forward);
+        let score = filter.score(&molecules, C, T, Strand::Forward, 30.0);
         assert!(score.log_likelihood_ratio.unwrap().abs() < 0.5, "{score:?}");
     }
 
@@ -300,7 +312,7 @@ mod tests {
             },
             Molecule::new(C, 90, 10, 100),
         ];
-        let score = filter.score(&molecules, C, T, Strand::Forward);
+        let score = filter.score(&molecules, C, T, Strand::Forward, 30.0);
         assert_eq!(score.alt_molecules, 0);
         assert_eq!(score.ref_molecules, 1);
         assert_eq!(score.log_likelihood_ratio, None);

@@ -8,7 +8,12 @@
 //! overlapping mates into one: mates that agree keep the higher quality, and
 //! mates that disagree become an `N`, which counts as neither allele. A
 //! template that holds a deletion at the site is a [`DELETION`], which counts
-//! as neither allele but in the depth, as fgbio counts it.
+//! as neither allele but in the depth, as fgbio counts it. Each molecule also
+//! names the strand its reads were copied from, by pair orientation as GATK's
+//! `LearnReadOrientationModel` reads it: read 1 is a copy of the original
+//! strand from its 5' end, so an F1R2 template comes from the forward strand
+//! and an F2R1 template from the reverse. A duplex consensus, whose reads
+//! carry fgbio's `aD` and `bD` depths of both strands, comes from both.
 
 use std::collections::HashMap;
 
@@ -19,6 +24,8 @@ use streampile::{
     AgreementStrategy, AlignmentRecord, DisagreementStrategy, EntryKind, PileupEntry,
     PileupTemplate, RecordSource, StreamingPileupBuilder,
 };
+
+use crate::classes::Strand;
 
 /// How the quality of agreeing mates is called: the higher of the two.
 const AGREEMENT: AgreementStrategy = AgreementStrategy::MaxQual;
@@ -48,10 +55,13 @@ pub struct Molecule {
     /// the quality floor, is reverse: a site equally far from both ends is
     /// nearer that read's own 5' end.
     pub reverse: bool,
+    /// The strand the template's reads were copied from, or `None` for a
+    /// duplex consensus, which holds both.
+    pub origin: Option<Strand>,
 }
 
 impl Molecule {
-    /// A molecule with both distances known.
+    /// A duplex molecule with both distances known.
     pub fn new(base: u8, quality: u8, left: usize, right: usize) -> Self {
         Self {
             base,
@@ -59,6 +69,15 @@ impl Molecule {
             left: Some(left),
             right: Some(right),
             reverse: false,
+            origin: None,
+        }
+    }
+
+    /// The same molecule copied from one strand.
+    pub fn from_strand(self, origin: Strand) -> Self {
+        Self {
+            origin: Some(origin),
+            ..self
         }
     }
 
@@ -191,7 +210,35 @@ fn molecule<R: AlignmentRecord>(
         left,
         right,
         reverse: kept.is_some_and(|e| e.is_reverse()),
+        origin: template.entries().next().and_then(origin),
     }))
+}
+
+/// The strand a read's template was copied from: read 1's strand, which for a
+/// read 2 is its mate's, or `None` for a duplex consensus, which holds both.
+fn origin<R: AlignmentRecord>(entry: PileupEntry<'_, R>) -> Option<Strand> {
+    let depth = |tag: &[u8; 2]| {
+        entry
+            .record()
+            .data()
+            .get(tag)
+            .and_then(Result::ok)
+            .and_then(|value| value.as_int())
+    };
+    if depth(b"aD").is_some_and(|d| d > 0) && depth(b"bD").is_some_and(|d| d > 0) {
+        return None;
+    }
+    let flags = entry.flags();
+    let read_one_reverse = if flags.is_segmented() && flags.is_last_segment() {
+        flags.is_mate_reverse_complemented()
+    } else {
+        flags.is_reverse_complemented()
+    };
+    Some(if read_one_reverse {
+        Strand::Reverse
+    } else {
+        Strand::Forward
+    })
 }
 
 /// The site's distances from a template's leftmost and rightmost bases, as
@@ -273,6 +320,37 @@ mod tests {
     fn molecules_at(reads: &SamBuilder, options: PileupOptions, site: usize) -> Vec<Molecule> {
         let mut evidence = PileupEvidence::new(reads.to_pileup_builder(), &options);
         evidence.molecules("chr1", pos(site)).unwrap()
+    }
+
+    /// Read 1 is a copy of the strand its template came from: forward for an
+    /// F1R2 pair, reverse for F2R1, even where only read 2 covers the site; a
+    /// duplex consensus carrying both strands' depths comes from neither one.
+    #[test]
+    fn test_a_template_s_origin_is_read_one_s_strand_unless_it_is_a_duplex() {
+        use crate::classes::Strand as Origin;
+        use noodles::sam::alignment::record::data::field::Tag;
+        use noodles::sam::alignment::record_buf::data::field::Value as Field;
+        let origin = |pair: Pair, site: usize| {
+            let mut reads = SamBuilder::new().read_length(50);
+            reads.add_pair(pair);
+            molecules_at(&reads, PileupOptions::default(), site)[0].origin
+        };
+        let f1r2 = || Pair::at(101, 131);
+        let f2r1 = || {
+            Pair::at(131, 101)
+                .strand1(Strand::Minus)
+                .strand2(Strand::Plus)
+        };
+        assert_eq!(origin(f1r2(), 110), Some(Origin::Forward));
+        assert_eq!(origin(f1r2(), 175), Some(Origin::Forward));
+        assert_eq!(origin(f2r1(), 110), Some(Origin::Reverse));
+        assert_eq!(origin(f2r1(), 175), Some(Origin::Reverse));
+        let depth = |pair: Pair, a: i32, b: i32| {
+            pair.attr(Tag::new(b'a', b'D'), Field::from(a))
+                .attr(Tag::new(b'b', b'D'), Field::from(b))
+        };
+        assert_eq!(origin(depth(f1r2(), 3, 2), 110), None);
+        assert_eq!(origin(depth(f2r1(), 3, 0), 110), Some(Origin::Reverse));
     }
 
     /// The site's distances from the template ends of each molecule of these
@@ -650,7 +728,10 @@ mod tests {
         let molecules = molecules_at(&reads, PileupOptions::default(), 130);
         let calls: Vec<(u8, u8)> = molecules.iter().map(|m| (m.base, m.quality)).collect();
         assert_eq!(calls, [(b'A', 40), (b'N', 2), (b'A', 30)]);
-        assert_eq!(molecules[0], Molecule::new(b'A', 40, 29, 40));
+        assert_eq!(
+            molecules[0],
+            Molecule::new(b'A', 40, 29, 40).from_strand(crate::classes::Strand::Forward)
+        );
     }
 
     /// A template holding a deletion at the site is a deletion, neither allele.

@@ -2,10 +2,9 @@
 //! TSV and logged.
 //!
 //! For each stratum the counts pool every annotated call's molecules. A
-//! molecule is congruent when it sits where the artifact would put it: nearer
-//! the lesion strand's 5' end than its 3' end for the copied damage filter
-//! (NanoSeq's strand assignment by nearest 5' end), within the distance of the
-//! relevant template end for the read-end filters.
+//! molecule is congruent when the site lies within the filter's distance of
+//! the end its artifact favors, the same end and distance its posterior
+//! weighs.
 //!
 //! The asymmetry test asks whether more alternate molecules are congruent
 //! than each call's own reference molecules predict. Call `i` contributes its
@@ -49,6 +48,10 @@ pub struct StratumMetrics {
     /// stratum's prior shrinks toward; empty under fgbio's per-call prior.
     #[serde(serialize_with = "six_digits_or_empty")]
     pub filter_artifact_fraction: Option<f64>,
+    /// The filter's distance in bases, shared by its strata: a decay's scale,
+    /// learned or fixed, or a window.
+    #[serde(serialize_with = "six_digits")]
+    pub distance: f64,
     /// The sum over calls of the posterior probability of an artifact.
     #[serde(serialize_with = "six_digits")]
     pub expected_artifacts: f64,
@@ -180,6 +183,7 @@ mod tests {
             calls: 3,
             filtered: 1,
             artifact_fraction: Some(0.4),
+            distance: 30.0,
             expected_artifacts: 1.2,
             alt_molecules: 10,
             alt_congruent: 9,
@@ -262,9 +266,9 @@ mod tests {
             .skip(1)
             .map(|l| l.split('\t').collect())
             .collect();
-        assert_eq!(rows[0][5..8], ["0.333333", "", "0.666667"]);
-        assert_eq!(rows[0][10], "5.0");
-        assert_eq!(rows[0][15], "0.0107422");
+        assert_eq!(rows[0][5..9], ["0.333333", "", "30.0", "0.666667"]);
+        assert_eq!(rows[0][11], "5.0");
+        assert_eq!(rows[0][16], "0.0107422");
         assert_eq!(rows[1][5], "");
     }
 

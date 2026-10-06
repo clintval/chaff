@@ -16,12 +16,18 @@
 //! P(. | mutation)       (1 - e) f + e (1 - f)     (1 - e)(1 - f) + e f
 //! ```
 //!
-//! With `--end-repair-fill-in-scale`, end repair fill-in instead uses the
-//! continuous model of [`tilt_log_likelihood_ratio`] on the 0-based distance
-//! from the nearest template end.
+//! These are the likelihoods of the `fgbio` model. Under the `chaff` model, end
+//! repair fill-in instead uses the decay of [`tilt_log_likelihood_ratio`] on
+//! the 0-based distance from the 3' end of the strand the template was copied
+//! from, the end its polymerase extended, at a learned scale; A-tailing keeps
+//! its window. Either way a molecule is congruent when the site lies within
+//! the filter's distance of its end.
 
 use crate::call::Genotype;
+use crate::classes::Strand;
 use crate::evidence::Molecule;
+use crate::model::Distance;
+use crate::prior::ln_add_exp;
 
 /// What a filter extracts from one call's molecules.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -121,31 +127,55 @@ pub fn tilt_log_likelihood_ratio(
     )
 }
 
-/// `ln(exp(a) + exp(b))`, without overflow.
-fn ln_add_exp(a: f64, b: f64) -> f64 {
-    a.max(b) + (-(a - b).abs()).exp().ln_1p()
+/// The 0-based distances a decay scores one call by: its measured reference
+/// molecules', and its measured alternate molecules' with their base
+/// qualities.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Distances {
+    /// The reference molecules' distances.
+    pub reference: Vec<usize>,
+    /// The alternate molecules' distances and base qualities.
+    pub alternate: Vec<(usize, u8)>,
 }
 
-/// The [`tilt_log_likelihood_ratio`] of a call's reference and alternate
-/// molecules at the 0-based distances `distance` gives them, leaving out the
-/// molecules it gives none.
-pub fn molecule_tilt_ratio(
-    molecules: &[Molecule],
-    ref_base: u8,
-    alt_base: u8,
-    scale: f64,
-    distance: impl Fn(&Molecule) -> Option<usize>,
-) -> Option<f64> {
-    let mut ref_distances = Vec::new();
-    let mut alt = Vec::new();
-    for m in molecules {
-        match distance(m) {
-            Some(d) if m.base == ref_base => ref_distances.push(d),
-            Some(d) if m.base == alt_base => alt.push((d, m.quality)),
-            _ => {}
+impl Distances {
+    /// The distances `distance` gives a call's reference and alternate
+    /// molecules, leaving out the molecules it gives none.
+    pub fn of(
+        molecules: &[Molecule],
+        ref_base: u8,
+        alt_base: u8,
+        distance: impl Fn(&Molecule) -> Option<usize>,
+    ) -> Self {
+        let mut distances = Self::default();
+        for m in molecules {
+            match distance(m) {
+                Some(d) if m.base == ref_base => distances.reference.push(d),
+                Some(d) if m.base == alt_base => distances.alternate.push((d, m.quality)),
+                _ => {}
+            }
+        }
+        distances
+    }
+
+    /// The [`tilt_log_likelihood_ratio`] at `scale`.
+    pub fn log_likelihood_ratio(&self, scale: f64) -> Option<f64> {
+        tilt_log_likelihood_ratio(&self.reference, &self.alternate, scale)
+    }
+
+    /// The score at `scale`: its ratio, and the molecules less than `scale`
+    /// bases from the end as congruent.
+    pub fn score(&self, scale: f64) -> Score {
+        let near = |d: usize| (d as f64) < scale;
+        let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        Score {
+            log_likelihood_ratio: self.log_likelihood_ratio(scale),
+            alt_molecules: count(self.alternate.len()),
+            alt_congruent: count(self.alternate.iter().filter(|(d, _)| near(*d)).count()),
+            ref_molecules: count(self.reference.len()),
+            ref_congruent: count(self.reference.iter().filter(|&&d| near(d)).count()),
         }
     }
-    tilt_log_likelihood_ratio(&ref_distances, &alt, scale)
 }
 
 /// The 1-based distance of the site from the nearest template end the
@@ -158,24 +188,14 @@ fn nearest_end(m: &Molecule) -> Option<usize> {
 ///
 /// End repair blunts a fragment: polymerase extends a recessed 3' end across
 /// the opposite strand's 5' overhang, and an exonuclease trims a 3' overhang.
-/// A damaged base in the single-stranded overhang, such as 8-oxoguanine, is
-/// copied into the extended strand, so after amplification both strands carry
-/// the change near the template end.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// A base the polymerase misincorporates, or copies from a damaged overhang,
+/// sits on the extended strand near its 3' end.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct EndRepairFillIn {
-    /// The distance from a template end within which a molecule is congruent.
-    pub distance: u32,
-    /// The scale of the continuous model, when it replaces the window.
-    pub scale: Option<f64>,
-}
-
-impl Default for EndRepairFillIn {
-    fn default() -> Self {
-        Self {
-            distance: 15,
-            scale: None,
-        }
-    }
+    /// The distance in bases: the decay scale under the `chaff` model, learned
+    /// by default, and the window from the nearest template end under `fgbio`,
+    /// fgbio's [`EndRepairFillIn::FGBIO_WINDOW`] by default.
+    pub distance: Distance,
 }
 
 impl EndRepairFillIn {
@@ -184,12 +204,39 @@ impl EndRepairFillIn {
     /// The FILTER name, fgbio's.
     pub const FILTER: &'static str = "EndRepairFillInArtifact";
 
-    /// A window filter at `distance`.
-    pub fn new(distance: u32) -> Self {
+    /// fgbio's default window, in bases.
+    pub const FGBIO_WINDOW: f64 = 15.0;
+
+    /// The decay scale without a call to learn it from, in bases.
+    pub const FALLBACK_SCALE: f64 = 15.0;
+
+    /// A filter at a fixed `distance` in bases.
+    pub fn new(distance: f64) -> Self {
         Self {
-            distance,
-            scale: None,
+            distance: Distance::Bases(distance),
         }
+    }
+
+    /// The window of the `fgbio` model.
+    pub fn window(&self) -> f64 {
+        self.distance.bases(Self::FGBIO_WINDOW)
+    }
+
+    /// The 0-based distance of the site from the 3' end of the strand the
+    /// template was copied from, which end repair extended: the rightmost base
+    /// for the forward strand, the leftmost for the reverse, and the nearer for
+    /// a duplex consensus, where either strand's end can hold the error.
+    pub fn three_prime_distance(m: &Molecule) -> Option<usize> {
+        match m.origin {
+            Some(Strand::Forward) => m.right,
+            Some(Strand::Reverse) => m.left,
+            None => m.left.into_iter().chain(m.right).min(),
+        }
+    }
+
+    /// The distances the `chaff` model's decay scores a call by.
+    pub fn distances(&self, molecules: &[Molecule], ref_base: u8, alt_base: u8) -> Distances {
+        Distances::of(molecules, ref_base, alt_base, Self::three_prime_distance)
     }
 
     /// Heterozygous calls whose every called allele is one base.
@@ -197,21 +244,15 @@ impl EndRepairFillIn {
         gt.is_het() && gt.calls_are_single_bases()
     }
 
-    /// Whether the site is within the distance of the nearest known template end.
+    /// Whether the site is within the window of the nearest known template
+    /// end.
     pub fn is_congruent(&self, m: &Molecule) -> bool {
-        nearest_end(m).is_some_and(|d| d <= self.distance as usize)
+        nearest_end(m).is_some_and(|d| d as f64 <= self.window())
     }
 
-    /// The call's score from its molecules.
+    /// The call's score under the `fgbio` model, from fgbio's window.
     pub fn score(&self, molecules: &[Molecule], ref_base: u8, alt_base: u8) -> Score {
-        let mut score = window_score(molecules, ref_base, alt_base, |m| self.is_congruent(m));
-        if let Some(scale) = self.scale {
-            score.log_likelihood_ratio =
-                molecule_tilt_ratio(molecules, ref_base, alt_base, scale, |m| {
-                    nearest_end(m).map(|d| d - 1)
-                });
-        }
-        score
+        window_score(molecules, ref_base, alt_base, |m| self.is_congruent(m))
     }
 }
 
@@ -293,6 +334,7 @@ mod tests {
     use streampile::testing::{Frag, Pair, SamBuilder, Strand};
 
     use super::*;
+    use crate::classes::Strand as Origin;
     use crate::evidence::{Evidence, PileupEvidence, PileupOptions};
     use crate::io::vcf_float;
     use crate::prior::{
@@ -415,7 +457,7 @@ mod tests {
     /// should return false for any base that is not within the defined read end".
     #[test]
     fn test_end_repair_fill_in_incongruent_away_from_the_ends() {
-        let filter = EndRepairFillIn::new(15);
+        let filter = EndRepairFillIn::new(15.0);
         let mut builder = SamBuilder::new().read_length(50);
         let recs = builder.add_pair(
             Pair::at(101, 101)
@@ -432,7 +474,7 @@ mod tests {
     /// fgbio: "... should return true for any base within the defined read end".
     #[test]
     fn test_end_repair_fill_in_congruent_near_the_ends() {
-        let filter = EndRepairFillIn::new(15);
+        let filter = EndRepairFillIn::new(15.0);
         let mut builder = SamBuilder::new().read_length(50);
         let recs = builder.add_pair(
             Pair::at(101, 101)
@@ -450,7 +492,7 @@ mod tests {
     /// site nearer that end, in template bases, than its reference positions.
     #[test]
     fn test_end_repair_fill_in_counts_template_bases_across_a_deletion() {
-        let filter = EndRepairFillIn::new(15);
+        let filter = EndRepairFillIn::new(15.0);
         let mut builder = SamBuilder::new().read_length(50);
         let plain = builder.add_frag(Frag::at(101));
         let deleted = builder.add_frag(Frag::at(101).cigar("10M5D40M"));
@@ -502,7 +544,7 @@ mod tests {
     /// the reads".
     #[test]
     fn test_end_repair_fill_in_not_significant_when_distributed() {
-        let filter = EndRepairFillIn::new(15);
+        let filter = EndRepairFillIn::new(15.0);
         let molecules = molecules_at(&distributed_reads(), 25);
         let score = filter.score(&molecules, G, T);
         assert!(score.log_likelihood_ratio.is_some());
@@ -515,7 +557,7 @@ mod tests {
     /// biased".
     #[test]
     fn test_end_repair_fill_in_significant_when_biased() {
-        let filter = EndRepairFillIn::new(15);
+        let filter = EndRepairFillIn::new(15.0);
         let molecules = molecules_at(&biased_reads(11..=25), 25);
         let score = filter.score(&molecules, G, T);
         assert!(score.log_likelihood_ratio.is_some());
@@ -770,31 +812,85 @@ mod tests {
         assert!(llr.abs() < 1e-12, "{llr}");
     }
 
-    #[test]
-    fn test_continuous_end_repair_fill_in_uses_the_tilt_model() {
-        let filter = EndRepairFillIn {
-            distance: 15,
-            scale: Some(15.0),
+    /// Reference molecules spread along 150-base templates copied from
+    /// `origin`, and four alternate molecules `d` bases from the leftmost end.
+    fn copied_from(origin: Option<Origin>, alt_left: usize) -> Vec<Molecule> {
+        let at = |base, d: usize| {
+            let m = Molecule::new(base, 40, d, 149 - d);
+            match origin {
+                Some(strand) => m.from_strand(strand),
+                None => m,
+            }
         };
-        let molecules = molecules_at(&biased_reads(11..=25), 25);
-        let score = filter.score(&molecules, G, T);
-        assert!(score.log_likelihood_ratio.unwrap() > 0.0);
-        assert_eq!(score.alt_congruent, 15);
+        let mut molecules: Vec<Molecule> = (0..150).map(|d| at(G, d)).collect();
+        molecules.extend((0..4).map(|i| at(T, alt_left + i)));
+        molecules
     }
 
+    /// Fill-in errors sit near the 3' end of the strand a template was copied
+    /// from: the rightmost end for the forward strand, the leftmost for the
+    /// reverse, and either for a duplex consensus. fgbio's window counts
+    /// either end for every template.
     #[test]
-    fn test_the_distance_window_sets_the_congruent_counts_under_a_scale() {
-        let molecules = molecules_at(&biased_reads(11..=25), 25);
-        let score = |distance| {
-            EndRepairFillIn {
-                distance,
-                scale: Some(15.0),
-            }
-            .score(&molecules, G, T)
+    fn test_end_repair_fill_in_decays_from_the_copied_strand_s_three_prime_end() {
+        let filter = EndRepairFillIn::new(15.0);
+        let decay = |origin, alt_left| {
+            let molecules = copied_from(origin, alt_left);
+            filter.distances(&molecules, G, T).score(15.0)
         };
-        let (wide, narrow) = (score(15), score(5));
-        assert_eq!(wide.log_likelihood_ratio, narrow.log_likelihood_ratio);
-        assert_eq!((wide.alt_congruent, narrow.alt_congruent), (15, 5));
+        let window = |origin, alt_left| {
+            let molecules = copied_from(origin, alt_left);
+            filter.score(&molecules, G, T).log_likelihood_ratio.unwrap()
+        };
+        let (left, right) = (1, 145);
+        let score = decay(Some(Origin::Reverse), left);
+        assert!(score.log_likelihood_ratio.unwrap() > 5.0, "{score:?}");
+        assert_eq!((score.alt_congruent, score.ref_congruent), (4, 15));
+        assert!(
+            decay(Some(Origin::Forward), right)
+                .log_likelihood_ratio
+                .unwrap()
+                > 5.0
+        );
+        assert!(decay(None, left).log_likelihood_ratio.unwrap() > 5.0);
+        assert!(decay(None, right).log_likelihood_ratio.unwrap() > 5.0);
+
+        let wrong = decay(Some(Origin::Forward), left);
+        assert!(wrong.log_likelihood_ratio.unwrap() < -5.0, "{wrong:?}");
+        assert_eq!(wrong.alt_congruent, 0);
+        assert!(
+            decay(Some(Origin::Reverse), right)
+                .log_likelihood_ratio
+                .unwrap()
+                < -5.0
+        );
+        assert!(window(Some(Origin::Forward), left) > 5.0);
+    }
+
+    /// The window counts an alternate molecule 15 bases from the end as the
+    /// artifact and one 16 bases away as a mutation; the decay weighs the two
+    /// almost alike.
+    #[test]
+    fn test_end_repair_fill_in_decay_has_no_cliff_at_its_distance() {
+        let filter = EndRepairFillIn::new(15.0);
+        let refs: Vec<Molecule> = (0..150).map(|d| Molecule::new(G, 40, d, 149 - d)).collect();
+        let molecules = |d: usize| {
+            let mut molecules = refs.clone();
+            molecules.push(Molecule::new(T, 40, d - 1, 150 - d));
+            molecules
+        };
+        let decay = |d| {
+            let distances = filter.distances(&molecules(d), G, T);
+            distances.log_likelihood_ratio(15.0).unwrap()
+        };
+        let window = |d| {
+            let score = filter.score(&molecules(d), G, T);
+            score.log_likelihood_ratio.unwrap()
+        };
+        let (near, far) = (decay(15), decay(16));
+        assert!((near - far).abs() < 0.1, "{near} {far}");
+        let (near, far) = (window(15), window(16));
+        assert!((near - far).abs() > 5.0, "{near} {far}");
     }
 
     /// fgbio takes the other end only when it is strictly nearer than the kept

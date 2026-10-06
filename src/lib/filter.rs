@@ -27,13 +27,14 @@ use crate::call::Genotype;
 use crate::classes::{sbs6, Context};
 use crate::copied_damage::{CopiedDamage, DamageSite};
 use crate::evidence::{Evidence, Molecule, PileupEvidence, PileupOptions};
-use crate::io::{add_filter, add_info, vcf_float, VariantReader, VariantWriter};
+use crate::io::{add_filter, add_info, significant, vcf_float, VariantReader, VariantWriter};
 use crate::metrics::{null_fraction, write_metrics, StratumMetrics};
+use crate::model::{Distance, Model};
 use crate::prior::{
-    fgbio_artifact_prior, learn_artifact_fraction, posterior_mutation, BetaPrior, PriorMode,
+    fgbio_artifact_prior, learn_artifact_fraction, learn_scale, posterior_mutation, BetaPrior,
     FILTER_PRIOR, STRATUM_PRIOR_STRENGTH,
 };
-use crate::read_end::{is_filtered, ATailing, EndRepairFillIn, Score};
+use crate::read_end::{is_filtered, ATailing, Distances, EndRepairFillIn, Score};
 use crate::reference::Reference;
 
 /// One of the artifact filters.
@@ -111,13 +112,12 @@ impl FilterKind {
             FilterKind::CopiedDamage => &[
                 "reference",
                 "copied_damage_classes",
-                "copied_damage_scale",
+                "copied_damage_distance",
                 "copied_damage_threshold",
             ],
             FilterKind::ATailing => &["a_tailing_distance", "a_tailing_threshold"],
             FilterKind::EndRepairFillIn => &[
                 "end_repair_fill_in_distance",
-                "end_repair_fill_in_scale",
                 "end_repair_fill_in_threshold",
             ],
         }
@@ -141,8 +141,8 @@ pub struct FilterOptions {
     pub sample: Option<String>,
     /// The filters to run.
     pub filters: Vec<FilterKind>,
-    /// The prior that turns likelihood ratios into posteriors.
-    pub prior: PriorMode,
+    /// The model: its prior and the shape of its distance models.
+    pub model: Model,
     /// The copied damage model.
     pub copied_damage: CopiedDamage,
     /// Apply `CopiedDamageArtifact` at or below this posterior.
@@ -162,7 +162,7 @@ impl Default for FilterOptions {
         Self {
             sample: None,
             filters: FilterKind::ALL.to_vec(),
-            prior: PriorMode::Learned,
+            model: Model::Chaff,
             copied_damage: CopiedDamage::default(),
             copied_damage_threshold: None,
             end_repair_fill_in: EndRepairFillIn::default(),
@@ -179,9 +179,9 @@ impl FilterOptions {
     }
 
     fn prior_text(&self) -> &'static str {
-        match self.prior {
-            PriorMode::Learned => "an artifact prior learned per sample and stratum",
-            PriorMode::Fgbio => "fgbio's (2 * maf)^2 mutation prior",
+        match self.model {
+            Model::Chaff => "an artifact prior learned per sample and stratum",
+            Model::Fgbio => "fgbio's (2 * maf)^2 mutation prior",
         }
     }
 
@@ -192,9 +192,17 @@ impl FilterOptions {
         }
     }
 
-    /// Add the INFO and FILTER lines of every enabled filter to a header.
-    pub fn add_header_lines(&self, header: &mut vcf::Header) {
+    /// Add the INFO and FILTER lines of every enabled filter to a header, with
+    /// the distances the filters scored with.
+    pub fn add_header_lines(&self, header: &mut vcf::Header, scales: &Scales) {
         let prior = self.prior_text();
+        let decay = |distance: Distance, scale: f64, end: &str| {
+            let learned = match distance {
+                Distance::Learned => ", learned from the calls,",
+                Distance::Bases(_) => "",
+            };
+            format!("a {} bp decay{learned} from {end}", significant(scale, 3))
+        };
         if self.enabled(FilterKind::CopiedDamage) {
             let classes: Vec<String> = self
                 .copied_damage
@@ -202,10 +210,15 @@ impl FilterOptions {
                 .iter()
                 .map(ToString::to_string)
                 .collect();
+            let distance = significant(scales.copied_damage, 3);
             let model = format!(
-                "damage classes {} and a {} bp copy scale",
+                "damage classes {} and {}",
                 classes.join(","),
-                self.copied_damage.scale
+                decay(
+                    self.copied_damage.distance,
+                    scales.copied_damage,
+                    "the lesion strand's 5' end"
+                ),
             );
             add_info(
                 header,
@@ -226,14 +239,14 @@ impl FilterOptions {
                 CopiedDamage::INFO_ALT,
                 Number::Count(2),
                 Type::Integer,
-                "Alternate molecules nearer the lesion strand's 5' end than its 3' end, and all alternate molecules measured.",
+                &format!("Alternate molecules within {distance} bp of the lesion strand's 5' end, and all alternate molecules measured."),
             );
             add_info(
                 header,
                 CopiedDamage::INFO_REF,
                 Number::Count(2),
                 Type::Integer,
-                "Reference molecules nearer the lesion strand's 5' end than its 3' end, and all reference molecules measured.",
+                &format!("Reference molecules within {distance} bp of the lesion strand's 5' end, and all reference molecules measured."),
             );
             add_filter(
                 header,
@@ -251,23 +264,27 @@ impl FilterOptions {
                 ATailing::INFO,
                 Number::Count(1),
                 Type::Float,
-                &format!("Posterior probability that the call is a true mutation rather than an A-tailing artifact, with a {distance} bp distance from the template end and {prior}."),
+                &format!("Posterior probability that the call is a true mutation rather than an A-tailing artifact, with a {distance} bp window from the template end and {prior}."),
             );
             add_filter(
                 header,
                 ATailing::FILTER,
                 &format!(
-                    "Call is likely an A-tailing artifact, with a {distance} bp distance from the template end, {}.",
+                    "Call is likely an A-tailing artifact, with a {distance} bp window from the template end, {}.",
                     self.threshold_text(FilterKind::ATailing)
                 ),
             );
         }
         if self.enabled(FilterKind::EndRepairFillIn) {
-            let model = match self.end_repair_fill_in.scale {
-                Some(scale) => format!("a {scale} bp decay from the nearest template end"),
-                None => format!(
-                    "a {} bp distance from the nearest template end",
-                    self.end_repair_fill_in.distance
+            let model = match self.model {
+                Model::Chaff => decay(
+                    self.end_repair_fill_in.distance,
+                    scales.end_repair_fill_in,
+                    "the 3' end of the strand each template was copied from",
+                ),
+                Model::Fgbio => format!(
+                    "a {} bp window from the nearest template end",
+                    significant(scales.end_repair_fill_in, 3)
                 ),
             };
             add_info(
@@ -320,6 +337,8 @@ pub struct Annotation {
     pub stratum: String,
     /// The likelihood ratio and molecule counts.
     pub score: Score,
+    /// The distances a decay scores the call by once its scale is known.
+    pub distances: Option<Distances>,
     /// fgbio's per-call artifact prior.
     pub fgbio_prior: f64,
     /// The posterior probability of a true mutation, once known.
@@ -457,15 +476,25 @@ fn score_call(
     let mut annotations = Vec::with_capacity(kinds.len());
     for kind in kinds {
         let scored = match kind {
-            FilterKind::EndRepairFillIn => Some((
-                substitution.clone(),
-                options
-                    .end_repair_fill_in
-                    .score(molecules, ref_base, alt_base),
-            )),
+            FilterKind::EndRepairFillIn => {
+                let filter = &options.end_repair_fill_in;
+                Some(match options.model {
+                    Model::Chaff => (
+                        substitution.clone(),
+                        Score::default(),
+                        Some(filter.distances(molecules, ref_base, alt_base)),
+                    ),
+                    Model::Fgbio => (
+                        substitution.clone(),
+                        filter.score(molecules, ref_base, alt_base),
+                        None,
+                    ),
+                })
+            }
             FilterKind::ATailing => Some((
                 substitution.clone(),
                 options.a_tailing.score(molecules, ref_base, alt_base),
+                None,
             )),
             FilterKind::CopiedDamage => {
                 match (options.copied_damage.classify(ref_base, alt_base), context) {
@@ -475,26 +504,115 @@ fn score_call(
                             strand,
                             context: Context::of(prev, base, next),
                         };
-                        let score = options
+                        let distances = options
                             .copied_damage
-                            .score(molecules, ref_base, alt_base, strand);
-                        Some((damage.stratum(), score))
+                            .distances(molecules, ref_base, alt_base, strand);
+                        Some((damage.stratum(), Score::default(), Some(distances)))
                     }
                     _ => None,
                 }
             }
         };
-        if let Some((stratum, score)) = scored {
+        if let Some((stratum, score, distances)) = scored {
             annotations.push(Annotation {
                 kind,
                 stratum,
                 score,
+                distances,
                 fgbio_prior,
                 posterior: None,
             });
         }
     }
     Ok(annotations)
+}
+
+/// The distance each filter scored with, in bases: a decay's scale, learned
+/// or fixed, or a window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Scales {
+    /// The copied damage decay's scale.
+    pub copied_damage: f64,
+    /// The end repair fill-in decay's scale under the `chaff` model, or its
+    /// window under `fgbio`.
+    pub end_repair_fill_in: f64,
+    /// The A-tailing window.
+    pub a_tailing: f64,
+}
+
+impl Scales {
+    /// The distance `kind` scored with.
+    pub fn of(&self, kind: FilterKind) -> f64 {
+        match kind {
+            FilterKind::CopiedDamage => self.copied_damage,
+            FilterKind::EndRepairFillIn => self.end_repair_fill_in,
+            FilterKind::ATailing => self.a_tailing,
+        }
+    }
+}
+
+/// Learn or fix each decay's scale from all of its filter's calls, and score
+/// every call the decay holds distances for at that scale.
+fn score_decays(calls: &mut [Vec<Annotation>], options: &FilterOptions) -> Scales {
+    let mut scales = Scales {
+        copied_damage: options
+            .copied_damage
+            .distance
+            .bases(CopiedDamage::FALLBACK_SCALE),
+        end_repair_fill_in: options.end_repair_fill_in.window(),
+        a_tailing: f64::from(options.a_tailing.distance),
+    };
+    let decays = [
+        (
+            FilterKind::CopiedDamage,
+            options.copied_damage.distance,
+            CopiedDamage::FALLBACK_SCALE,
+        ),
+        (
+            FilterKind::EndRepairFillIn,
+            options.end_repair_fill_in.distance,
+            EndRepairFillIn::FALLBACK_SCALE,
+        ),
+    ];
+    for (kind, distance, fallback) in decays {
+        let held: Vec<&Distances> = calls
+            .iter()
+            .flatten()
+            .filter(|a| a.kind == kind)
+            .filter_map(|a| a.distances.as_ref())
+            .collect();
+        if held.is_empty() && kind == FilterKind::EndRepairFillIn && options.model == Model::Fgbio {
+            continue;
+        }
+        let scale = match distance {
+            Distance::Bases(bases) => bases,
+            Distance::Learned => learn_scale(
+                |scale| {
+                    held.iter()
+                        .filter_map(|d| d.log_likelihood_ratio(scale))
+                        .collect()
+                },
+                FILTER_PRIOR,
+                fallback,
+            ),
+        };
+        match kind {
+            FilterKind::CopiedDamage => scales.copied_damage = scale,
+            _ => scales.end_repair_fill_in = scale,
+        }
+        if distance == Distance::Learned {
+            info!(
+                "{kind}: learned a decay scale of {scale:.2} bp from {} calls",
+                held.len()
+            );
+        }
+        for annotation in calls.iter_mut().flatten().filter(|a| a.kind == kind) {
+            if let Some(distances) = annotation.distances.take() {
+                annotation.score = distances.score(scale);
+            }
+        }
+    }
+    scales
 }
 
 /// The learned artifact fractions of each filter and each of its strata.
@@ -506,7 +624,7 @@ struct Fractions {
 
 /// Learn the priors and fill in every annotation's posterior, returning the
 /// learned artifact fractions.
-fn assign_posteriors(calls: &mut [Vec<Annotation>], prior: PriorMode) -> Fractions {
+fn assign_posteriors(calls: &mut [Vec<Annotation>], model: Model) -> Fractions {
     let mut filters: BTreeMap<FilterKind, Vec<f64>> = BTreeMap::new();
     let mut strata: BTreeMap<Stratum, Vec<f64>> = BTreeMap::new();
     for annotation in calls.iter().flatten() {
@@ -537,9 +655,9 @@ fn assign_posteriors(calls: &mut [Vec<Annotation>], prior: PriorMode) -> Fractio
         let Some(llr) = annotation.score.log_likelihood_ratio else {
             continue;
         };
-        let artifact_prior = match prior {
-            PriorMode::Learned => fractions.strata[&(annotation.kind, annotation.stratum.clone())],
-            PriorMode::Fgbio => annotation.fgbio_prior,
+        let artifact_prior = match model {
+            Model::Chaff => fractions.strata[&(annotation.kind, annotation.stratum.clone())],
+            Model::Fgbio => annotation.fgbio_prior,
         };
         annotation.posterior = Some(posterior_mutation(llr, artifact_prior));
     }
@@ -640,10 +758,11 @@ pub fn filter_vcf(
     }
     info!("scored {} calls of sample {sample}", calls.len());
 
-    let fractions = assign_posteriors(&mut calls, options.prior);
+    let scales = score_decays(&mut calls, options);
+    let fractions = assign_posteriors(&mut calls, options.model);
 
     let mut out_header = header.clone();
-    options.add_header_lines(&mut out_header);
+    options.add_header_lines(&mut out_header, &scales);
     let mut writer = VariantWriter::create(output)?;
     writer.write_header(&out_header)?;
     let mut reader = VariantReader::open(input)?;
@@ -659,7 +778,7 @@ pub fn filter_vcf(
     }
     writer.finish()?;
 
-    let rows = metrics_rows(&sample, &calls, &fractions, options);
+    let rows = metrics_rows(&sample, &calls, &fractions, &scales, options);
     for row in &rows {
         info!(
             "{} {}: {} calls, artifact fraction {}, {} filtered, {} of {} alternate molecules congruent",
@@ -681,9 +800,10 @@ fn metrics_rows(
     sample: &str,
     calls: &[Vec<Annotation>],
     fractions: &Fractions,
+    scales: &Scales,
     options: &FilterOptions,
 ) -> Vec<StratumMetrics> {
-    let learned = options.prior == PriorMode::Learned;
+    let learned = options.model == Model::Chaff;
     let mut rows: BTreeMap<Stratum, (StratumMetrics, Vec<(u32, f64)>)> = BTreeMap::new();
     for annotation in calls.iter().flatten() {
         let key = (annotation.kind, annotation.stratum.clone());
@@ -698,6 +818,7 @@ fn metrics_rows(
                 filter_artifact_fraction: learned
                     .then(|| fractions.filters.get(&annotation.kind).copied())
                     .flatten(),
+                distance: scales.of(annotation.kind),
                 ..StratumMetrics::default()
             };
             (row, Vec::new())
@@ -845,6 +966,10 @@ mod tests {
         }
         let options = FilterOptions {
             filters: vec![FilterKind::CopiedDamage],
+            copied_damage: CopiedDamage {
+                distance: Distance::Bases(30.0),
+                ..CopiedDamage::default()
+            },
             copied_damage_threshold: Some(0.05),
             ..FilterOptions::default()
         };
@@ -962,10 +1087,7 @@ mod tests {
         table.insert("chr1", 20, far);
         let options = FilterOptions {
             filters: vec![FilterKind::EndRepairFillIn],
-            end_repair_fill_in: EndRepairFillIn {
-                distance: 15,
-                scale: Some(1.0),
-            },
+            end_repair_fill_in: EndRepairFillIn::new(1.0),
             ..FilterOptions::default()
         };
         let rows = filter_vcf(&input, &output, &mut table, None, &options).unwrap();
@@ -979,7 +1101,7 @@ mod tests {
 
     /// Alternate molecules that copied damage cannot place, here without the
     /// template's far end, leave the call without a posterior or FILTER under
-    /// either prior; its counts still show that none was measured.
+    /// either model; its counts still show that none was measured.
     #[test]
     fn test_copied_damage_without_a_measured_alternate_molecule_is_unscored() {
         let dir = tempfile::tempdir().unwrap();
@@ -997,20 +1119,20 @@ mod tests {
             ..Molecule::new(b'T', 40, 40 + d, 0)
         }));
         table.insert("chr1", 1002, molecules);
-        for prior in [PriorMode::Fgbio, PriorMode::Learned] {
+        for model in [Model::Fgbio, Model::Chaff] {
             let options = FilterOptions {
                 filters: vec![FilterKind::CopiedDamage],
                 copied_damage_threshold: Some(0.05),
-                prior,
+                model,
                 ..FilterOptions::default()
             };
             let mut reference = Reference::open(&reference).unwrap();
             filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
             let (_, records) = read_records(&output);
             let record = &records[0];
-            assert_eq!(float(record, CopiedDamage::INFO_POSTERIOR), None, "{prior}");
-            assert_eq!(float(record, CopiedDamage::INFO_RATIO), None, "{prior}");
-            assert!(record.filters().as_ref().is_empty(), "{prior}");
+            assert_eq!(float(record, CopiedDamage::INFO_POSTERIOR), None, "{model}");
+            assert_eq!(float(record, CopiedDamage::INFO_RATIO), None, "{model}");
+            assert!(record.filters().as_ref().is_empty(), "{model}");
             assert_eq!(
                 record.info().get(CopiedDamage::INFO_ALT),
                 Some(Some(&Value::Array(Array::Integer(vec![Some(0), Some(0)])))),
@@ -1043,6 +1165,10 @@ mod tests {
         };
         let options = FilterOptions {
             filters: vec![FilterKind::CopiedDamage],
+            copied_damage: CopiedDamage {
+                distance: Distance::Bases(30.0),
+                ..CopiedDamage::default()
+            },
             ..FilterOptions::default()
         };
         let mut table = MoleculeTable::new();
@@ -1058,6 +1184,51 @@ mod tests {
         let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
         let p = rows[0].asymmetry_p_value.unwrap();
         assert!((p - 1.0 / 52.0).abs() < 1e-12, "{p}");
+    }
+
+    /// Copied damage whose copies reach `d` with probability `exp(-d / 20)`
+    /// teaches a scale near 20 bases, learned from its calls alongside true
+    /// mutations whose alternate molecules sit anywhere.
+    #[test]
+    fn test_a_learned_scale_recovers_the_simulated_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = write_fasta(dir.path(), "chr1", &"ACGTTCAA".repeat(500));
+        let mut state: u64 = 0x5eed;
+        let mut uniform = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        let mut table = MoleculeTable::new();
+        for call in 0..200 {
+            let pos = 1002 + 8 * call;
+            vcf.add(Variant::new(pos, &["C", "T"], vec![gt("tumor", "0/1")]));
+            let at = |base, d: usize| Molecule::new(base, 40, d, 199 - d);
+            let mut molecules: Vec<Molecule> = (0..200).map(|d| at(b'C', d)).collect();
+            let mut alternates = 0;
+            while alternates < 5 {
+                let d = (uniform() * 200.0) as usize;
+                if call % 2 == 1 || uniform() < (-(d as f64) / 20.0).exp() {
+                    molecules.push(at(b'T', d));
+                    alternates += 1;
+                }
+            }
+            table.insert("chr1", pos, molecules);
+        }
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let output = dir.path().join("out.vcf");
+        let options = FilterOptions {
+            filters: vec![FilterKind::CopiedDamage],
+            ..FilterOptions::default()
+        };
+        let mut reference = Reference::open(&reference).unwrap();
+        let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
+        let scale = rows[0].distance;
+        assert!((scale - 20.0).abs() < 3.0, "{scale}");
+        let fraction = rows[0].artifact_fraction.unwrap();
+        assert!((fraction - 0.5).abs() < 0.1, "{fraction}");
     }
 
     /// A second run on a first run's output would keep the first run's FILTERs

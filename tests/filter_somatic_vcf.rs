@@ -4,8 +4,8 @@
 //! streampile piles up from built reads, priors, VCF out) and asserts what
 //! fgbio's test asserts. fgbio runs every case under both of its BAM access
 //! patterns; chaff only streams, so each case runs once. Cases run under
-//! `--prior fgbio` assert fgbio's values exactly; the expected values were
-//! produced by fgbio 4.1.1 on the same reads. Cases where the learned prior
+//! `--model fgbio` assert fgbio's values exactly; the expected values were
+//! produced by fgbio 4.1.1 on the same reads. Cases where the chaff model
 //! changes the outcome on purpose say so in their names.
 
 use std::path::{Path, PathBuf};
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use chaff::evidence::PileupOptions;
 use chaff::filter::{run_filter, run_filter_on, FilterArgs, FilterKind, FilterOptions};
 use chaff::io::VariantReader;
-use chaff::prior::PriorMode;
+use chaff::model::Model;
 use chaff::read_end::{ATailing, EndRepairFillIn};
 use chaff::testing::{gt, Variant, VcfBuilder};
 use noodles::vcf::variant::record_buf::info::field::Value;
@@ -145,10 +145,10 @@ fn run(
     Ok(read_vcf(&output).1)
 }
 
-fn options(sample: Option<&str>, prior: PriorMode) -> FilterOptions {
+fn options(sample: Option<&str>, model: Model) -> FilterOptions {
     FilterOptions {
         sample: sample.map(String::from),
-        prior,
+        model,
         ..fgbio_options()
     }
 }
@@ -228,10 +228,10 @@ fn even_g_to_a(
 /// fgbio: "not change existing INFO data when adding new INFO data".
 #[test]
 fn test_not_change_existing_info_data_when_adding_new_info_data() {
-    for prior in [PriorMode::Fgbio, PriorMode::Learned] {
+    for model in [Model::Fgbio, Model::Chaff] {
         let dir = TempDir::new().unwrap();
         let (input, reads) = even_g_to_a(&dir, vec![("DP".into(), "2".into())], vec![]);
-        let records = run(&dir, &input, &reads, options(None, prior)).unwrap();
+        let records = run(&dir, &input, &reads, options(None, model)).unwrap();
         assert_eq!(records.len(), 1);
         let annotated = &records[0];
         assert_eq!(usize::from(annotated.variant_start().unwrap()), 200);
@@ -245,13 +245,13 @@ fn test_not_change_existing_info_data_when_adding_new_info_data() {
 /// fgbio: "not change existing FILTER data when adding new FILTER data".
 #[test]
 fn test_not_change_existing_filter_data_when_adding_new_filter_data() {
-    for prior in [PriorMode::Fgbio, PriorMode::Learned] {
+    for model in [Model::Fgbio, Model::Chaff] {
         let dir = TempDir::new().unwrap();
         let (input, reads) = even_g_to_a(&dir, vec![], vec!["LowQD".into()]);
         let options = FilterOptions {
             a_tailing_threshold: Some(1.0),
             end_repair_fill_in_threshold: Some(1.0),
-            ..options(None, prior)
+            ..options(None, model)
         };
         let records = run(&dir, &input, &reads, options).unwrap();
         let annotated = &records[0];
@@ -274,10 +274,10 @@ fn test_not_change_existing_filter_data_when_adding_new_filter_data() {
 /// fgbio: "not remove PASS from the FILTER field if no new filters are added".
 #[test]
 fn test_not_remove_pass_if_no_new_filters_are_added() {
-    for prior in [PriorMode::Fgbio, PriorMode::Learned] {
+    for model in [Model::Fgbio, Model::Chaff] {
         let dir = TempDir::new().unwrap();
         let (input, reads) = even_g_to_a(&dir, vec![], vec!["PASS".into()]);
-        let records = run(&dir, &input, &reads, options(None, prior)).unwrap();
+        let records = run(&dir, &input, &reads, options(None, model)).unwrap();
         let annotated = &records[0];
         assert_eq!(float(annotated, ATailing::INFO), Some(1.0));
         assert_eq!(float(annotated, EndRepairFillIn::INFO), Some(1.0));
@@ -288,13 +288,13 @@ fn test_not_remove_pass_if_no_new_filters_are_added() {
 /// fgbio: "remove PASS from the FILTER field if a new filter is added".
 #[test]
 fn test_remove_pass_if_a_new_filter_is_added() {
-    for prior in [PriorMode::Fgbio, PriorMode::Learned] {
+    for model in [Model::Fgbio, Model::Chaff] {
         let dir = TempDir::new().unwrap();
         let (input, reads) = even_g_to_a(&dir, vec![], vec!["PASS".into()]);
         let options = FilterOptions {
             a_tailing_threshold: Some(1.0),
             end_repair_fill_in_threshold: Some(1.0),
-            ..options(None, prior)
+            ..options(None, model)
         };
         let records = run(&dir, &input, &reads, options).unwrap();
         let annotated = &records[0];
@@ -315,7 +315,7 @@ fn test_remove_pass_if_a_new_filter_is_added() {
 fn test_work_on_a_single_sample_vcf() {
     let dir = TempDir::new().unwrap();
     let (tumor, _) = tumor_vcfs(dir.path());
-    let records = run(&dir, &tumor, &tumor_bam(), options(None, PriorMode::Fgbio)).unwrap();
+    let records = run(&dir, &tumor, &tumor_bam(), options(None, Model::Fgbio)).unwrap();
     assert_annotated_as_fgbio(&records);
     assert!(!records.iter().any(|r| has_filter(r, ATailing::FILTER)));
     assert!(!records
@@ -351,7 +351,7 @@ fn test_fail_on_a_single_sample_vcf_with_an_invalid_sample_name() {
         &dir,
         &tumor,
         &tumor_bam(),
-        options(Some("WhoDis"), PriorMode::Fgbio),
+        options(Some("WhoDis"), Model::Fgbio),
     )
     .unwrap_err();
     assert!(error.to_string().contains("WhoDis"), "{error}");
@@ -366,7 +366,7 @@ fn test_fail_on_a_multi_sample_vcf_without_a_sample_name() {
         &dir,
         &tumor_normal,
         &tumor_bam(),
-        options(None, PriorMode::Fgbio),
+        options(None, Model::Fgbio),
     )
     .unwrap_err();
     assert!(error.to_string().contains("--sample"), "{error}");
@@ -381,7 +381,7 @@ fn test_fail_on_a_multi_sample_vcf_with_an_invalid_sample_name() {
         &dir,
         &tumor_normal,
         &tumor_bam(),
-        options(Some("WhoDis"), PriorMode::Fgbio),
+        options(Some("WhoDis"), Model::Fgbio),
     )
     .unwrap_err();
     assert!(error.to_string().contains("WhoDis"), "{error}");
@@ -396,7 +396,7 @@ fn test_work_on_a_multi_sample_vcf_with_a_sample_name() {
         &dir,
         &tumor_normal,
         &tumor_bam(),
-        options(Some("tumor"), PriorMode::Fgbio),
+        options(Some("tumor"), Model::Fgbio),
     )
     .unwrap();
     assert_annotated_as_fgbio(&records);
@@ -406,22 +406,22 @@ fn test_work_on_a_multi_sample_vcf_with_a_sample_name() {
         .any(|r| has_filter(r, EndRepairFillIn::FILTER)));
 }
 
-fn thresholded(prior: PriorMode) -> FilterOptions {
+fn thresholded(model: Model) -> FilterOptions {
     FilterOptions {
         a_tailing: ATailing { distance: 4 },
         a_tailing_threshold: Some(0.001),
         end_repair_fill_in_threshold: Some(0.001),
-        ..options(Some("tumor"), prior)
+        ..options(Some("tumor"), model)
     }
 }
 
 /// fgbio: "apply filters if filter-specific p-value thresholds are supplied",
-/// under fgbio's prior. The values are fgbio 4.1.1's.
+/// under the fgbio model. The values are fgbio 4.1.1's.
 #[test]
-fn test_apply_filters_with_thresholds_under_the_fgbio_prior() {
+fn test_apply_filters_with_thresholds_under_the_fgbio_model() {
     let dir = TempDir::new().unwrap();
     let (tumor, _) = tumor_vcfs(dir.path());
-    let records = run(&dir, &tumor, &tumor_bam(), thresholded(PriorMode::Fgbio)).unwrap();
+    let records = run(&dir, &tumor, &tumor_bam(), thresholded(Model::Fgbio)).unwrap();
     assert_annotated_as_fgbio(&records);
     let atap: Vec<bool> = records
         .iter()
@@ -441,16 +441,18 @@ fn test_apply_filters_with_thresholds_under_the_fgbio_prior() {
 }
 
 /// fgbio: "apply filters if filter-specific p-value thresholds are supplied".
-/// Intended difference: under the learned prior, 3 to 5 alternate molecules
-/// within 15 bp of an end, where 37.5% of the reference molecules also are,
-/// leave ERFAP at 0.023 and 0.0033, above the 0.001 threshold; fgbio's
-/// `(2 * maf)^2` prior alone drives them under it. A-tailing still filters 100
-/// and 400, whose alternate molecules all sit where 5% of reference ones do.
+/// Intended difference: the chaff model measures end repair fill-in from the
+/// 3' end of the strand each template was copied from, the rightmost end of
+/// these F1R2 templates. The alternate molecules of the C>A at 100 sit there,
+/// so ERFAP filters it; those of the A>T at 400 and the C>G at 500 sit at the
+/// leftmost end, which fgbio's window counts and the chaff model does not, so
+/// ERFAP leaves them at 1. A-tailing still filters 100 and 400, whose alternate
+/// molecules all sit where 5% of reference ones do.
 #[test]
-fn test_apply_filters_with_thresholds_under_the_learned_prior_spares_weak_end_repair_evidence() {
+fn test_apply_filters_with_thresholds_under_the_chaff_model_reads_the_copied_strand() {
     let dir = TempDir::new().unwrap();
     let (tumor, _) = tumor_vcfs(dir.path());
-    let records = run(&dir, &tumor, &tumor_bam(), thresholded(PriorMode::Learned)).unwrap();
+    let records = run(&dir, &tumor, &tumor_bam(), thresholded(Model::Chaff)).unwrap();
     assert_annotated_as_fgbio(&records);
     let atap: Vec<bool> = records
         .iter()
@@ -461,14 +463,14 @@ fn test_apply_filters_with_thresholds_under_the_learned_prior_spares_weak_end_re
         .map(|r| has_filter(r, EndRepairFillIn::FILTER))
         .collect();
     assert_eq!(atap, vec![true, false, false, true, false]);
-    assert_eq!(erfap, vec![false, false, false, false, false]);
+    assert_eq!(erfap, vec![true, false, false, false, false]);
     let erfap: Vec<Option<f32>> = records
         .iter()
         .map(|r| float(r, EndRepairFillIn::INFO))
         .collect();
     assert_eq!(
         erfap,
-        vec![Some(0.023), Some(1.0), None, Some(3.3e-3), Some(3.3e-3)]
+        vec![Some(3.782e-4), Some(1.0), None, Some(1.0), Some(1.0)]
     );
 }
 
@@ -487,7 +489,7 @@ fn test_metrics_rows_of_the_shared_vcf() {
         reference: None,
         metrics: Some(metrics.clone()),
         pileup: PileupOptions::default(),
-        options: thresholded(PriorMode::Learned),
+        options: thresholded(Model::Chaff),
     };
     run_filter_on(&args, tumor_bam().to_pileup_builder()).unwrap();
     let mut reader = csv::ReaderBuilder::new()
@@ -532,7 +534,7 @@ fn test_raise_an_error_if_the_reads_are_not_coordinate_sorted() {
         reference: None,
         metrics: None,
         pileup: PileupOptions::default(),
-        options: options(Some("tumor"), PriorMode::Fgbio),
+        options: options(Some("tumor"), Model::Fgbio),
     };
     let error = run_filter(&args).unwrap_err();
     assert!(error.to_string().contains("coordinate sorted"), "{error}");
@@ -588,7 +590,7 @@ fn test_spanning_deletions_and_two_alternate_alleles_as_fgbio_calls_them() {
     let input = vcf.write(&dir.path().join("alleles.vcf"));
     let options = FilterOptions {
         end_repair_fill_in_threshold: Some(0.001),
-        ..options(None, PriorMode::Fgbio)
+        ..options(None, Model::Fgbio)
     };
     let records = run(&dir, &input, &tumor_bam(), options).unwrap();
     let erfap: Vec<Option<f32>> = records
@@ -655,7 +657,7 @@ fn test_overlapping_mates_and_deletions_against_fgbio() {
     }
     let input = vcf.write(&dir.path().join("parity.vcf"));
     let reads = overlap_and_deletion_reads();
-    let records = run(&dir, &input, &reads, options(None, PriorMode::Fgbio)).unwrap();
+    let records = run(&dir, &input, &reads, options(None, Model::Fgbio)).unwrap();
     let values: Vec<(Option<f32>, Option<f32>)> = records
         .iter()
         .map(|r| (float(r, ATailing::INFO), float(r, EndRepairFillIn::INFO)))
@@ -695,7 +697,7 @@ fn test_a_tailing_breaks_a_tie_at_the_first_read_s_own_end_as_fgbio() {
     let options = FilterOptions {
         filters: vec![FilterKind::ATailing],
         a_tailing: ATailing { distance: 10 },
-        ..options(None, PriorMode::Fgbio)
+        ..options(None, Model::Fgbio)
     };
     let records = run(&dir, &input, &reads, options).unwrap();
     assert_eq!(float(&records[0], ATailing::INFO), Some(1.0));
@@ -782,23 +784,42 @@ fn erfap_and_congruent_counts(options: FilterOptions) -> (Vec<Option<f32>>, Vec<
     (erfap, counts)
 }
 
-/// `--end-repair-fill-in-scale` changes each call's posterior but leaves the
-/// congruent molecules of the metrics to the distance window.
+/// fgbio's window counts the alternate molecules of the A>T at 400, which sit
+/// 1 to 3 bases from their templates' leftmost ends, as end repair fill-in.
+/// These F1R2 templates come from the forward strand, whose 3' end, the one
+/// end repair extends, is their rightmost, so the chaff model counts none of
+/// them near, in the metrics as in the posterior, while the C>A at 100, whose
+/// alternate molecules sit at the rightmost ends, stays near under both.
 #[test]
-fn test_the_end_repair_fill_in_scale_replaces_the_window_only_in_the_posterior() {
-    let with = |scale| FilterOptions {
+fn test_end_repair_fill_in_under_chaff_counts_only_the_copied_strand_s_three_prime_end() {
+    let with = |model| FilterOptions {
         filters: vec![FilterKind::EndRepairFillIn],
-        end_repair_fill_in: EndRepairFillIn {
-            distance: 10,
-            scale,
-        },
-        ..options(Some("tumor"), PriorMode::Learned)
+        end_repair_fill_in: EndRepairFillIn::new(10.0),
+        ..options(Some("tumor"), model)
     };
-    let (window, window_counts) = erfap_and_congruent_counts(with(None));
-    let (decay, decay_counts) = erfap_and_congruent_counts(with(Some(15.0)));
-    assert_eq!(window_counts, decay_counts);
-    assert_eq!(window_counts.len(), 4);
-    assert_ne!(window, decay);
-    assert_eq!(window[2], None);
-    assert_eq!(decay[2], None);
+    let (window, window_counts) = erfap_and_congruent_counts(with(Model::Fgbio));
+    let (decay, decay_counts) = erfap_and_congruent_counts(with(Model::Chaff));
+    let counts = |rows: &[[&str; 3]]| -> Vec<[String; 3]> {
+        rows.iter().map(|row| row.map(String::from)).collect()
+    };
+    let window_rows = [
+        ["C>A", "3", "60"],
+        ["C>G", "5", "60"],
+        ["C>T", "5", "60"],
+        ["T>A", "5", "60"],
+    ];
+    let decay_rows = [
+        ["C>A", "3", "30"],
+        ["C>G", "0", "30"],
+        ["C>T", "2", "30"],
+        ["T>A", "0", "30"],
+    ];
+    assert_eq!(window_counts, counts(&window_rows));
+    assert_eq!(decay_counts, counts(&decay_rows));
+    assert!(
+        window.iter().flatten().filter(|p| **p < 1e-5).count() == 3,
+        "{window:?}"
+    );
+    assert_eq!(decay[3..], [Some(1.0), Some(1.0)]);
+    assert!(decay[0].unwrap() < 0.01, "{decay:?}");
 }
