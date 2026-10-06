@@ -16,18 +16,18 @@ use clap::ValueEnum;
 use log::info;
 use noodles::core::Position;
 use noodles::sam;
-use noodles::sam::alignment::record::Flags;
 use noodles::vcf;
 use noodles::vcf::header::record::value::map::info::{Number, Type};
 use noodles::vcf::variant::record_buf::info::field::value::Array;
 use noodles::vcf::variant::record_buf::info::field::Value;
 use noodles::vcf::variant::record_buf::Filters;
 use noodles::vcf::variant::RecordBuf;
+use streampile::{RecordSource, StreamingPileupBuilder};
 
 use crate::call::Genotype;
 use crate::classes::{sbs6, Context};
 use crate::copied_damage::{CopiedDamage, DamageSite};
-use crate::evidence::{Evidence, Molecule, PileupEvidence, PileupSource};
+use crate::evidence::{Evidence, Molecule, PileupEvidence, PileupOptions};
 use crate::io::{add_filter, add_info, vcf_float, VariantReader, VariantWriter};
 use crate::metrics::{write_metrics, StratumMetrics};
 use crate::prior::{
@@ -35,7 +35,6 @@ use crate::prior::{
 };
 use crate::read_end::{is_filtered, ATailing, EndRepairFillIn, Score};
 use crate::reference::Reference;
-use crate::template::ReadFilter;
 
 /// One of the artifact filters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ValueEnum)]
@@ -251,8 +250,8 @@ pub struct FilterArgs {
     pub reference: Option<PathBuf>,
     /// The per-sample metrics TSV.
     pub metrics: Option<PathBuf>,
-    /// The read floors.
-    pub read_filter: ReadFilter,
+    /// The read and base floors.
+    pub pileup: PileupOptions,
     /// The scoring and filtering options.
     pub options: FilterOptions,
 }
@@ -665,16 +664,13 @@ pub fn run_filter_with(args: &FilterArgs, evidence: &mut dyn Evidence) -> Result
     Ok(())
 }
 
-/// Filter the calls with molecules from a streaming pileup engine over the
-/// BAM, after the read floors.
-pub fn run_filter_on<P: PileupSource>(args: &FilterArgs, engine: P) -> Result<()> {
-    if !is_coordinate_sorted(engine.header()) {
-        bail!(
-            "the BAM must be coordinate sorted (@HD SO:coordinate): {:?}",
-            args.bam
-        );
-    }
-    let mut evidence = PileupEvidence::new(engine, args.read_filter);
+/// Filter the calls with molecules piled up by `builder` from the BAM's
+/// records, under the read and base floors of `args`.
+pub fn run_filter_on<S: RecordSource>(
+    args: &FilterArgs,
+    builder: StreamingPileupBuilder<'_, S>,
+) -> Result<()> {
+    let mut evidence = PileupEvidence::new(builder, &args.pileup);
     run_filter_with(args, &mut evidence)
 }
 
@@ -714,8 +710,7 @@ pub fn validate_inputs(args: &FilterArgs) -> Result<sam::Header> {
 }
 
 /// Filter the calls with the BAM named by `args`, streamed once through
-/// streampile. The engine keeps QC-fail reads and both mates, as fgbio does:
-/// the read floors and the mate collapse are chaff's own.
+/// streampile.
 pub fn run_filter(args: &FilterArgs) -> Result<()> {
     validate_inputs(args)?;
     let mut reader = noodles::bam::io::reader::Builder
@@ -724,9 +719,7 @@ pub fn run_filter(args: &FilterArgs) -> Result<()> {
     let header = reader
         .read_header()
         .context("failed to read the BAM header")?;
-    let engine = streampile::StreamingPileupBuilder::new(reader, &header)?
-        .exclude_flags(Flags::SECONDARY | Flags::DUPLICATE | Flags::SUPPLEMENTARY);
-    run_filter_on(args, engine)
+    run_filter_on(args, StreamingPileupBuilder::new(reader, &header)?)
 }
 
 #[cfg(test)]

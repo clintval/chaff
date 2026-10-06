@@ -12,5 +12,4 @@ pub mod metrics;
 pub mod prior;
 pub mod read_end;
 pub mod reference;
-pub mod template;
 pub mod testing;

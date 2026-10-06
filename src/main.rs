@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use anyhow::{Error, Result};
 use chaff::classes::{validate_classes, DamageClass};
 use chaff::copied_damage::CopiedDamage;
+use chaff::evidence::PileupOptions;
 use chaff::filter::{run_filter, FilterArgs, FilterKind, FilterOptions};
 use chaff::prior::PriorMode;
 use chaff::read_end::{ATailing, EndRepairFillIn};
-use chaff::template::ReadFilter;
 use clap::builder::styling::{AnsiColor, Effects, Style, Styles};
 use clap::error::ErrorKind;
 use clap::parser::ValueSource;
@@ -369,7 +369,7 @@ impl Cli {
             bam: self.bam,
             reference: self.reference,
             metrics: self.metrics,
-            read_filter: ReadFilter {
+            pileup: PileupOptions {
                 min_mapping_quality: self.min_mapping_quality,
                 min_base_quality: self.min_base_quality,
                 paired_reads_only: self.paired_reads_only,

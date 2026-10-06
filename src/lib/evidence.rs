@@ -2,22 +2,29 @@
 //!
 //! The statistics see each template once, as a [`Molecule`]: the base it holds
 //! at the site, that base's quality, and the site's distances from the
-//! template ends the reads reveal. [`Evidence`] separates the statistics from
-//! the reads. [`PileupEvidence`] fills it from any [`PileupSource`], a
-//! streaming pileup engine that lists the reads covering a position with the
-//! offset of their aligned base there. The engine owns record streaming and
-//! CIGAR walking, streampile counts the distances for any engine's records, and
-//! this module owns the read floors and the collapse of overlapping mates into
-//! one molecule.
+//! template ends its reads reveal. [`Evidence`] separates the statistics from
+//! the reads. [`PileupEvidence`] fills it from a streampile pileup builder that
+//! leaves out the reads [`PileupOptions`] reject and calls the bases of
+//! overlapping mates into one: mates that agree keep the higher quality, and
+//! mates that disagree become an `N`, which counts as neither allele.
 
 use std::collections::HashMap;
+use std::io;
 
 use anyhow::{Context as _, Result};
+use noodles::bam;
 use noodles::core::Position;
-use noodles::sam;
-use noodles::sam::alignment::Record;
+use noodles::sam::alignment::record::Flags;
+use streampile::{
+    AgreementStrategy, AlignmentRecord, DisagreementStrategy, PileupTemplate, RecordSource,
+    StreamingPileupBuilder,
+};
 
-use crate::template::{ReadBase, ReadFilter};
+/// How the quality of agreeing mates is called: the higher of the two.
+const AGREEMENT: AgreementStrategy = AgreementStrategy::MaxQual;
+
+/// How the base of disagreeing mates is called: an `N`.
+const DISAGREEMENT: DisagreementStrategy = DisagreementStrategy::MaskBoth;
 
 /// One template's observation at a site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,142 +64,156 @@ pub trait Evidence {
     fn molecules(&mut self, contig: &str, pos: Position) -> Result<Vec<Molecule>>;
 }
 
-/// A streaming pileup engine over coordinate-sorted records.
-pub trait PileupSource {
-    /// The alignment record type the engine yields.
-    type Record: Record;
-
-    /// The header of the records.
-    fn header(&self) -> &sam::Header;
-
-    /// Every read with an aligned base at the 1-based `pos` on `contig`, with
-    /// the offset of that base; reads with a deletion or a skip there are left
-    /// out. Positions are asked for in coordinate order.
-    fn pileup(&mut self, contig: &str, pos: Position) -> Result<Vec<ReadBase<'_, Self::Record>>>;
+/// Which reads and bases count as evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PileupOptions {
+    /// Reads below this mapping quality are left out.
+    pub min_mapping_quality: u8,
+    /// Templates whose called base is below this quality are left out, unless
+    /// every read's base is at it, as for mates that disagree, called `N`.
+    pub min_base_quality: u8,
+    /// Keep only paired reads whose mate is also mapped.
+    pub paired_reads_only: bool,
 }
 
-impl<S: streampile::RecordSource> PileupSource for streampile::StreamingPileupBuilder<'_, S> {
-    type Record = noodles::bam::Record;
-
-    fn header(&self) -> &sam::Header {
-        streampile::StreamingPileupBuilder::header(self)
-    }
-
-    fn pileup(&mut self, contig: &str, pos: Position) -> Result<Vec<ReadBase<'_, Self::Record>>> {
-        let pileup =
-            streampile::StreamingPileupBuilder::pileup(self, contig, usize::from(pos) - 1)?;
-        Ok(pileup
-            .iter()
-            .filter_map(|entry| {
-                entry
-                    .query_position()
-                    .map(|offset| ReadBase::new(entry.record(), offset))
-            })
-            .collect())
-    }
-}
-
-/// [`Evidence`] from a [`PileupSource`], after the read floors.
-#[derive(Debug)]
-pub struct PileupEvidence<P> {
-    source: P,
-    header: sam::Header,
-    filter: ReadFilter,
-}
-
-impl<P: PileupSource> PileupEvidence<P> {
-    /// Evidence from `source` that keeps the reads and bases `filter` accepts.
-    pub fn new(source: P, filter: ReadFilter) -> Self {
-        let header = source.header().clone();
+impl Default for PileupOptions {
+    fn default() -> Self {
         Self {
-            source,
-            header,
-            filter,
+            min_mapping_quality: 20,
+            min_base_quality: 20,
+            paired_reads_only: false,
         }
-    }
-
-    /// The read-level observations at a site, before overlapping mates are
-    /// collapsed: one per read passing the floors, with its name.
-    pub fn observations(
-        &mut self,
-        contig: &str,
-        pos: Position,
-    ) -> Result<Vec<(Option<Vec<u8>>, Molecule)>> {
-        let entries = self.source.pileup(contig, pos)?;
-        let mut observations = Vec::with_capacity(entries.len());
-        for entry in entries {
-            let record = entry.record;
-            if !self.filter.accepts(record)? {
-                continue;
-            }
-            let Some(base) = entry.base() else { continue };
-            let quality = entry.quality()?.unwrap_or(u8::MAX);
-            if quality < self.filter.min_base_quality {
-                continue;
-            }
-            let Some((left, right)) = entry
-                .template_distances(&self.header, pos)
-                .with_context(|| format!("reading template ends at {contig}:{pos}"))?
-            else {
-                continue;
-            };
-            let name = record.name().map(|n| n.to_vec());
-            observations.push((
-                name,
-                Molecule {
-                    base,
-                    quality,
-                    left,
-                    right,
-                },
-            ));
-        }
-        Ok(observations)
     }
 }
 
-impl<P: PileupSource> Evidence for PileupEvidence<P> {
+impl PileupOptions {
+    /// A builder that piles up only the reads these options accept: mapped,
+    /// primary, not duplicates, at or above the mapping quality floor, and
+    /// paired with a mapped mate when only pairs are kept. QC-failed reads are
+    /// kept, as fgbio keeps them, and a read without a mapping quality (255)
+    /// passes the floor, as in htsjdk.
+    pub fn configure<'f, S: RecordSource>(
+        &self,
+        builder: StreamingPileupBuilder<'f, S>,
+    ) -> StreamingPileupBuilder<'f, S> {
+        let builder = builder
+            .exclude_flags(Flags::SECONDARY | Flags::DUPLICATE | Flags::SUPPLEMENTARY)
+            .min_mapping_quality(self.min_mapping_quality)
+            .min_base_quality(self.min_base_quality);
+        if !self.paired_reads_only {
+            return builder;
+        }
+        builder.read_filter(|record: &S::Record| {
+            let flags = record.bam().flags();
+            flags.is_segmented() && !flags.is_mate_unmapped()
+        })
+    }
+}
+
+/// [`Evidence`] from a streampile pileup builder over coordinate-sorted reads.
+pub struct PileupEvidence<'f, S: RecordSource> {
+    builder: StreamingPileupBuilder<'f, S>,
+}
+
+impl<'f, S: RecordSource> PileupEvidence<'f, S> {
+    /// Evidence from `builder` once `options` configure it.
+    pub fn new(builder: StreamingPileupBuilder<'f, S>, options: &PileupOptions) -> Self {
+        Self {
+            builder: options.configure(builder),
+        }
+    }
+}
+
+impl<S: RecordSource> Evidence for PileupEvidence<'_, S> {
     fn molecules(&mut self, contig: &str, pos: Position) -> Result<Vec<Molecule>> {
-        Ok(collapse_templates(self.observations(contig, pos)?))
+        let pileup = self.builder.pileup(contig, usize::from(pos) - 1)?;
+        let mut molecules = Vec::new();
+        for template in pileup.templates(AGREEMENT, DISAGREEMENT) {
+            let molecule = molecule(&template, pileup.min_base_quality())
+                .with_context(|| format!("reading template ends at {contig}:{pos}"))?;
+            molecules.extend(molecule);
+        }
+        Ok(molecules)
     }
 }
 
-/// Collapse reads that share a name into one molecule per template.
-///
-/// Mates that agree on the base become one molecule with the higher of the
-/// two qualities; mates that disagree become one molecule holding `N`, which
-/// counts as neither allele. Where the mates of an FR pair overlap, each
-/// distance is counted along the read sequenced from that end, so both mates
-/// report the same distances. The molecule keeps the first read's distances
-/// and takes any it lacks from its mate. Unnamed reads are never collapsed.
-/// First-seen order is kept.
-pub fn collapse_templates(observations: Vec<(Option<Vec<u8>>, Molecule)>) -> Vec<Molecule> {
-    let mut molecules: Vec<Molecule> = Vec::with_capacity(observations.len());
-    let mut index: HashMap<Vec<u8>, usize> = HashMap::with_capacity(observations.len());
-    for (name, molecule) in observations {
-        let Some(name) = name else {
-            molecules.push(molecule);
-            continue;
-        };
-        match index.get(&name) {
-            None => {
-                index.insert(name, molecules.len());
-                molecules.push(molecule);
-            }
-            Some(&i) => {
-                let kept = &mut molecules[i];
-                if kept.base == molecule.base {
-                    kept.quality = kept.quality.max(molecule.quality);
-                } else {
-                    kept.base = b'N';
-                    kept.quality = kept.quality.min(molecule.quality);
-                }
-                kept.left = kept.left.or(molecule.left);
-                kept.right = kept.right.or(molecule.right);
-            }
-        }
+/// The molecule a template shows: its called base and the site's distances
+/// from the template's ends, or `None` for a template with no base, a site
+/// outside it, or a base under the quality floor. A base is at the floor when
+/// its called quality is, or when every read's base here is, so mates that
+/// disagree are an `N`, which counts as neither allele.
+fn molecule<R: AlignmentRecord>(
+    template: &PileupTemplate<'_, R>,
+    min_base_quality: u8,
+) -> streampile::Result<Option<Molecule>> {
+    let (Some(base), Some(quality)) = (template.base(), template.quality()) else {
+        return Ok(None);
+    };
+    if !template.passes(min_base_quality)
+        && !template
+            .entries()
+            .all(|entry| entry.passes(min_base_quality))
+    {
+        return Ok(None);
     }
-    molecules
+    let Some((left, right)) = distances(template)? else {
+        return Ok(None);
+    };
+    Ok(Some(Molecule {
+        base,
+        quality,
+        left,
+        right,
+    }))
+}
+
+/// The site's distances from a template's leftmost and rightmost bases, as
+/// `(left, right)`, or `None` for a site outside the template.
+///
+/// Each distance is counted along the read sequenced from that end where it
+/// holds a base here, and otherwise by a read of the other strand, which walks
+/// its mate's CIGAR from the `MC` tag. A read whose mate maps to the same contig on the other
+/// strand is outside its template wherever a distance is unknown: past its
+/// mate's 5' end, or anywhere in a pair whose reads face away from each other.
+fn distances<R: AlignmentRecord>(
+    template: &PileupTemplate<'_, R>,
+) -> streampile::Result<Option<(Option<usize>, Option<usize>)>> {
+    let end = |reverse: bool| -> streampile::Result<Option<usize>> {
+        let own = template
+            .entries()
+            .filter(|entry| entry.is_reverse() == reverse)
+            .find_map(|entry| entry.five_prime_distance());
+        let other = template
+            .entries()
+            .find(|entry| entry.is_reverse() != reverse);
+        match (own, other) {
+            (Some(distance), _) => Ok(Some(distance)),
+            (None, Some(other)) => other.template_end_distance(),
+            (None, None) => Ok(None),
+        }
+    };
+    let (left, right) = (end(false)?, end(true)?);
+    let read = template.entries().next().map(|entry| entry.record());
+    if (left.is_none() || right.is_none())
+        && read.map_or(Ok(false), has_mate_on_the_other_strand)?
+    {
+        return Ok(None);
+    }
+    Ok(Some((left, right)))
+}
+
+/// Whether a read's mate maps to the same contig on the other strand.
+fn has_mate_on_the_other_strand(record: &bam::Record) -> io::Result<bool> {
+    let flags = record.flags();
+    if !flags.is_segmented()
+        || flags.is_mate_unmapped()
+        || flags.is_reverse_complemented() == flags.is_mate_reverse_complemented()
+    {
+        return Ok(false);
+    }
+    let this = record.reference_sequence_id().transpose()?;
+    let mate = record.mate_reference_sequence_id().transpose()?;
+    Ok(this == mate)
 }
 
 /// [`Evidence`] from a fixed table of molecules per site, for callers that
@@ -226,114 +247,140 @@ impl Evidence for MoleculeTable {
 
 #[cfg(test)]
 mod tests {
+    use noodles::sam::alignment::RecordBuf;
+    use rstest::rstest;
+    use streampile::testing::{Frag, Pair, SamBuilder, Strand};
+
     use super::*;
-    use crate::testing::{Frag, Pair, SamBuilder};
 
     fn pos(n: usize) -> Position {
         Position::try_from(n).unwrap()
     }
 
-    fn names(observations: &[(Option<Vec<u8>>, Molecule)]) -> Vec<String> {
-        observations
+    /// The molecules at a 1-based site of reads piled up under `options`.
+    fn molecules_at(reads: &SamBuilder, options: PileupOptions, site: usize) -> Vec<Molecule> {
+        let mut evidence = PileupEvidence::new(reads.to_pileup_builder(), &options);
+        evidence.molecules("chr1", pos(site)).unwrap()
+    }
+
+    /// The site's distances from the template ends of each molecule of these
+    /// records at a 1-based site.
+    fn distances_at(records: &[RecordBuf], site: usize) -> Vec<(Option<usize>, Option<usize>)> {
+        let mut reads = SamBuilder::new();
+        reads.extend(records.iter().cloned());
+        molecules_at(&reads, PileupOptions::default(), site)
             .iter()
-            .map(|(n, _)| String::from_utf8(n.clone().unwrap()).unwrap())
+            .map(|m| (m.left, m.right))
             .collect()
+    }
+
+    /// The name and number of reads of each template counted as a molecule at
+    /// a 1-based site.
+    fn templates_at(
+        reads: &SamBuilder,
+        options: PileupOptions,
+        site: usize,
+    ) -> Vec<(String, usize)> {
+        let mut builder = options.configure(reads.to_pileup_builder());
+        let pileup = builder.pileup("chr1", site - 1).unwrap();
+        pileup
+            .templates(AGREEMENT, DISAGREEMENT)
+            .iter()
+            .filter(|template| {
+                molecule(template, pileup.min_base_quality())
+                    .unwrap()
+                    .is_some()
+            })
+            .map(|template| (template.name().to_string(), template.entries().count()))
+            .collect()
+    }
+
+    fn names(templates: &[(String, usize)]) -> Vec<&str> {
+        templates.iter().map(|(name, _)| name.as_str()).collect()
+    }
+
+    fn depth(templates: &[(String, usize)]) -> usize {
+        templates.iter().map(|(_, reads)| reads).sum()
     }
 
     /// fgbio `PileupBuilderTest`: "filter out reads below the minimum mapping
     /// quality".
     #[test]
     fn test_filter_out_reads_below_the_minimum_mapping_quality() {
-        let mut builder = SamBuilder::new().read_length(50);
+        let mut reads = SamBuilder::new().read_length(50);
         for (name, mapq) in [("q1", 9), ("q2", 10), ("q3", 11)] {
-            builder.add_frag(Frag {
+            reads.add_frag(Frag {
                 name: Some(name.into()),
                 start: 101,
                 mapq,
                 ..Frag::default()
             });
         }
-        let filter = ReadFilter {
+        let options = PileupOptions {
             min_mapping_quality: 10,
-            ..ReadFilter::default()
+            ..PileupOptions::default()
         };
-        let mut evidence = PileupEvidence::new(builder.pileup(), filter);
-        let pile = evidence.observations("chr1", pos(105)).unwrap();
-        assert_eq!(pile.len(), 2);
-        assert!(!names(&pile).contains(&"q1".to_string()));
+        assert_eq!(names(&templates_at(&reads, options, 105)), ["q2", "q3"]);
     }
 
     /// fgbio `PileupBuilderTest`: "filter out base entries below the minimum
     /// base quality".
     #[test]
     fn test_filter_out_base_entries_below_the_minimum_base_quality() {
-        let mut builder = SamBuilder::new().read_length(50).base_quality(19);
-        builder.add_frag(Frag {
-            name: Some("q1".into()),
-            start: 101,
-            ..Frag::default()
-        });
-        for (name, quality) in [("q2", 20), ("q3", 21)] {
-            let recs = SamBuilder::new()
-                .read_length(50)
-                .base_quality(quality)
-                .add_frag(Frag {
-                    name: Some(name.into()),
-                    start: 101,
-                    ..Frag::default()
-                });
-            builder.extend(recs);
+        let mut reads = SamBuilder::new().read_length(50);
+        for (name, quality) in [("q1", 19), ("q2", 20), ("q3", 21)] {
+            reads.add_frag(Frag {
+                name: Some(name.into()),
+                start: 101,
+                quals: Some(vec![quality; 50]),
+                ..Frag::default()
+            });
         }
-        let mut evidence = PileupEvidence::new(builder.pileup(), ReadFilter::default());
-        let pile = evidence.observations("chr1", pos(105)).unwrap();
-        assert_eq!(pile.len(), 2);
-        assert!(!names(&pile).contains(&"q1".to_string()));
+        let options = PileupOptions::default();
+        assert_eq!(names(&templates_at(&reads, options, 105)), ["q2", "q3"]);
     }
 
     /// fgbio `PileupBuilderTest`: "filter out reads that are not a part of a
     /// mapped pair".
     #[test]
     fn test_filter_out_reads_that_are_not_part_of_a_mapped_pair() {
-        let mut builder = SamBuilder::new().read_length(50);
-        builder.add_frag(Frag {
+        let mut reads = SamBuilder::new().read_length(50);
+        reads.add_frag(Frag {
             name: Some("q1".into()),
             start: 101,
             ..Frag::default()
         });
-        builder.add_pair(Pair {
+        reads.add_pair(Pair {
             name: Some("q2".into()),
             start1: 101,
             start2: 101,
             unmapped2: true,
             ..Pair::default()
         });
-        builder.add_pair(Pair {
+        reads.add_pair(Pair {
             name: Some("q3".into()),
             ..Pair::at(101, 300)
         });
-        let filter = ReadFilter {
+        let options = PileupOptions {
             paired_reads_only: true,
-            ..ReadFilter::default()
+            ..PileupOptions::default()
         };
-        let mut evidence = PileupEvidence::new(builder.pileup(), filter);
-        let pile = evidence.observations("chr1", pos(105)).unwrap();
-        assert_eq!(names(&pile), vec!["q3".to_string()]);
+        assert_eq!(names(&templates_at(&reads, options, 105)), ["q3"]);
     }
 
     /// fgbio `PileupBuilderTest`: "remove one half of each overlapping pair".
     #[test]
     fn test_remove_one_half_of_each_overlapping_pair() {
-        let mut builder = SamBuilder::new().read_length(50);
+        let mut reads = SamBuilder::new().read_length(50);
         for (name, start1, start2) in [("q1", 100, 110), ("q2", 110, 100), ("q3", 50, 100)] {
-            builder.add_pair(Pair {
+            reads.add_pair(Pair {
                 name: Some(name.into()),
                 ..Pair::at(start1, start2)
             });
         }
-        let mut evidence = PileupEvidence::new(builder.pileup(), ReadFilter::default());
-        let pile = evidence.observations("chr1", pos(125)).unwrap();
-        assert_eq!(pile.len(), 5);
-        assert_eq!(collapse_templates(pile).len(), 3);
+        let templates = templates_at(&reads, PileupOptions::default(), 125);
+        assert_eq!(depth(&templates), 5);
+        assert_eq!(templates.len(), 3);
     }
 
     /// fgbio `PileupBuilderTest`: "not filter out single-end records when we
@@ -341,140 +388,335 @@ mod tests {
     /// where the position is outside the insert of FR pairs".
     #[test]
     fn test_keep_single_end_records_at_both_read_ends() {
-        let mut builder = SamBuilder::new().read_length(50);
-        builder.add_frag(Frag {
+        let mut reads = SamBuilder::new().read_length(50);
+        reads.add_frag(Frag {
             name: Some("q1".into()),
             start: 100,
             ..Frag::default()
         });
-        let mut evidence = PileupEvidence::new(builder.pileup(), ReadFilter::default());
-        assert_eq!(evidence.observations("chr1", pos(100)).unwrap().len(), 1);
-        assert_eq!(evidence.observations("chr1", pos(149)).unwrap().len(), 1);
+        for site in [100, 149] {
+            assert_eq!(
+                templates_at(&reads, PileupOptions::default(), site).len(),
+                1
+            );
+        }
     }
 
     /// fgbio `PileupBuilderTest`: "filter out records where a position is
     /// outside the insert for an FR pair".
     #[test]
     fn test_filter_out_positions_outside_the_insert_of_an_fr_pair() {
-        let mut builder = SamBuilder::new().read_length(50);
-        builder.add_pair(Pair {
+        let mut reads = SamBuilder::new().read_length(50);
+        reads.add_pair(Pair {
             name: Some("q2".into()),
             ..Pair::at(101, 100)
         });
-        let mut evidence = PileupEvidence::new(builder.pileup(), ReadFilter::default());
-        let mut depth = |p| evidence.observations("chr1", pos(p)).unwrap().len();
-        assert_eq!(depth(100), 0);
-        assert_eq!(depth(101), 2);
-        assert_eq!(depth(149), 2);
-        assert_eq!(depth(150), 0);
+        let depths: Vec<usize> = [100, 101, 149, 150]
+            .map(|site| depth(&templates_at(&reads, PileupOptions::default(), site)))
+            .into();
+        assert_eq!(depths, [0, 2, 2, 0]);
     }
 
     /// fgbio `PileupBuilderTest`: "not filter out records where a position is
     /// outside what might look like an 'insert' for a non-FR pair".
     #[test]
     fn test_keep_positions_outside_what_looks_like_an_insert_for_a_non_fr_pair() {
-        let mut builder = SamBuilder::new().read_length(50);
-        builder.add_pair(Pair {
+        let mut reads = SamBuilder::new().read_length(50);
+        reads.add_pair(Pair {
             name: Some("q2".into()),
-            strand1: crate::testing::Strand::Minus,
-            strand2: crate::testing::Strand::Plus,
+            strand1: Strand::Minus,
+            strand2: Strand::Plus,
             ..Pair::at(101, 100)
         });
-        let mut evidence = PileupEvidence::new(builder.pileup(), ReadFilter::default());
-        let mut depth = |p| evidence.observations("chr1", pos(p)).unwrap().len();
-        assert_eq!(depth(100), 1);
-        assert_eq!(depth(101), 2);
-        assert_eq!(depth(149), 2);
-        assert_eq!(depth(150), 1);
+        let depths: Vec<usize> = [100, 101, 149, 150]
+            .map(|site| depth(&templates_at(&reads, PileupOptions::default(), site)))
+            .into();
+        assert_eq!(depths, [1, 2, 2, 1]);
     }
 
+    /// fgbio `PileupTest`: "BaseEntry should report the correct
+    /// offsets/positions/bases", and the matching `PileupBuilderTest` case, on
+    /// the entries chaff reads. fgbio's 1-based positions in read order are one
+    /// more than these 0-based distances from the 5' end.
     #[test]
-    fn test_collapse_templates_merges_agreeing_mates_and_masks_disagreeing_ones() {
-        let a = |q, left, right| Molecule {
-            base: b'A',
-            quality: q,
-            left,
-            right,
-        };
-        let observations = vec![
-            (Some(b"x".to_vec()), a(30, Some(10), None)),
-            (Some(b"y".to_vec()), a(30, Some(10), Some(60))),
-            (Some(b"x".to_vec()), a(40, None, Some(50))),
-            (
-                Some(b"y".to_vec()),
-                Molecule {
-                    base: b'C',
-                    ..a(20, Some(10), Some(60))
-                },
-            ),
-            (None, a(10, None, None)),
-            (None, a(10, None, None)),
-        ];
-        let molecules = collapse_templates(observations);
-        assert_eq!(molecules.len(), 4);
-        assert_eq!(molecules[0], a(40, Some(10), Some(50)));
-        assert_eq!(molecules[1].base, b'N');
-        assert_eq!(molecules[1].quality, 20);
-    }
-
-    #[test]
-    fn test_overlapping_mates_report_the_same_template_bases_across_indels() {
-        let mut builder = SamBuilder::new().read_length(50);
-        builder.add_pair(Pair {
+    fn test_entries_report_offsets_positions_and_bases() {
+        let mut reads = SamBuilder::new().read_length(50).base_quality(35);
+        reads.add_pair(Pair {
             name: Some("q1".into()),
+            start1: 101,
+            start2: 201,
+            bases1: Some("A".repeat(50)),
+            bases2: Some("C".repeat(50)),
+            ..Pair::default()
+        });
+        let mut builder = PileupOptions::default().configure(reads.to_pileup_builder());
+        let mut seen = Vec::new();
+        for site in [105, 205] {
+            let pileup = builder.pileup("chr1", site - 1).unwrap();
+            let entry = pileup.get(0).unwrap();
+            seen.push((
+                entry.base(),
+                entry.sequenced_base(),
+                entry.quality(),
+                entry.query_position(),
+                entry.five_prime_distance(),
+            ));
+        }
+        assert_eq!(
+            seen,
+            [
+                (Some(b'A'), Some(b'A'), Some(35), Some(4), Some(4)),
+                (Some(b'C'), Some(b'G'), Some(35), Some(4), Some(45)),
+            ]
+        );
+    }
+
+    /// fgbio `BamsTest`: "Bams.insertCoordinates should fail on fragments and
+    /// inappropriate pairs". chaff gives such records only their own end where
+    /// fgbio raises.
+    #[test]
+    fn test_template_distances_know_only_their_own_end_on_fragments_and_inappropriate_pairs() {
+        let mut reads = SamBuilder::new().read_length(10).base_quality(20);
+        let own_only = vec![(Some(4), None)];
+        assert_eq!(distances_at(&reads.add_frag(Frag::at(100)), 104), own_only);
+        let unmapped_mate = reads.add_pair(Pair {
+            start1: 100,
+            start2: 100,
+            unmapped2: true,
+            ..Pair::default()
+        });
+        assert_eq!(distances_at(&unmapped_mate[..1], 104), own_only);
+        let pair = reads.add_pair(Pair::at(100, 200));
+        let other_contig = SamBuilder::with_mate_reference_sequence_id(pair[0].clone(), 1);
+        assert_eq!(distances_at(&[other_contig], 104), own_only);
+    }
+
+    /// fgbio `BamsTest`: "Bams.insertCoordinates should calculate insert
+    /// coordinates correctly", as the distances from the template's first and
+    /// last bases. chaff reads the far end from `MC`, not `TLEN`.
+    #[test]
+    fn test_template_distances_of_an_fr_pair() {
+        let mut reads = SamBuilder::new().read_length(10).base_quality(20);
+        let pair = reads.add_pair(Pair::at(100, 191));
+        assert_eq!(distances_at(&pair, 100), [(Some(0), Some(100))]);
+        assert_eq!(distances_at(&pair, 200), [(Some(100), Some(0))]);
+    }
+
+    /// fgbio `BamsTest`: "Bams.positionFromOtherEndOfTemplate should return
+    /// None for anything that's not an FR mapped pair".
+    #[test]
+    fn test_distance_from_the_other_end_is_none_unless_fr_pair() {
+        let mut reads = SamBuilder::new();
+        let header = reads.header().clone();
+        let check = |records: Vec<RecordBuf>| {
+            for r in records.iter().filter(|r| !r.flags().is_unmapped()) {
+                for site in [r.alignment_start(), r.alignment_end()] {
+                    let position = usize::from(site.unwrap()) - 1;
+                    let distance = streampile::template_end_distance(r, &header, position);
+                    assert_eq!(distance.unwrap(), None, "{r:?}");
+                }
+            }
+        };
+        check(reads.add_frag(Frag::at(100)));
+        check(reads.add_pair(Pair {
+            start1: 100,
+            start2: 200,
+            unmapped2: true,
+            ..Pair::default()
+        }));
+        for (strand1, strand2) in [
+            (Strand::Plus, Strand::Plus),
+            (Strand::Minus, Strand::Minus),
+            (Strand::Minus, Strand::Plus),
+        ] {
+            check(reads.add_pair(Pair {
+                start1: 100,
+                start2: 200,
+                strand1,
+                strand2,
+                ..Pair::default()
+            }));
+        }
+    }
+
+    /// fgbio `BamsTest`: "Bams.positionFromOtherEndOfTemplate should correctly
+    /// calculate the position from the other end of the template for FR pairs",
+    /// as the 1-based distance from the far template end.
+    #[test]
+    fn test_distance_from_the_other_end_of_the_template() {
+        let mut reads = SamBuilder::new().read_length(50);
+        let pair = reads.add_pair(Pair::at(101, 151));
+        let from_other_end = |i: usize, site: usize| {
+            streampile::template_end_distance(&pair[i], reads.header(), site - 1)
+                .unwrap()
+                .map(|d| d + 1)
+        };
+        assert_eq!(from_other_end(0, 101), Some(100));
+        assert_eq!(from_other_end(0, 111), Some(90));
+        assert_eq!(from_other_end(0, 151), Some(50));
+        assert_eq!(from_other_end(0, 200), Some(1));
+        assert_eq!(from_other_end(1, 200), Some(100));
+        assert_eq!(from_other_end(1, 190), Some(90));
+        assert_eq!(from_other_end(1, 150), Some(50));
+        assert_eq!(from_other_end(1, 101), Some(1));
+    }
+
+    #[test]
+    fn test_template_distances_count_soft_clips_and_not_hard_clips() {
+        let mut reads = SamBuilder::new().read_length(50);
+        let soft = reads.add_pair(Pair {
+            cigar1: Some("5S45M".into()),
+            cigar2: Some("40M10S".into()),
+            ..Pair::at(101, 151)
+        });
+        assert_eq!(distances_at(&soft, 101), [(Some(5), Some(99))]);
+        assert_eq!(distances_at(&soft, 190), [(Some(94), Some(10))]);
+        let hard = reads.add_pair(Pair {
+            cigar1: Some("5H45M".into()),
+            cigar2: Some("40M10H".into()),
+            ..Pair::at(101, 151)
+        });
+        assert_eq!(distances_at(&hard, 101), [(Some(0), Some(89))]);
+        assert_eq!(distances_at(&hard, 190), [(Some(89), Some(0))]);
+    }
+
+    /// A deletion between a site and a template end takes its length off the
+    /// distance, and an insertion adds its length, whether the read sequenced
+    /// from that end holds the site or only its mate does.
+    #[test]
+    fn test_template_distances_count_indels_by_their_length() {
+        let mut reads = SamBuilder::new().read_length(50);
+        let pair = reads.add_pair(Pair {
             cigar1: Some("30M4D20M".into()),
             cigar2: Some("20M2I28M".into()),
             ..Pair::at(101, 121)
         });
-        let mut evidence = PileupEvidence::new(builder.pileup(), ReadFilter::default());
-        let pile = evidence.observations("chr1", pos(140)).unwrap();
-        let distances: Vec<_> = pile.iter().map(|(_, m)| (m.left, m.right)).collect();
-        assert_eq!(distances, vec![(Some(35), Some(30)); 2]);
-        let molecules = collapse_templates(pile);
-        assert_eq!(molecules.len(), 1);
-        assert_eq!(
-            (molecules[0].left, molecules[0].right),
-            (Some(35), Some(30))
-        );
+        let (deleted, inserted) = (4, 2);
+        let expected = [(Some(140 - 101 - deleted), Some(168 - 140 + inserted))];
+        for records in [&pair[..], &pair[..1], &pair[1..]] {
+            assert_eq!(distances_at(records, 140), expected);
+        }
+    }
+
+    /// A site past its mate's 5' end lies outside the template, and so does
+    /// every site of a pair whose reads face away from each other.
+    #[test]
+    fn test_template_distances_leave_out_sites_past_the_mates_five_prime_end() {
+        let mut reads = SamBuilder::new().read_length(50);
+        let through = reads.add_pair(Pair::at(101, 100));
+        assert_eq!(distances_at(&through, 150), []);
+        assert_eq!(distances_at(&through, 100), []);
+        assert_eq!(distances_at(&through, 149), [(Some(48), Some(0))]);
+        let away = reads.add_pair(Pair {
+            strand1: Strand::Minus,
+            strand2: Strand::Plus,
+            ..Pair::at(100, 200)
+        });
+        assert_eq!(distances_at(&away, 120), []);
+        assert_eq!(distances_at(&away, 220), []);
     }
 
     #[test]
-    fn test_the_streampile_engine_measures_template_bases_as_the_test_pileup_does() {
-        let mut builder = SamBuilder::new().read_length(50).coordinate_sorted();
-        for (start1, start2, cigar1, cigar2) in [
-            (101, 121, "30M4D20M", "20M2I28M"),
-            (96, 131, "5S45M", "40M10S"),
-            (111, 141, "5H45M", "45M5H"),
-            (121, 120, "50M", "50M"),
-        ] {
-            let bases = |cigar: &str| "A".repeat(if cigar.contains('H') { 45 } else { 50 });
-            builder.add_pair(Pair {
-                bases1: Some(bases(cigar1)),
-                bases2: Some(bases(cigar2)),
-                cigar1: Some(cigar1.into()),
-                cigar2: Some(cigar2.into()),
-                ..Pair::at(start1, start2)
+    fn test_template_distances_of_a_pair_without_a_mate_cigar_are_an_error() {
+        let mut reads = SamBuilder::new().read_length(50);
+        let pair = reads.add_pair(Pair {
+            name: Some("q1".into()),
+            ..Pair::at(101, 151)
+        });
+        let mut stripped = SamBuilder::new();
+        stripped.extend(pair.into_iter().map(SamBuilder::without_mate_cigar));
+        for site in [111, 161] {
+            let mut evidence =
+                PileupEvidence::new(stripped.to_pileup_builder(), &PileupOptions::default());
+            let error = evidence.molecules("chr1", pos(site)).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains("read q1"), "{message}");
+            assert!(message.contains("MC"), "{message}");
+        }
+    }
+
+    #[test]
+    fn test_template_distances_ignore_the_insert_size() {
+        let mut reads = SamBuilder::new().read_length(50);
+        let pair: Vec<RecordBuf> = reads
+            .add_pair(Pair::at(101, 151))
+            .into_iter()
+            .map(|mut r| {
+                *r.template_length_mut() = 7;
+                r
+            })
+            .collect();
+        assert_eq!(distances_at(&pair, 120), [(Some(19), Some(80))]);
+        assert_eq!(distances_at(&pair, 160), [(Some(59), Some(40))]);
+    }
+
+    #[rstest]
+    #[case(Strand::Plus, "5S45M", (Some(5), None))]
+    #[case(Strand::Minus, "45M5S", (None, Some(49)))]
+    fn test_template_distances_of_a_fragment_know_only_their_own_end(
+        #[case] strand: Strand,
+        #[case] cigar: &str,
+        #[case] expected: (Option<usize>, Option<usize>),
+    ) {
+        let mut reads = SamBuilder::new().read_length(50);
+        let frag = reads.add_frag(Frag {
+            strand,
+            cigar: Some(cigar.into()),
+            ..Frag::at(100)
+        });
+        assert_eq!(distances_at(&frag, 100), [expected]);
+    }
+
+    #[test]
+    fn test_template_distances_of_a_tandem_pair_know_only_their_own_end() {
+        let mut reads = SamBuilder::new().read_length(50);
+        let pair = reads.add_pair(Pair {
+            strand1: Strand::Plus,
+            strand2: Strand::Plus,
+            ..Pair::at(100, 200)
+        });
+        assert_eq!(distances_at(&pair, 210), [(Some(10), None)]);
+    }
+
+    /// Mates that agree are one molecule at the higher quality, and mates that
+    /// disagree are an `N`, which counts as neither allele. A mate under the
+    /// quality floor still takes part, so its disagreement leaves no molecule.
+    #[test]
+    fn test_overlapping_mates_are_called_into_one_molecule() {
+        let mut reads = SamBuilder::new().read_length(50);
+        for (bases2, quality2) in [('A', 40), ('C', 30), ('C', 10)] {
+            reads.add_pair(Pair {
+                bases1: Some("A".repeat(50)),
+                bases2: Some(bases2.to_string().repeat(50)),
+                quals1: Some(vec![30; 50]),
+                quals2: Some(vec![quality2; 50]),
+                ..Pair::at(101, 121)
             });
         }
-        let dir = tempfile::tempdir().unwrap();
-        let path = builder.write_bam(&dir.path().join("reads.bam"));
-        let mut reader = noodles::bam::io::reader::Builder
-            .build_from_path(path)
-            .unwrap();
-        let header = reader.read_header().unwrap();
-        let engine = streampile::StreamingPileupBuilder::new(reader, &header).unwrap();
-        let mut streamed = PileupEvidence::new(engine, ReadFilter::default());
-        let mut expected = PileupEvidence::new(builder.pileup(), ReadFilter::default());
-        let mut measured = 0;
-        for site in 100..=190 {
-            let observations = streamed.observations("chr1", pos(site)).unwrap();
-            assert_eq!(
-                observations,
-                expected.observations("chr1", pos(site)).unwrap()
-            );
-            measured += observations.len();
+        let molecules = molecules_at(&reads, PileupOptions::default(), 130);
+        let calls: Vec<(u8, u8)> = molecules.iter().map(|m| (m.base, m.quality)).collect();
+        assert_eq!(calls, [(b'A', 40), (b'N', 2)]);
+        assert_eq!(molecules[0], Molecule::new(b'A', 40, 29, 40));
+    }
+
+    /// Secondary, duplicate, supplementary, and unmapped reads are left out,
+    /// QC-failed reads are kept, as fgbio keeps them.
+    #[test]
+    fn test_reads_are_left_out_by_their_flags() {
+        for (flag, kept) in [
+            (0x100, false),
+            (0x400, false),
+            (0x800, false),
+            (0x4, false),
+            (0x200, true),
+        ] {
+            let mut built = SamBuilder::new().read_length(50);
+            let frag = built.add_frag(Frag::at(101));
+            let mut reads = SamBuilder::new();
+            reads.extend([SamBuilder::with_flags(frag[0].clone(), flag)]);
+            let templates = templates_at(&reads, PileupOptions::default(), 110);
+            assert_eq!(templates.len(), usize::from(kept), "flag {flag:#x}");
         }
-        assert!(measured > 300, "{measured}");
     }
 
     #[test]

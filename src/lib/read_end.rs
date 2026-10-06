@@ -272,15 +272,14 @@ pub fn is_filtered(posterior_mutation: f64, threshold: Option<f64>) -> bool {
 mod tests {
     use noodles::core::Position;
     use noodles::sam::alignment::RecordBuf;
+    use streampile::testing::{Frag, Pair, SamBuilder, Strand};
 
     use super::*;
-    use crate::evidence::{Evidence, PileupEvidence};
+    use crate::evidence::{Evidence, PileupEvidence, PileupOptions};
     use crate::io::vcf_float;
     use crate::prior::{
         fgbio_artifact_prior, learn_artifact_fraction, posterior_mutation, PSEUDOCOUNT,
     };
-    use crate::template::{ReadBase, ReadFilter};
-    use crate::testing::{offset_at, Frag, Pair, SamBuilder, Strand};
 
     const A: u8 = b'A';
     const C: u8 = b'C';
@@ -291,21 +290,14 @@ mod tests {
         Genotype::new(alleles, alleles)
     }
 
-    /// The molecule one record shows at `pos`, before mates are collapsed, like
-    /// one of fgbio's `BaseEntry` values.
-    fn entry(builder: &SamBuilder, record: &RecordBuf, pos: usize) -> Molecule {
-        let base = ReadBase::new(record, offset_at(record, pos).unwrap());
-        let position = Position::try_from(pos).unwrap();
-        let (left, right) = base
-            .template_distances(builder.header(), position)
-            .unwrap()
-            .unwrap();
-        Molecule {
-            base: base.base().unwrap(),
-            quality: base.quality().unwrap().unwrap(),
-            left,
-            right,
-        }
+    /// The molecule one read alone shows at `pos`, like one of fgbio's
+    /// `BaseEntry` values.
+    fn entry(record: &RecordBuf, pos: usize) -> Molecule {
+        let mut reads = SamBuilder::new();
+        reads.extend([record.clone()]);
+        let molecules = molecules_at(&reads, pos);
+        assert_eq!(molecules.len(), 1, "{record:?}");
+        molecules[0]
     }
 
     /// The posterior fgbio reports for one call, with its `(2 * maf)^2` prior.
@@ -323,8 +315,9 @@ mod tests {
         posterior_mutation(llr, prior)
     }
 
-    fn molecules_at(builder: &SamBuilder, pos: usize) -> Vec<Molecule> {
-        let mut evidence = PileupEvidence::new(builder.pileup(), ReadFilter::default());
+    fn molecules_at(reads: &SamBuilder, pos: usize) -> Vec<Molecule> {
+        let mut evidence =
+            PileupEvidence::new(reads.to_pileup_builder(), &PileupOptions::default());
         evidence
             .molecules("chr1", Position::try_from(pos).unwrap())
             .unwrap()
@@ -407,7 +400,7 @@ mod tests {
         });
         for r in &recs {
             for pos in 116..=135 {
-                assert!(!filter.is_congruent(&entry(&builder, r, pos)));
+                assert!(!filter.is_congruent(&entry(r, pos)));
             }
         }
     }
@@ -424,7 +417,7 @@ mod tests {
         });
         for r in &recs {
             for pos in (101..=115).chain(136..=150) {
-                assert!(filter.is_congruent(&entry(&builder, r, pos)));
+                assert!(filter.is_congruent(&entry(r, pos)));
             }
         }
     }
@@ -440,10 +433,7 @@ mod tests {
             cigar: Some("10M5D40M".into()),
             ..Frag::at(101)
         });
-        let (plain, deleted) = (
-            entry(&builder, &plain[0], 120),
-            entry(&builder, &deleted[0], 120),
-        );
+        let (plain, deleted) = (entry(&plain[0], 120), entry(&deleted[0], 120));
         assert_eq!((plain.left, deleted.left), (Some(19), Some(14)));
         assert!(!filter.is_congruent(&plain));
         assert!(filter.is_congruent(&deleted));
@@ -571,7 +561,7 @@ mod tests {
         });
         for r in &recs {
             for pos in 106..=145 {
-                assert!(!filter.is_congruent(A, &entry(&builder, r, pos)));
+                assert!(!filter.is_congruent(A, &entry(r, pos)));
             }
         }
     }
@@ -590,12 +580,12 @@ mod tests {
             .collect();
         for r in &recs {
             for pos in 101..=105 {
-                let m = entry(&builder, r, pos);
+                let m = entry(r, pos);
                 assert!(m.base == C || m.base == A);
                 assert!(!filter.is_congruent(A, &m));
             }
             for pos in 146..=150 {
-                let m = entry(&builder, r, pos);
+                let m = entry(r, pos);
                 assert!(m.base == G || m.base == T);
                 assert!(!filter.is_congruent(T, &m));
             }
@@ -616,10 +606,10 @@ mod tests {
             .collect();
         for r in &recs {
             for pos in 101..=105 {
-                assert!(filter.is_congruent(T, &entry(&builder, r, pos)));
+                assert!(filter.is_congruent(T, &entry(r, pos)));
             }
             for pos in 146..=150 {
-                assert!(filter.is_congruent(A, &entry(&builder, r, pos)));
+                assert!(filter.is_congruent(A, &entry(r, pos)));
             }
         }
     }
@@ -639,10 +629,7 @@ mod tests {
             cigar: Some("2H48M".into()),
             ..Frag::at(101)
         });
-        let (soft, hard) = (
-            entry(&builder, &soft[0], 101),
-            entry(&builder, &hard[0], 101),
-        );
+        let (soft, hard) = (entry(&soft[0], 101), entry(&hard[0], 101));
         assert_eq!((soft.left, hard.left), (Some(2), Some(0)));
         assert!(!filter.is_congruent(T, &soft));
         assert!(filter.is_congruent(T, &hard));

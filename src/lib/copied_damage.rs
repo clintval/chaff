@@ -146,11 +146,10 @@ impl CopiedDamage {
 #[cfg(test)]
 mod tests {
     use noodles::core::Position;
+    use streampile::testing::{Pair, SamBuilder};
 
     use super::*;
-    use crate::evidence::{Evidence, PileupEvidence};
-    use crate::template::ReadFilter;
-    use crate::testing::{Pair, SamBuilder};
+    use crate::evidence::{Evidence, PileupEvidence, PileupOptions};
 
     const C: u8 = b'C';
     const G: u8 = b'G';
@@ -223,7 +222,8 @@ mod tests {
                 ..Pair::at(101, 141)
             });
         }
-        let mut evidence = PileupEvidence::new(builder.pileup(), ReadFilter::default());
+        let mut evidence =
+            PileupEvidence::new(builder.to_pileup_builder(), &PileupOptions::default());
         let position = Position::try_from(146).unwrap();
         let molecules = evidence.molecules("chr1", position).unwrap();
         let distances: Vec<_> = molecules

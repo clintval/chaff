@@ -1,7 +1,7 @@
 //! fgbio's `FilterSomaticVcfTest`, ported.
 //!
-//! Each test runs the whole command (VCF in, merge-join with molecules from a
-//! coordinate-sorted pileup over built reads, priors, VCF out) and asserts what
+//! Each test runs the whole command (VCF in, merge-join with molecules that
+//! streampile piles up from built reads, priors, VCF out) and asserts what
 //! fgbio's test asserts. fgbio runs every case under both of its BAM access
 //! patterns; chaff only streams, so each case runs once. Cases run under
 //! `--prior fgbio` assert fgbio's values exactly; the expected values were
@@ -10,15 +10,15 @@
 
 use std::path::{Path, PathBuf};
 
+use chaff::evidence::PileupOptions;
 use chaff::filter::{run_filter, run_filter_on, FilterArgs, FilterKind, FilterOptions};
 use chaff::io::VariantReader;
 use chaff::prior::PriorMode;
 use chaff::read_end::{ATailing, EndRepairFillIn};
-use chaff::template::ReadFilter;
-use chaff::testing::{gt, write_fasta, Pair, SamBuilder, Variant, VcfBuilder};
+use chaff::testing::{gt, Variant, VcfBuilder};
 use noodles::vcf::variant::record_buf::info::field::Value;
 use noodles::vcf::variant::RecordBuf;
-use rstest::rstest;
+use streampile::testing::{Frag, Pair, SamBuilder};
 use tempfile::TempDir;
 
 const RLEN: usize = 40;
@@ -68,10 +68,7 @@ fn tumor_vcfs(dir: &Path) -> (PathBuf, PathBuf) {
 /// The reads of fgbio's shared BAM: artifact signal at 100, 400, and 500, and
 /// a low-fraction G>A with alternate molecules spread evenly at 200.
 fn tumor_bam() -> SamBuilder {
-    let mut b = SamBuilder::new()
-        .read_length(RLEN)
-        .base_quality(40)
-        .coordinate_sorted();
+    let mut b = SamBuilder::new().read_length(RLEN).base_quality(40);
     let pair = |b: &mut SamBuilder, s1: usize, s2: usize, base: char| {
         b.add_pair(Pair::filled(s1, s2, base, RLEN));
     };
@@ -141,10 +138,10 @@ fn run(
         bam: PathBuf::from("reads.bam"),
         reference: None,
         metrics: None,
-        read_filter: ReadFilter::default(),
+        pileup: PileupOptions::default(),
         options,
     };
-    run_filter_on(&args, reads.pileup())?;
+    run_filter_on(&args, reads.to_pileup_builder())?;
     Ok(read_vcf(&output).1)
 }
 
@@ -200,8 +197,8 @@ fn test_raise_an_error_when_variant_records_are_not_coordinate_ordered() {
     vcf.add(Variant::new(2, &["C", "A"], vec![gt("sample1", "C/A")]));
     vcf.add(Variant::new(1, &["C", "A"], vec![gt("sample1", "C/A")]));
     let input = vcf.write_unsorted(&dir.path().join("unsorted.vcf"));
-    let mut reads = SamBuilder::new().coordinate_sorted();
-    reads.add_frag(chaff::testing::Frag::at(1));
+    let mut reads = SamBuilder::new();
+    reads.add_frag(Frag::at(1));
     let error = run(&dir, &input, &reads, fgbio_options()).unwrap_err();
     assert!(
         error.to_string().contains("not coordinate sorted"),
@@ -223,7 +220,7 @@ fn even_g_to_a(
         ..Variant::new(200, &["G", "A"], vec![gt("sample1", "G/A")])
     });
     let input = vcf.write(&dir.path().join("in.vcf"));
-    let mut reads = SamBuilder::new().read_length(RLEN).coordinate_sorted();
+    let mut reads = SamBuilder::new().read_length(RLEN);
     add_even_g_to_a(&mut reads);
     (input, reads)
 }
@@ -489,10 +486,10 @@ fn test_metrics_rows_of_the_shared_vcf() {
         bam: PathBuf::from("reads.bam"),
         reference: None,
         metrics: Some(metrics.clone()),
-        read_filter: ReadFilter::default(),
+        pileup: PileupOptions::default(),
         options: thresholded(PriorMode::Learned),
     };
-    run_filter_on(&args, tumor_bam().pileup()).unwrap();
+    run_filter_on(&args, tumor_bam().to_pileup_builder()).unwrap();
     let mut reader = csv::ReaderBuilder::new()
         .delimiter(b'\t')
         .from_path(&metrics)
@@ -522,54 +519,23 @@ fn test_metrics_rows_of_the_shared_vcf() {
 fn test_raise_an_error_if_the_reads_are_not_coordinate_sorted() {
     let dir = TempDir::new().unwrap();
     let (tumor, _) = tumor_vcfs(dir.path());
-    let reads = SamBuilder::new();
-    let error = run(
-        &dir,
-        &tumor,
-        &reads,
-        options(Some("tumor"), PriorMode::Fgbio),
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains("coordinate sorted"), "{error}");
-}
-
-/// The streampile engine the binary streams the BAM through annotates every
-/// call, under every filter and either prior, exactly as the test pileup does.
-#[rstest]
-#[case(PriorMode::Fgbio)]
-#[case(PriorMode::Learned)]
-fn test_the_streampile_engine_matches_the_test_pileup(#[case] prior: PriorMode) {
-    let dir = TempDir::new().unwrap();
-    let (_, input) = tumor_vcfs(dir.path());
-    let mut sequence = vec![b'A'; 1000];
-    for (pos, base) in [(100, b'C'), (200, b'G'), (500, b'C')] {
-        sequence[pos - 1] = base;
-    }
-    let reference = write_fasta(dir.path(), "chr1", std::str::from_utf8(&sequence).unwrap());
-    let reads = tumor_bam();
-    let args = |output: &str, bam: PathBuf| FilterArgs {
-        input: input.clone(),
-        output: dir.path().join(output),
+    let mut header = SamBuilder::new().header().clone();
+    *header.header_mut() = None;
+    let bam = dir.path().join("unsorted.bam");
+    let mut writer = noodles::bam::io::Writer::new(std::fs::File::create(&bam).unwrap());
+    writer.write_header(&header).unwrap();
+    writer.try_finish().unwrap();
+    let args = FilterArgs {
+        input: tumor,
+        output: dir.path().join("filtered.vcf"),
         bam,
-        reference: Some(reference.clone()),
+        reference: None,
         metrics: None,
-        read_filter: ReadFilter::default(),
-        options: FilterOptions {
-            sample: Some(String::from("tumor")),
-            prior,
-            ..FilterOptions::default()
-        },
+        pileup: PileupOptions::default(),
+        options: options(Some("tumor"), PriorMode::Fgbio),
     };
-    let expected = args("expected.vcf", PathBuf::from("reads.bam"));
-    run_filter_on(&expected, reads.pileup()).unwrap();
-    let streamed = args(
-        "streamed.vcf",
-        reads.write_bam(&dir.path().join("reads.bam")),
-    );
-    run_filter(&streamed).unwrap();
-    let records = read_vcf(&streamed.output).1;
-    assert_annotated_as_fgbio(&records);
-    assert_eq!(records, read_vcf(&expected.output).1);
+    let error = run_filter(&args).unwrap_err();
+    assert!(error.to_string().contains("coordinate sorted"), "{error}");
 }
 
 /// A read of an FR pair without its mate's CIGAR stops the run, and the binary
@@ -582,9 +548,10 @@ fn test_a_read_without_a_mate_cigar_fails_the_run_naming_it() {
         name: Some(String::from("q1")),
         ..Pair::filled(81, 101, 'C', RLEN)
     });
-    let mut reads = SamBuilder::new().read_length(RLEN).coordinate_sorted();
+    let mut reads = SamBuilder::new().read_length(RLEN);
     reads.extend(recs.into_iter().map(SamBuilder::without_mate_cigar));
-    let bam = reads.write_bam(&dir.path().join("reads.bam"));
+    let bam = dir.path().join("reads.bam");
+    reads.write_bam(&bam).unwrap();
     let output = assert_cmd::Command::cargo_bin("chaff")
         .unwrap()
         .env("NO_COLOR", "1")
