@@ -2,7 +2,7 @@
 
 use std::fs::File;
 use std::io::{self, BufRead, BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use noodles::bcf;
@@ -12,6 +12,7 @@ use noodles::vcf::header::record::value::map::info::{Number, Type};
 use noodles::vcf::header::record::value::map::{Filter, Info, Map};
 use noodles::vcf::variant::io::Write as _;
 use noodles::vcf::variant::RecordBuf;
+use tempfile::NamedTempFile;
 
 /// A reader over VCF (plain or BGZF) or BCF records.
 pub enum VariantReader {
@@ -78,63 +79,129 @@ impl Format {
     }
 }
 
+/// A file written beside its path and moved onto it once complete, so the path
+/// never holds a partial file and an input of the same name is read in full
+/// first.
+pub struct StagedFile {
+    file: NamedTempFile,
+    path: PathBuf,
+}
+
+impl StagedFile {
+    /// Stage a file for `path`, creating its directory.
+    pub fn create(path: &Path) -> Result<Self> {
+        let name = path
+            .file_name()
+            .with_context(|| format!("an output must name a file: {path:?}"))?;
+        let directory = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        std::fs::create_dir_all(directory)
+            .with_context(|| format!("failed to create output directory: {directory:?}"))?;
+        let prefix = format!(".{}.", name.to_string_lossy());
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(&prefix).suffix(".tmp");
+        #[cfg(unix)]
+        builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o666));
+        let file = builder
+            .tempfile_in(directory)
+            .with_context(|| format!("failed to create a file beside {path:?}"))?;
+        Ok(Self {
+            file,
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// A handle that writes the staged file.
+    pub fn writer(&self) -> Result<File> {
+        self.file
+            .as_file()
+            .try_clone()
+            .with_context(|| format!("failed to write {:?}", self.path))
+    }
+
+    /// Move the staged file onto its path.
+    pub fn persist(self) -> Result<()> {
+        let path = self.path;
+        self.file
+            .persist(&path)
+            .map_err(|error| error.error)
+            .with_context(|| format!("failed to write {path:?}"))?;
+        Ok(())
+    }
+}
+
 /// A writer of VCF (plain or BGZF) or BCF records.
-pub enum VariantWriter {
-    /// A plain VCF writer.
+pub struct VariantWriter {
+    stream: Stream,
+    staged: Option<StagedFile>,
+}
+
+/// The record stream of a [`VariantWriter`], by format.
+enum Stream {
     Vcf(vcf::io::Writer<BufWriter<Box<dyn Write>>>),
-    /// A BGZF-compressed VCF writer.
     VcfGz(vcf::io::Writer<bgzf::io::Writer<Box<dyn Write>>>),
-    /// A BCF writer.
     Bcf(Box<bcf::io::Writer<bgzf::io::Writer<Box<dyn Write>>>>),
 }
 
 impl VariantWriter {
     /// A writer of `format` into `sink`.
     pub fn new(sink: Box<dyn Write>, format: Format) -> Self {
-        match format {
-            Format::Vcf => Self::Vcf(vcf::io::Writer::new(BufWriter::new(sink))),
-            Format::VcfGz => Self::VcfGz(vcf::io::Writer::new(bgzf::io::Writer::new(sink))),
-            Format::Bcf => Self::Bcf(Box::new(bcf::io::Writer::new(sink))),
+        let stream = match format {
+            Format::Vcf => Stream::Vcf(vcf::io::Writer::new(BufWriter::new(sink))),
+            Format::VcfGz => Stream::VcfGz(vcf::io::Writer::new(bgzf::io::Writer::new(sink))),
+            Format::Bcf => Stream::Bcf(Box::new(bcf::io::Writer::new(sink))),
+        };
+        Self {
+            stream,
+            staged: None,
         }
     }
 
-    /// Create a VCF or BCF by its extension; `-` writes VCF to standard output.
+    /// Create a VCF or BCF by its extension, staged beside it until
+    /// [`finish`](Self::finish); `-` writes VCF to standard output.
     pub fn create(path: &Path) -> Result<Self> {
         if path == Path::new("-") {
             return Ok(Self::new(Box::new(io::stdout()), Format::Vcf));
         }
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create output directory: {parent:?}"))?;
-        }
-        let file = File::create(path).with_context(|| format!("failed to create: {path:?}"))?;
-        Ok(Self::new(Box::new(file), Format::of(path)))
+        let staged = StagedFile::create(path)?;
+        let writer = Self::new(Box::new(staged.writer()?), Format::of(path));
+        Ok(Self {
+            staged: Some(staged),
+            ..writer
+        })
     }
 
     /// Write the header.
     pub fn write_header(&mut self, header: &vcf::Header) -> io::Result<()> {
-        match self {
-            Self::Vcf(w) => w.write_header(header),
-            Self::VcfGz(w) => w.write_header(header),
-            Self::Bcf(w) => w.write_header(header),
+        match &mut self.stream {
+            Stream::Vcf(w) => w.write_header(header),
+            Stream::VcfGz(w) => w.write_header(header),
+            Stream::Bcf(w) => w.write_header(header),
         }
     }
 
     /// Write one record.
     pub fn write_record(&mut self, header: &vcf::Header, record: &RecordBuf) -> io::Result<()> {
-        match self {
-            Self::Vcf(w) => w.write_variant_record(header, record),
-            Self::VcfGz(w) => w.write_variant_record(header, record),
-            Self::Bcf(w) => w.write_variant_record(header, record),
+        match &mut self.stream {
+            Stream::Vcf(w) => w.write_variant_record(header, record),
+            Stream::VcfGz(w) => w.write_variant_record(header, record),
+            Stream::Bcf(w) => w.write_variant_record(header, record),
         }
     }
 
-    /// Flush and close the stream, finishing any BGZF blocks.
-    pub fn finish(self) -> io::Result<()> {
-        match self {
-            Self::Vcf(w) => w.into_inner().flush(),
-            Self::VcfGz(w) => w.into_inner().finish()?.flush(),
-            Self::Bcf(w) => w.into_inner().finish()?.flush(),
+    /// Flush and close the stream, finishing any BGZF blocks, and move a staged
+    /// file onto its path.
+    pub fn finish(self) -> Result<()> {
+        match self.stream {
+            Stream::Vcf(w) => w.into_inner().flush(),
+            Stream::VcfGz(w) => w.into_inner().finish()?.flush(),
+            Stream::Bcf(w) => w.into_inner().finish()?.flush(),
+        }?;
+        match self.staged {
+            Some(staged) => staged.persist(),
+            None => Ok(()),
         }
     }
 }
@@ -219,6 +286,26 @@ mod tests {
             writer.write_header(&vcf::Header::default()).unwrap();
             assert!(writer.finish().is_err(), "{format:?}");
         }
+    }
+
+    #[test]
+    fn test_a_staged_file_appears_only_once_persisted_with_the_usual_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("plain.vcf");
+        File::create(&plain).unwrap();
+        let path = dir.path().join("out/calls.vcf");
+        let staged = StagedFile::create(&path).unwrap();
+        staged.writer().unwrap().write_all(b"text").unwrap();
+        assert!(!path.exists());
+        staged.persist().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "text");
+        let mode = |p: &Path| p.metadata().unwrap().permissions().mode();
+        assert_eq!(mode(&path), mode(&plain));
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
     }
 
     #[test]

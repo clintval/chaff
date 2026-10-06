@@ -14,14 +14,15 @@
 //! reference fraction is one half, NanoSeq's null; using the reference
 //! molecules keeps capture and length skew out of the test.
 
-use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use csv::{Terminator, WriterBuilder};
 use serde::{Serialize, Serializer};
 use statrs::distribution::{Binomial, DiscreteCDF};
+
+use crate::io::StagedFile;
 
 /// One metrics row.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -124,15 +125,11 @@ fn columns() -> Result<csv::StringRecord> {
 
 /// Write the rows as a tab-separated file with a header.
 pub fn write_metrics(path: &Path, rows: &[StratumMetrics]) -> Result<()> {
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create metrics directory: {parent:?}"))?;
-    }
-    let file = File::create(path).with_context(|| format!("failed to create metrics: {path:?}"))?;
+    let staged = StagedFile::create(path)?;
     let mut writer = WriterBuilder::new()
         .delimiter(b'\t')
         .terminator(Terminator::Any(b'\n'))
-        .from_writer(BufWriter::new(file));
+        .from_writer(BufWriter::new(staged.writer()?));
     if rows.is_empty() {
         writer.write_record(&columns()?)?;
     }
@@ -140,7 +137,7 @@ pub fn write_metrics(path: &Path, rows: &[StratumMetrics]) -> Result<()> {
         writer.serialize(row)?;
     }
     writer.flush()?;
-    Ok(())
+    staged.persist()
 }
 
 #[cfg(test)]

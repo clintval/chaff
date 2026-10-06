@@ -43,6 +43,7 @@ noodles-bgzf = { version = "0.51", features = ["libdeflate"] }
 serde = { version = "1", features = ["derive"] }
 statrs = "0.18"
 streampile = { git = "https://github.com/clintval/streampile", rev = "c9e80f7f06178016668a84652353e2734a31ce03" }
+tempfile = "3"
 
 [dev-dependencies]
 assert_cmd = "2"
@@ -52,7 +53,6 @@ cucumber = "0.21"
 futures = "0.3"
 rstest = "0.26"
 streampile = { git = "https://github.com/clintval/streampile", rev = "c9e80f7f06178016668a84652353e2734a31ce03", features = ["testing"] }
-tempfile = "3"
 
 [[test]]
 name = "cucumber"

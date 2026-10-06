@@ -825,6 +825,25 @@ mod tests {
     }
 
     #[test]
+    fn test_an_output_written_over_its_input_holds_every_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(10, &["G", "T"], vec![gt("tumor", "0/1")]));
+        vcf.add(Variant::new(20, &["G", "T"], vec![gt("tumor", "0/1")]));
+        let path = vcf.write(&dir.path().join("calls.vcf"));
+        let options = FilterOptions {
+            filters: vec![FilterKind::EndRepairFillIn],
+            ..FilterOptions::default()
+        };
+        filter_vcf(&path, &path, &mut MoleculeTable::new(), None, &options).unwrap();
+        let (header, records) = read_records(&path);
+        assert!(header.infos().contains_key(EndRepairFillIn::INFO));
+        assert_eq!(records.len(), 2);
+        let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+    }
+
+    #[test]
     fn test_copied_damage_requires_a_reference() {
         let dir = tempfile::tempdir().unwrap();
         let input = VcfBuilder::new(&["tumor"]).write(&dir.path().join("in.vcf"));
