@@ -24,7 +24,7 @@ use serde::{Serialize, Serializer};
 use statrs::distribution::{Binomial, DiscreteCDF};
 
 /// One metrics row.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct StratumMetrics {
     /// The sample whose molecules were measured.
     pub sample: String,
@@ -114,6 +114,14 @@ impl StratumMetrics {
     }
 }
 
+/// The column names of a metrics row.
+fn columns() -> Result<csv::StringRecord> {
+    let mut row = csv::Writer::from_writer(Vec::new());
+    row.serialize(StratumMetrics::default())?;
+    let text = row.into_inner()?;
+    Ok(csv::Reader::from_reader(text.as_slice()).headers()?.clone())
+}
+
 /// Write the rows as a tab-separated file with a header.
 pub fn write_metrics(path: &Path, rows: &[StratumMetrics]) -> Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -125,26 +133,11 @@ pub fn write_metrics(path: &Path, rows: &[StratumMetrics]) -> Result<()> {
         .delimiter(b'\t')
         .terminator(Terminator::Any(b'\n'))
         .from_writer(BufWriter::new(file));
+    if rows.is_empty() {
+        writer.write_record(&columns()?)?;
+    }
     for row in rows {
         writer.serialize(row)?;
-    }
-    if rows.is_empty() {
-        writer.write_record([
-            "sample",
-            "filter",
-            "stratum",
-            "calls",
-            "filtered",
-            "artifact_fraction",
-            "expected_artifacts",
-            "alt_molecules",
-            "alt_congruent",
-            "alt_congruent_fraction",
-            "ref_molecules",
-            "ref_congruent",
-            "ref_congruent_fraction",
-            "asymmetry_p_value",
-        ])?;
     }
     writer.flush()?;
     Ok(())
@@ -241,7 +234,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("metrics.tsv");
         write_metrics(&path, &[]).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.starts_with("sample\tfilter"));
+        let empty = std::fs::read_to_string(&path).unwrap();
+        write_metrics(&path, &[row().finish()]).unwrap();
+        let full = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            empty.lines().collect::<Vec<_>>(),
+            [full.lines().next().unwrap()]
+        );
+        assert!(empty.starts_with("sample\tfilter"));
     }
 }
