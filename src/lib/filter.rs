@@ -581,7 +581,7 @@ fn score_decays(calls: &mut [Vec<Annotation>], options: &FilterOptions) -> Scale
             .filter(|a| a.kind == kind)
             .filter_map(|a| a.distances.as_ref())
             .collect();
-        if held.is_empty() && kind == FilterKind::EndRepairFillIn && options.model == Model::Fgbio {
+        if held.is_empty() {
             continue;
         }
         let scale = match distance {
