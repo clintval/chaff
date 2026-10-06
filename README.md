@@ -130,6 +130,7 @@ chaff \
 
 The distances, scale, read floors, and prior are left at their defaults.
 An option of a filter that `--filters` leaves out is a usage error, and so is `--ref` without `copied-damage`.
+A VCF that already declares an enabled filter's INFO or FILTER, from an earlier run of chaff or fgbio, is refused, so a FILTER never outlives the run that applied it; remove them first, as with `bcftools annotate -x`.
 
 ## Filters
 

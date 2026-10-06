@@ -73,6 +73,20 @@ impl FilterKind {
         }
     }
 
+    /// The IDs of every INFO field the filter writes.
+    pub fn info_ids(self) -> &'static [&'static str] {
+        match self {
+            FilterKind::CopiedDamage => &[
+                CopiedDamage::INFO_POSTERIOR,
+                CopiedDamage::INFO_RATIO,
+                CopiedDamage::INFO_ALT,
+                CopiedDamage::INFO_REF,
+            ],
+            FilterKind::ATailing => &[ATailing::INFO],
+            FilterKind::EndRepairFillIn => &[EndRepairFillIn::INFO],
+        }
+    }
+
     /// Whether the filter scores a genotype.
     pub fn applies_to(self, gt: &Genotype) -> bool {
         match self {
@@ -329,6 +343,31 @@ pub fn resolve_sample(header: &vcf::Header, sample: Option<&str>) -> Result<(usi
     }
 }
 
+/// Refuse a header that already declares an INFO or FILTER of an enabled
+/// filter, from an earlier run of chaff or fgbio, whose values would otherwise
+/// sit under this run's descriptions.
+fn refuse_earlier_annotations(header: &vcf::Header, options: &FilterOptions) -> Result<()> {
+    let mut found = Vec::new();
+    for kind in options.filters.iter() {
+        for id in kind.info_ids() {
+            if header.infos().contains_key(*id) {
+                found.push(format!("INFO/{id}"));
+            }
+        }
+        if header.filters().contains_key(kind.filter_id()) {
+            found.push(format!("FILTER/{}", kind.filter_id()));
+        }
+    }
+    if !found.is_empty() {
+        bail!(
+            "the input VCF/BCF already has {}, from an earlier run; remove them first, e.g. with bcftools annotate -x {}",
+            found.join(", ").replace('/', " "),
+            found.join(",")
+        );
+    }
+    Ok(())
+}
+
 /// Rejects records that step backwards in coordinate order.
 struct CoordinateOrder {
     ranks: HashMap<String, usize>,
@@ -576,6 +615,7 @@ pub fn filter_vcf(
         .read_header()
         .context("failed to read the VCF/BCF header")?;
     let (sample_index, sample) = resolve_sample(&header, options.sample.as_deref())?;
+    refuse_earlier_annotations(&header, options)?;
     let mut order = CoordinateOrder::new(&header);
     let mut cache = None;
     let mut calls: Vec<Vec<Annotation>> = Vec::new();
@@ -1018,6 +1058,35 @@ mod tests {
         let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
         let p = rows[0].asymmetry_p_value.unwrap();
         assert!((p - 1.0 / 52.0).abs() < 1e-12, "{p}");
+    }
+
+    /// A second run on a first run's output would keep the first run's FILTERs
+    /// under the second run's header lines, so chaff refuses a VCF that already
+    /// declares an INFO or FILTER of a filter it is asked to run.
+    #[test]
+    fn test_a_vcf_annotated_by_a_filter_is_refused_by_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(10, &["G", "T"], vec![gt("tumor", "0/1")]));
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let first = dir.path().join("first.vcf");
+        let second = dir.path().join("second.vcf");
+        let a_tailing = FilterOptions {
+            filters: vec![FilterKind::ATailing],
+            ..FilterOptions::default()
+        };
+        let mut table = MoleculeTable::new();
+        filter_vcf(&input, &first, &mut table, None, &a_tailing).unwrap();
+        let error = filter_vcf(&first, &second, &mut table, None, &a_tailing).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("INFO ATAP"), "{message}");
+        assert!(message.contains("FILTER ATailingArtifact"), "{message}");
+        assert!(!second.exists());
+        let end_repair = FilterOptions {
+            filters: vec![FilterKind::EndRepairFillIn],
+            ..FilterOptions::default()
+        };
+        filter_vcf(&first, &second, &mut table, None, &end_repair).unwrap();
     }
 
     #[test]
