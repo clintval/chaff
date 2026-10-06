@@ -6,6 +6,9 @@ use noodles::vcf::variant::RecordBuf;
 /// The no-call allele.
 pub const NO_CALL: &str = ".";
 
+/// The allele of a deletion that spans the site, as a VCF writes it.
+pub const SPANNING_DELETION: &str = "*";
+
 /// One sample's genotype as fgbio models it: the record's alleles (reference
 /// first) and the sample's called alleles, `.` for a no-call.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,12 +53,13 @@ impl Genotype {
         &self.alleles[0]
     }
 
-    /// The called alleles, without no-calls.
+    /// The called alleles, without no-calls or spanning deletions, as fgbio's
+    /// `calledAlleles`.
     pub fn called(&self) -> impl Iterator<Item = &str> {
         self.calls
             .iter()
             .map(String::as_str)
-            .filter(|c| *c != NO_CALL)
+            .filter(|c| *c != NO_CALL && *c != SPANNING_DELETION)
     }
 
     /// At least two called alleles differ.
@@ -100,6 +104,9 @@ mod tests {
         assert!(!Genotype::new(&["A", "T"], &["T", "T"]).is_het());
         assert!(!Genotype::new(&["A", "T"], &[".", "T"]).is_het());
         assert!(!Genotype::new(&["A", "T"], &[".", "."]).is_het());
+        assert!(!Genotype::new(&["A", "T", "*"], &["A", "*"]).is_het());
+        assert!(!Genotype::new(&["A", "T", "*"], &["T", "*"]).is_het());
+        assert!(Genotype::new(&["A", "T", "*"], &["A", "T", "*"]).is_het());
         assert!(Genotype::new(&["A", "C", "T"], &["C", "T"]).is_het_non_ref());
         assert!(!Genotype::new(&["A", "C"], &["A", "C"]).is_het_non_ref());
     }

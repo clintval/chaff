@@ -568,3 +568,38 @@ fn test_a_read_without_a_mate_cigar_fails_the_run_naming_it() {
     assert!(stderr.contains("chr1:100"), "{stderr}");
     assert!(stderr.contains("read q1 has no MC tag"), "{stderr}");
 }
+
+/// A spanning deletion `*` is no called allele, so `0/2` and `1/2` over
+/// `A,*` are not heterozygous, and a `1/2` of two SNVs is scored by its first
+/// alternate allele, under end repair fill-in only. The values are fgbio
+/// 4.1.1's on the same reads.
+#[test]
+fn test_spanning_deletions_and_two_alternate_alleles_as_fgbio_calls_them() {
+    let dir = TempDir::new().unwrap();
+    let mut vcf = VcfBuilder::new(&["tumor"]);
+    for (pos, alleles, call) in [
+        (100, ["C", "A", "*"], "0/2"),
+        (200, ["G", "A", "*"], "1/2"),
+        (400, ["A", "T", "C"], "1/2"),
+        (500, ["C", "T", "G"], "1/2"),
+    ] {
+        vcf.add(Variant::new(pos, &alleles, vec![gt("tumor", call)]));
+    }
+    let input = vcf.write(&dir.path().join("alleles.vcf"));
+    let options = FilterOptions {
+        end_repair_fill_in_threshold: Some(0.001),
+        ..options(None, PriorMode::Fgbio)
+    };
+    let records = run(&dir, &input, &tumor_bam(), options).unwrap();
+    let erfap: Vec<Option<f32>> = records
+        .iter()
+        .map(|r| float(r, EndRepairFillIn::INFO))
+        .collect();
+    assert_eq!(erfap, vec![None, None, Some(1.239e-5), Some(6.664e-5)]);
+    assert!(records.iter().all(|r| float(r, ATailing::INFO).is_none()));
+    let filtered: Vec<bool> = records
+        .iter()
+        .map(|r| has_filter(r, EndRepairFillIn::FILTER))
+        .collect();
+    assert_eq!(filtered, vec![false, false, true, true]);
+}
