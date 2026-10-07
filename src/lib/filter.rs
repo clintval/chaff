@@ -204,8 +204,8 @@ impl FilterOptions {
     }
 
     /// Add the INFO and FILTER lines of every enabled filter to a header, with
-    /// the distances the filters scored with and whether copied damage used
-    /// the library's chance model.
+    /// the distances the filters scored with and whether any copied-damage
+    /// call took its prior from the library's chance model.
     pub fn add_header_lines(&self, header: &mut vcf::Header, scales: &Scales, chance: bool) {
         let prior = self.prior_text();
         let copied_prior = if chance {
@@ -700,11 +700,13 @@ fn score_decays(calls: &mut [Vec<Annotation>], options: &FilterOptions) -> Scale
     scales
 }
 
-/// The learned artifact fractions of each filter and each of its strata.
+/// The learned artifact fractions of each filter and each of its strata,
+/// and the calls whose prior came from a library's chance model.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Fractions {
     filters: BTreeMap<FilterKind, f64>,
     strata: BTreeMap<Stratum, f64>,
+    chance_calls: usize,
 }
 
 /// Learn the priors and fill in every annotation's posterior, returning the
@@ -743,7 +745,11 @@ fn assign_posteriors(
             (key, learn_artifact_fraction(&llrs, prior))
         })
         .collect();
-    let fractions = Fractions { filters, strata };
+    let mut fractions = Fractions {
+        filters,
+        strata,
+        chance_calls: 0,
+    };
     for annotation in calls.iter_mut().flatten() {
         let Some(llr) = annotation.score.log_likelihood_ratio else {
             continue;
@@ -756,6 +762,7 @@ fn assign_posteriors(
             .filter(|_| changes >= MIN_CHANCE_CHANGES);
         let artifact_prior = match (model, chance) {
             (Model::Chaff, Some(chance)) => {
+                fractions.chance_calls += 1;
                 let (expected, observed) = chance.at(changes);
                 let pooled = chance_prior(expected, observed, learned);
                 let (expected, observed) = chance.at_depth(annotation.depth, changes);
@@ -921,7 +928,6 @@ pub fn filter_vcf_report(
     } else {
         None
     };
-    let chance = library.is_some();
     let chances: BTreeMap<String, Chance> = library
         .iter()
         .flat_map(|library| &library.strata)
@@ -929,9 +935,15 @@ pub fn filter_vcf_report(
         .collect();
     log_chance(&chances);
     let fractions = assign_posteriors(&mut calls, options.model, &chances);
+    if library.is_some() {
+        info!(
+            "{} took a copied-damage prior from the library's chance model",
+            plural(fractions.chance_calls, "call")
+        );
+    }
 
     let mut out_header = header.clone();
-    options.add_header_lines(&mut out_header, &scales, chance);
+    options.add_header_lines(&mut out_header, &scales, fractions.chance_calls > 0);
     let mut writer = VariantWriter::create(output)?;
     writer.write_header(&out_header)?;
     let mut reader = VariantReader::open(input)?;
@@ -1978,8 +1990,9 @@ mod tests {
         let mut other = profile([607, 303, 76, 14]);
         let stratum = other.strata.remove("C>T:CpG").unwrap();
         other.strata.insert("G>T:CpG".to_string(), stratum);
-        let (unprofiled, unprofiled_real, _) = run(Some(other));
+        let (unprofiled, unprofiled_real, unprofiled_text) = run(Some(other));
         assert_eq!(unprofiled.chance_fraction, None);
+        assert_eq!(unprofiled_text, learned_text);
         assert!((unprofiled_real - learned_real).abs() < 1e-6);
     }
 
