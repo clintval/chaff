@@ -16,8 +16,9 @@
 //! - **Single-strand changes:** one strand holds the reference base and the
 //!   other the class's damaged base, read by at least [`MIN_STRAND_READS`] raw
 //!   reads. These are lesions polymerase never copied.
-//! - **Duplex changes:** the consensus base, at the base quality floor, is the
-//!   damaged base. These are copied lesions and real mutations alike.
+//! - **Duplex changes:** the consensus base, at the base quality floor, and
+//!   both strands' bases are the damaged base. These are copied lesions and
+//!   real mutations alike.
 //!
 //! Their rates per molecule, and the conversion ratio of the duplex rate to the
 //! single-strand rate, describe the library's damage; the rates leave out
@@ -831,7 +832,7 @@ impl<'a> Scanner<'a> {
         if let (Some(seq), Some(&quality)) = (seq, qualities.get(query)) {
             if let (Some(i), true) = (index(seq), quality >= min_quality) {
                 site.molecules += 1;
-                if seq != reference {
+                if seq != reference && a == Some(seq) && b == Some(seq) {
                     site.changes[i] += 1;
                 }
             }
@@ -1082,6 +1083,21 @@ mod tests {
         assert_eq!(cpg.conversion_ratio(), None);
         let oxidation = profile.stratum("G>T:CpG").unwrap();
         assert_eq!((oxidation.molecules, oxidation.changes), (100, 0));
+    }
+
+    /// A consensus base that only one strand carries is no duplex change,
+    /// even at the quality floor, but a single-strand one.
+    #[test]
+    fn test_a_duplex_change_needs_both_strands() {
+        let mut reads = SamBuilder::new().read_length(40);
+        reads.add_frag(frag(&[(2, b'T', 30, b'T', b'C', 3)], Strand::Plus));
+        reads.add_frag(frag(&[(10, b'T', 30, b'T', b'T', 3)], Strand::Plus));
+        let profile = profile(&reads).unwrap();
+        let cpg = profile.stratum("C>T:CpG").unwrap();
+        assert_eq!(
+            (cpg.molecules, cpg.changes, cpg.single_strand_changes),
+            (20, 1, 1)
+        );
     }
 
     #[test]
