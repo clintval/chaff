@@ -730,9 +730,9 @@ struct Fractions {
 /// learned artifact fractions. Under the `chaff` model, copied damage with
 /// at least [`MIN_CHANCE_CHANGES`] alternate molecules takes each call's
 /// prior from its stratum's chance model in `chances`, unless `prior` asks
-/// for the learned one: the share chance explains at the call's depth, shrunk
-/// toward the share over every depth, itself shrunk toward the stratum's
-/// learned fraction.
+/// for the learned one: the share chance explains at the call's depth,
+/// shrunk toward the share over every depth, itself shrunk toward the
+/// stratum's learned fraction.
 fn assign_posteriors(
     calls: &mut [Vec<Annotation>],
     model: Model,
@@ -778,8 +778,9 @@ fn assign_posteriors(
         let chance = chances
             .get(&annotation.stratum)
             .filter(|_| model == Model::Chaff && annotation.kind == FilterKind::CopiedDamage);
+        let beyond_chance = changes < MIN_CHANCE_CHANGES;
         annotation.chance_prior = chance.map(|chance| {
-            if changes < MIN_CHANCE_CHANGES {
+            if beyond_chance {
                 return learned;
             }
             let (expected, observed) = chance.at(changes);
@@ -789,9 +790,7 @@ fn assign_posteriors(
         });
         let artifact_prior = match (model, prior, annotation.chance_prior) {
             (Model::Fgbio, _, _) => annotation.fgbio_prior,
-            (Model::Chaff, CopiedDamagePrior::Chance, Some(chance))
-                if changes >= MIN_CHANCE_CHANGES =>
-            {
+            (Model::Chaff, CopiedDamagePrior::Chance, Some(chance)) if !beyond_chance => {
                 fractions.chance_calls += 1;
                 chance
             }

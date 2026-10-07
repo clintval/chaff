@@ -52,8 +52,9 @@
 //! bin, for some `k` of two or more, by more than [`FIT_TOLERANCE`] standard
 //! deviations of a Poisson count, the model raises `a` toward a Poisson's
 //! until it no longer does, and reports what still exceeds `S(k)` as its
-//! misfit. Positions whose changes are at least 2 and 20% of their molecules
-//! are germline and count toward neither model.
+//! misfit. Deep counts are sparse, so from [`MAX_CHANGES`] on a count takes
+//! the positions with it or more. Positions whose changes are at least 2 and
+//! 20% of their molecules are germline and count toward neither model.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::File;
@@ -77,8 +78,10 @@ use crate::reference::Reference;
 /// toward single-strand changes, so a single read's error does not.
 pub const MIN_STRAND_READS: i64 = 2;
 
-/// The most changes at a position the chance model tells apart; positions
-/// with more pool with it.
+/// The changes from which the chance model takes positions with a count or
+/// more rather than that count alone, as deep counts are sparse: a call
+/// with this many or more takes the share of positions with as many or
+/// more, and the fit checks positions with this many or more together.
 pub const MAX_CHANGES: u32 = 8;
 
 /// The fewest changes at a position the chance model gives a call's prior
@@ -214,24 +217,26 @@ impl StratumProfile {
         let rate = matched_rate(&depths, ones, dispersion);
         let mut bins: BTreeMap<u32, Tally> = BTreeMap::new();
         for (&(n, k), &count) in &self.positions {
-            bins.entry(depth_bin(n)).or_default().observed[k.min(MAX_CHANGES) as usize] += count;
+            bins.entry(depth_bin(n)).or_default().observe(k, count);
         }
         for (n, count) in depths {
-            let expected = &mut bins.entry(depth_bin(n)).or_default().expected;
+            let tally = bins.entry(depth_bin(n)).or_default();
             let mean = f64::from(n) * rate;
             for (k, p) in (0..).zip(probabilities(mean, dispersion)) {
                 if germline(k, n) || (k >= MAX_CHANGES && f64::from(k) > mean && p < 1e-16) {
                     break;
                 }
-                expected[k.min(MAX_CHANGES) as usize] += count * p;
+                tally.expect(k, count * p);
             }
         }
         let mut pooled = Tally::default();
         let (mut beyond, mut seen) = (0.0, 0);
         for tally in bins.values() {
-            for k in 0..=MAX_CHANGES as usize {
-                pooled.expected[k] += tally.expected[k];
-                pooled.observed[k] += tally.observed[k];
+            for (k, &expected) in (0..).zip(&tally.expected) {
+                pooled.expect(k, expected);
+            }
+            for (k, &observed) in (0..).zip(&tally.observed) {
+                pooled.observe(k, observed);
             }
             let (excess, observed) = tally.excess();
             beyond += excess;
@@ -254,9 +259,9 @@ pub fn depth_bin(molecules: u32) -> u32 {
     molecules.max(1).ilog2()
 }
 
-/// Whether `changes` of a position's `molecules` make it germline: at least
-/// 2 and [`GERMLINE_FRACTION`] of them.
-fn germline(changes: u32, molecules: u32) -> bool {
+/// Whether `changes` of a position's or call's `molecules` make it
+/// germline: at least 2 and 20% of them.
+pub fn germline(changes: u32, molecules: u32) -> bool {
     changes >= 2 && f64::from(changes) / f64::from(molecules.max(1)) >= GERMLINE_FRACTION
 }
 
@@ -302,43 +307,66 @@ fn depths(positions: &Positions) -> BTreeMap<u32, f64> {
 }
 
 /// The positions chance expects, `E(k)`, and those observed, `S(k)`, with
-/// each count of changes `k` from 0 to [`MAX_CHANGES`], the last pooling
-/// deeper ones.
+/// each count of changes `k`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Tally {
-    /// `E(k)`.
-    pub expected: [f64; MAX_CHANGES as usize + 1],
-    /// `S(k)`.
-    pub observed: [u64; MAX_CHANGES as usize + 1],
+    /// `E(k)`, from `k` of 0.
+    pub expected: Vec<f64>,
+    /// `S(k)`, from `k` of 0.
+    pub observed: Vec<u64>,
 }
 
 impl Tally {
-    /// The expected and observed positions with `changes` changes.
+    fn expect(&mut self, changes: u32, positions: f64) {
+        let k = changes as usize;
+        if self.expected.len() <= k {
+            self.expected.resize(k + 1, 0.0);
+        }
+        self.expected[k] += positions;
+    }
+
+    fn observe(&mut self, changes: u32, positions: u64) {
+        let k = changes as usize;
+        if self.observed.len() <= k {
+            self.observed.resize(k + 1, 0);
+        }
+        self.observed[k] += positions;
+    }
+
+    /// The expected and observed positions with `changes` changes, or with
+    /// at least as many from [`MAX_CHANGES`] on.
     pub fn at(&self, changes: u32) -> (f64, u64) {
-        let k = changes.min(MAX_CHANGES) as usize;
-        (self.expected[k], self.observed[k])
+        let k = changes as usize;
+        if changes < MAX_CHANGES {
+            let expected = self.expected.get(k).copied().unwrap_or(0.0);
+            return (expected, self.observed.get(k).copied().unwrap_or(0));
+        }
+        let expected = self.expected.iter().skip(k).sum();
+        (expected, self.observed.iter().skip(k).sum())
+    }
+
+    /// The counts of changes the fit checks: each from 2 below
+    /// [`MAX_CHANGES`], and those from it on together.
+    fn checked(&self) -> impl Iterator<Item = (f64, u64)> + '_ {
+        (MIN_CHANCE_CHANGES..=MAX_CHANGES).map(|k| self.at(k))
     }
 
     /// The positions with two or more changes that chance expects beyond
-    /// those observed, and those observed.
+    /// those observed and [`FIT_TOLERANCE`] standard deviations of a Poisson
+    /// count, and those observed.
     fn excess(&self) -> (f64, u64) {
-        (MIN_CHANCE_CHANGES..=MAX_CHANGES).map(|k| self.at(k)).fold(
-            (0.0, 0),
-            |(beyond, seen), (expected, observed)| {
-                (
-                    beyond + (expected - observed as f64).max(0.0),
-                    seen + observed,
-                )
-            },
-        )
+        self.checked()
+            .fold((0.0, 0), |(beyond, seen), (expected, observed)| {
+                let allowed = observed as f64 + FIT_TOLERANCE * expected.sqrt();
+                (beyond + (expected - allowed).max(0.0), seen + observed)
+            })
     }
 
     /// Whether chance expects no more positions with any count of two or
     /// more than were observed, within [`FIT_TOLERANCE`] standard deviations
     /// of a Poisson count.
     fn fits(&self) -> bool {
-        (MIN_CHANCE_CHANGES..=MAX_CHANGES).all(|k| {
-            let (expected, observed) = self.at(k);
+        self.checked().all(|(expected, observed)| {
             expected <= observed as f64 + FIT_TOLERANCE * expected.sqrt()
         })
     }
@@ -361,20 +389,22 @@ pub struct Chance {
     /// The positions of each [`depth_bin`].
     pub bins: BTreeMap<u32, Tally>,
     /// The positions with two or more changes that chance expects beyond
-    /// those observed at their depths, as a share of those observed, or of
-    /// one when none are: zero when the model fits.
+    /// those observed at their depths and their noise, [`FIT_TOLERANCE`]
+    /// standard deviations of a Poisson count, as a share of those observed,
+    /// or of one when none are: zero when the model fits.
     pub excess: f64,
 }
 
 impl Chance {
     /// The expected and observed positions with `changes` changes over every
-    /// depth.
+    /// depth, or with at least as many from [`MAX_CHANGES`] on.
     pub fn at(&self, changes: u32) -> (f64, u64) {
         self.pooled.at(changes)
     }
 
     /// The expected and observed positions with `changes` changes in the
-    /// depth bin of `molecules`.
+    /// depth bin of `molecules`, or with at least as many from
+    /// [`MAX_CHANGES`] on.
     pub fn at_depth(&self, molecules: u32, changes: u32) -> (f64, u64) {
         self.bins
             .get(&depth_bin(molecules))
@@ -1383,8 +1413,9 @@ mod tests {
         assert!((chance.at(1).0 - 90.0).abs() < 1e-6);
         assert!((chance.at(2).0 - 1000.0 * mean * mean / 2.0 * (-mean).exp()).abs() < 1e-6);
         assert_eq!(chance.at(2).1, 8);
-        assert_eq!(chance.at(12), chance.at(MAX_CHANGES));
         assert_eq!(chance.at(MAX_CHANGES).1, 2);
+        assert_eq!(chance.at(9).1, 2);
+        assert_eq!(chance.at(10).1, 0);
         assert!(chance.at(MAX_CHANGES).0 < 1e-6);
         assert_eq!(StratumProfile::default().chance().rate, 0.0);
     }
@@ -1466,6 +1497,30 @@ mod tests {
         assert!(chance.at_depth(20, 2).0 > 1.0, "{chance:?}");
         assert!(chance.at_depth(20, 3).0 > 0.01, "{chance:?}");
         assert_eq!(chance.at_depth(20, 4).0, 0.0);
+    }
+
+    /// From [`MAX_CHANGES`] on, a count takes the positions with it or more,
+    /// so a call with 40 changes, far beyond chance, finds only the clonal
+    /// positions with as many.
+    #[test]
+    fn test_deep_counts_take_the_positions_with_as_many_or_more() {
+        let tally = Tally {
+            expected: vec![
+                90.0, 9.0, 1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.25, 0.125,
+            ],
+            observed: vec![90, 9, 2, 1, 0, 0, 0, 0, 3, 1, 0, 0, 2],
+        };
+        assert_eq!(tally.at(2), (1.0, 2));
+        assert_eq!(tally.at(7), (0.03125, 0));
+        assert_eq!(tally.at(8), (0.375, 6));
+        assert_eq!(tally.at(9), (0.125, 3));
+        assert_eq!(tally.at(12), (0.0, 2));
+        assert_eq!(tally.at(40), (0.0, 0));
+
+        let mut stratum = poisson_stratum(&[1000], 100_000.0, 1e-4, 0);
+        stratum.positions.insert((1000, 40), 3);
+        let (expected, observed) = stratum.chance().at_depth(1000, 40);
+        assert!(expected < 1e-12 && observed == 3, "{expected} {observed}");
     }
 
     /// Single-strand changes that vary more than the duplex changes allow

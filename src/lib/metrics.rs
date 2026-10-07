@@ -101,8 +101,9 @@ pub struct StratumMetrics {
     #[serde(serialize_with = "six_digits_or_empty")]
     pub chance_fraction: Option<f64>,
     /// The positions with two or more changes that the library's chance
-    /// model expects beyond those observed, as a share of those observed:
-    /// zero when the model fits.
+    /// model expects beyond those observed and three standard deviations of
+    /// a Poisson count, at each depth, as a share of those observed: zero
+    /// when the model fits.
     #[serde(serialize_with = "six_digits_or_empty")]
     pub chance_excess: Option<f64>,
 }
