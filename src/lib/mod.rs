@@ -73,9 +73,11 @@
 //! duplex changes of its stratum that chance explains. Over every depth it
 //! is `π_p = (min(E(k), S(k)) + k' π_s) / (S(k) + k')` with `k' = 10`
 //! pseudo-positions at the stratum's learned fraction `π_s`, and the call
-//! takes the same share within its own depth bin, shrunk toward `π_p`.
-//! Chance explains every position with one change, since its rate is
-//! matched to them, so a one-molecule call keeps `π_s`, and
+//! takes the same share within its own depth bin, shrunk toward `π_p`;
+//! from 8 alternate molecules on, the share is of positions with `k` or
+//! more. Chance explains every position with one change, since its rate is
+//! matched to them, so a one-molecule call keeps `π_s`, as does a call the
+//! profile would call germline, alternate in 20% of its molecules, and
 //! [`model::CopiedDamagePrior::Learned`] keeps `π_s` for every call.
 //!
 //! Under the `fgbio` model the prior is fgbio's per call: an artifact prior of

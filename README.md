@@ -101,7 +101,7 @@ A lesion copied from an internal nick, by nick translation or strand displacemen
 
 A duplex consensus BAM that carries each strand's single-strand consensus, the `ac`, `bc`, `ad` and `bd` tags fgbio and fgumi write, covers it.
 The tool then reads every molecule once more, counting its duplex changes and its *single-strand* changes, lesions on one strand that no polymerase copied, per damage class and context.
-Copied lesions land on a position one molecule at a time, while a real mutation in a clone puts several molecules on one position, so the prior of a call with two or more alternate molecules becomes the share of the library's positions as deep with as many changes that chance explains, unless `--copied-damage-prior learned` keeps the learned one.
+Copied lesions land on a position one molecule at a time, while a real mutation in a clone puts several molecules on one position, so the prior of a call with two or more alternate molecules becomes the share of the library's positions as deep with as many changes that chance explains, unless `--copied-damage-prior learned` keeps the learned one or the call looks germline, alternate in 20% of its molecules.
 Without those tags, the prior is learned from the calls.
 
 ### End Repair Fill-In

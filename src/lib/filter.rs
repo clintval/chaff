@@ -37,7 +37,7 @@ use crate::prior::{
 };
 use crate::read_end::{is_filtered, ATailing, Distances, EndRepairFillIn, ReferencePool, Score};
 use crate::reference::Reference;
-use crate::simplex::{profile_library, Chance, LibraryProfile, MIN_CHANCE_CHANGES};
+use crate::simplex::{germline, profile_library, Chance, LibraryProfile, MIN_CHANCE_CHANGES};
 use crate::spectrum::{channel, Spectrum};
 
 /// One of the artifact filters.
@@ -210,7 +210,7 @@ impl FilterOptions {
     pub fn add_header_lines(&self, header: &mut vcf::Header, scales: &Scales, chance: bool) {
         let prior = self.prior_text();
         let copied_prior = if chance {
-            "an artifact prior learned per sample and stratum, or, for a call with two or more alternate molecules, the share of the library's positions as deep with as many duplex changes that chance explains, shrunk toward it"
+            "an artifact prior learned per sample and stratum, or, for a call with two or more alternate molecules in under 20% of its molecules, the share of the library's positions as deep with as many duplex changes that chance explains, shrunk toward it"
         } else {
             prior
         };
@@ -728,11 +728,12 @@ struct Fractions {
 
 /// Learn the priors and fill in every annotation's posterior, returning the
 /// learned artifact fractions. Under the `chaff` model, copied damage with
-/// at least [`MIN_CHANCE_CHANGES`] alternate molecules takes each call's
-/// prior from its stratum's chance model in `chances`, unless `prior` asks
-/// for the learned one: the share chance explains at the call's depth,
-/// shrunk toward the share over every depth, itself shrunk toward the
-/// stratum's learned fraction.
+/// at least [`MIN_CHANCE_CHANGES`] alternate molecules, fewer than a
+/// germline share of its molecules, takes each call's prior from its
+/// stratum's chance model in `chances`, unless `prior` asks for the learned
+/// one: the share chance explains at the call's depth, shrunk toward the
+/// share over every depth, itself shrunk toward the stratum's learned
+/// fraction.
 fn assign_posteriors(
     calls: &mut [Vec<Annotation>],
     model: Model,
@@ -778,7 +779,7 @@ fn assign_posteriors(
         let chance = chances
             .get(&annotation.stratum)
             .filter(|_| model == Model::Chaff && annotation.kind == FilterKind::CopiedDamage);
-        let beyond_chance = changes < MIN_CHANCE_CHANGES;
+        let beyond_chance = changes < MIN_CHANCE_CHANGES || germline(changes, annotation.depth);
         annotation.chance_prior = chance.map(|chance| {
             if beyond_chance {
                 return learned;
@@ -2148,6 +2149,65 @@ mod tests {
         let (measured, known) = run(at(b'T', 50));
         assert_eq!(measured, 3);
         assert!((prior - known).abs() < 1e-3, "{prior} vs {known}");
+    }
+
+    /// A het-like call on 45 of 82 molecules, which the profile would call
+    /// germline, keeps the learned prior, and so the CDAP it has without a
+    /// profile, even in a library where chance explains nearly every position
+    /// as deep with 8 or more changes.
+    #[test]
+    fn test_a_germline_like_call_keeps_the_learned_prior() {
+        use crate::simplex::MAX_CHANGES;
+        use crate::simplex::{germline, negative_binomial, LibraryProfile, StratumProfile};
+        let dir = tempfile::tempdir().unwrap();
+        let reference = write_fasta(dir.path(), "chr1", &"ACGTTCAA".repeat(250));
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(1002, &["C", "T"], vec![gt("tumor", "0/1")]));
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let at = |base, d| Molecule::new(base, 40, d, 149 - d);
+        let mut molecules: Vec<Molecule> = (0..37).map(|i| at(b'C', i * 4)).collect();
+        molecules.extend((0..45).map(|i| at(b'T', (i * 3 + 1) % 150)));
+        let mut table = MoleculeTable::new();
+        table.insert("chr1", 1002, molecules);
+        let mut stratum = StratumProfile::default();
+        for k in (0..).take_while(|&k| !germline(k, 82)) {
+            let count = (100_000.0 * negative_binomial(k, 0.8, 0.3)).round() as u64;
+            stratum.positions.insert((82, k), count);
+            stratum.strand_positions.insert((82, k), count);
+            stratum.molecules += 82 * count;
+            stratum.changes += u64::from(k) * count;
+            stratum.strand_molecules += 82 * count;
+            stratum.single_strand_changes += u64::from(k) * count;
+        }
+        let (expected, observed) = stratum.chance().at_depth(82, MAX_CHANGES);
+        assert!(expected / observed as f64 > 0.9, "{expected} {observed}");
+        let options = FilterOptions {
+            filters: vec![FilterKind::CopiedDamage],
+            copied_damage: CopiedDamage {
+                distance: Distance::Bases(30.0),
+                ..CopiedDamage::default()
+            },
+            ..FilterOptions::default()
+        };
+        let run = |library: Option<LibraryProfile>| {
+            let mut table = table.clone();
+            if let Some(library) = library {
+                table.set_library(library);
+            }
+            let output = dir.path().join("out.vcf");
+            let mut reference = Reference::open(&reference).unwrap();
+            let rows =
+                filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
+            let (_, records) = read_records(&output);
+            let cdap = f64::from(float(&records[0], CopiedDamage::INFO_POSTERIOR).unwrap());
+            (rows[0].clone(), cdap)
+        };
+        let mut library = LibraryProfile::default();
+        library.strata.insert("C>T:CpG".to_string(), stratum);
+        let (row, cdap) = run(Some(library));
+        assert!(cdap > 0.95, "{cdap}");
+        assert_eq!(row.chance_fraction, row.artifact_fraction);
+        assert_eq!(run(None).1, cdap);
     }
 
     /// Chance explains every position with one change, since its rate is
