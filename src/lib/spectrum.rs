@@ -169,11 +169,7 @@ impl Spectrum {
             let (panel_plots, mut layout) = panel(values, title, y_label, axis);
             if named {
                 for i in cpg_c_to_t() {
-                    let label =
-                        TextAnnotation::new(context(i), i as f64 + 1.0, name_y(values, i, top))
-                            .with_color(CPG_COLOR)
-                            .with_font_size(10);
-                    layout = layout.with_annotation(label);
+                    layout = layout.with_annotation(name(values, i, top));
                 }
             }
             plots.push(panel_plots);
@@ -221,9 +217,28 @@ const STRIP_SHARE: f64 = 0.18;
 /// The height of a CpG C>T context's name, as a share of the tallest bar.
 const NAME_HEIGHT: f64 = 0.08;
 
+/// The share of the tallest bar left between a context name and the bars
+/// under it.
+const NAME_GAP: f64 = 0.03;
+
 /// The CpG C>T channels.
 fn cpg_c_to_t() -> impl Iterator<Item = usize> {
     (0..CHANNELS).filter(|&i| is_cpg_c_to_t(i))
+}
+
+/// The name of CpG C>T `channel` in a panel whose tallest bar before
+/// filtering is `top`, above its bar, with a leader down to that bar when a
+/// taller bar beside it lifts the name, so it never reads as that bar's.
+fn name(values: &[f64; CHANNELS], channel: usize, top: f64) -> TextAnnotation {
+    let (x, y) = (channel as f64 + 1.0, name_y(values, channel, top));
+    let label = TextAnnotation::new(context(channel), x, y)
+        .with_color(CPG_COLOR)
+        .with_font_size(10);
+    if y > values[channel] + top * NAME_GAP + top * 1e-9 {
+        label.with_arrow(x, values[channel]).with_arrow_padding(2.0)
+    } else {
+        label
+    }
 }
 
 /// The height of the name of `channel` in a panel whose tallest bar before
@@ -231,7 +246,7 @@ fn cpg_c_to_t() -> impl Iterator<Item = usize> {
 /// name is wider than.
 fn name_y(values: &[f64; CHANNELS], channel: usize, top: f64) -> f64 {
     let beside = channel.saturating_sub(1)..=(channel + 1).min(CHANNELS - 1);
-    values[beside].iter().copied().fold(0.0, f64::max) + top * 0.03
+    values[beside].iter().copied().fold(0.0, f64::max) + top * NAME_GAP
 }
 
 /// A panel's y axis for a height `clear` kept clear: the tick step, the base
@@ -411,8 +426,8 @@ mod tests {
     }
 
     /// A CpG C>T context's name clears its own bar and the taller bars beside
-    /// it, and, by more than its height, the class strip, even where it names
-    /// the tallest bar.
+    /// it, with a leader to its own bar when one lifts it, and, by more than
+    /// its height, the class strip, even where it names the tallest bar.
     #[test]
     fn test_a_context_name_clears_the_bars_and_the_strip() {
         let acg = 16 * 2 + 2;
@@ -420,6 +435,13 @@ mod tests {
         values[acg] = 40.0;
         values[acg + 1] = 300.0;
         assert!(name_y(&values, acg, 300.0) > 300.0);
+        let lifted = name(&values, acg, 300.0);
+        assert_eq!(
+            (lifted.target_x, lifted.target_y),
+            (Some(acg as f64 + 1.0), Some(40.0))
+        );
+        values[acg] = 500.0;
+        assert_eq!(name(&values, acg, 500.0).target_y, None);
         for top in [1, 2, 7, 47, 300, 810, 909, 12345] {
             let mut spectrum = Spectrum::new(true);
             for _ in 0..top {

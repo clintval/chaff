@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="870" height="172" viewBox="0 0 870 172" role="img" aria-labelledby="title">
-  <title id="title">How A-tailing makes an error: end repair trims a 3′ end one base too far, A-tailing adds a non-templated A where a C belongs, the UMI-bearing adapters are ligated, and only that strand reads A at the last base of its 3′ end, so the two strands disagree.</title>
+  <title id="title">How A-tailing makes an error: end repair over-digests a 3′ end by one base, A-tailing adds a non-templated A where the lost C belongs, the UMI-bearing adapters are ligated, and only that strand reads A, at the last base of its 3′ end.</title>
   <style>
     text { font-family: Helvetica, Arial, sans-serif; }
     .head { fill: #57606a; font-size: 13px; font-weight: 700; }
@@ -19,8 +19,8 @@
     }
   </style>
 
-  <text class="head" x="28" y="24">1. An over-digested end</text>
-  <text class="ink" x="28" y="42">end repair trims a base too many</text>
+  <text class="head" x="28" y="24">1. A 3′ End Loses One Base</text>
+  <text class="ink" x="28" y="42">end repair over-digests it</text>
   <text class="ink" x="28" y="160">the top strand's 3′ end is short</text>
   <rect class="read" x="36" y="81" width="136" height="23" rx="4"/>
   <rect class="read" x="36" y="107" width="151" height="23" rx="4"/>
@@ -32,7 +32,7 @@
   <text class="base" y="124" text-anchor="middle"><tspan x="44 59 74 89 104 119 134 149 164 179">GACGCTCCAG</tspan></text>
   <path class="arrow" d="M209 111 h16 m-5 -4 l5 4 l-5 4"/>
 
-  <text class="head" x="243" y="24">2. An A is added</text>
+  <text class="head" x="243" y="24">2. An A Replaces the Lost C</text>
   <text class="ink" x="243" y="42">A-tailing adds a non-templated A</text>
   <text class="ink" x="243" y="160">where a C belongs</text>
   <rect class="read" x="251" y="81" width="151" height="23" rx="4"/>
@@ -45,7 +45,7 @@
   <text class="base" y="124" text-anchor="middle"><tspan x="259 274 289 304 319 334 349 364 379 394">GACGCTCCAG</tspan></text>
   <path class="arrow" d="M424 111 h16 m-5 -4 l5 4 l-5 4"/>
 
-  <text class="head" x="458" y="24">3. Adapters are ligated</text>
+  <text class="head" x="458" y="24">3. Adapters Are Ligated</text>
   <text class="ink" x="458" y="42">each carries a UMI</text>
   <text class="ink" x="458" y="160">the A is on one strand</text>
   <rect class="umi" x="451" y="86" width="14" height="15" rx="3"/>
@@ -58,8 +58,8 @@
   <text class="base" y="124" text-anchor="middle"><tspan x="474 489 504 519 534 549 564 579 594 609">GACGCTCCAG</tspan></text>
   <path class="arrow" d="M639 111 h16 m-5 -4 l5 4 l-5 4"/>
 
-  <text class="head" x="673" y="24">4. The strands disagree</text>
-  <text class="ink" x="673" y="42">one strand reads A</text>
+  <text class="head" x="673" y="24">4. Only One Strand Reads A</text>
+  <text class="ink" x="673" y="42">the other strand reads C</text>
   <text class="ink" x="673" y="160">at the last base of its 3′ end</text>
   <rect class="read" x="681" y="81" width="151" height="23" rx="4"/>
   <rect class="read" x="681" y="107" width="151" height="23" rx="4"/>

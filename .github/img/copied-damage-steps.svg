@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="870" height="172" viewBox="0 0 870 172" role="img" aria-labelledby="title">
-  <title id="title">How copied damage makes a call: a methylated C at a CpG is deaminated to T near one strand's 5′ end, a polymerase fills in the partner's recessed 3′ end and copies the T as an A, the UMI-bearing adapters are ligated, and both strands carry the change, so the two strands agree and Duplex Sequencing calls it.</title>
+  <title id="title">How copied damage makes a call: a methylated C at a CpG is deaminated to T near one strand's 5′ end, the partner's recessed 3′ end is filled in and the T is copied as an A, the UMI-bearing adapters are ligated, and both strands read T, so Duplex Sequencing calls it.</title>
   <style>
     text { font-family: Helvetica, Arial, sans-serif; }
     .head { fill: #57606a; font-size: 13px; font-weight: 700; }
@@ -22,7 +22,7 @@
     }
   </style>
 
-  <text class="head" x="28" y="24">1. A lesion near a 5′ end</text>
+  <text class="head" x="28" y="24">1. A Lesion Near a 5′ End</text>
   <text class="ink" x="28" y="42">a methylated C is deaminated to T</text>
   <text class="ink" x="28" y="160">the partner's 3′ end is recessed</text>
   <rect class="read" x="36" y="81" width="151" height="23" rx="4"/>
@@ -38,7 +38,7 @@
   <text class="base" y="124" text-anchor="middle"><tspan x="119 134 149 164 179">TCCTA</tspan></text>
   <path class="arrow" d="M209 111 h16 m-5 -4 l5 4 l-5 4"/>
 
-  <text class="head" x="243" y="24">2. It is filled in</text>
+  <text class="head" x="243" y="24">2. The 3′ End Is Filled In</text>
   <text class="ink" x="243" y="42">a polymerase extends the 3′ end</text>
   <text class="ink" x="243" y="160">and copies the T as an A</text>
   <rect class="read" x="251" y="81" width="151" height="23" rx="4"/>
@@ -55,7 +55,7 @@
   <text class="base" y="124" text-anchor="middle"><tspan class="new" x="259 274 289">GAC</tspan><tspan class="alt" x="304">A</tspan><tspan class="new" x="319">C</tspan><tspan x="334 349 364 379 394">TCCTA</tspan></text>
   <path class="arrow" d="M424 111 h16 m-5 -4 l5 4 l-5 4"/>
 
-  <text class="head" x="458" y="24">3. Adapters are ligated</text>
+  <text class="head" x="458" y="24">3. Adapters Are Ligated</text>
   <text class="ink" x="458" y="42">each carries a UMI</text>
   <text class="ink" x="458" y="160">the change is on both strands</text>
   <rect class="umi" x="451" y="86" width="14" height="15" rx="3"/>
@@ -71,11 +71,15 @@
   <text class="base" y="124" text-anchor="middle"><tspan x="474 489 504">GAC</tspan><tspan class="alt" x="519">A</tspan><tspan x="534 549 564 579 594 609">CTCCTA</tspan></text>
   <path class="arrow" d="M639 111 h16 m-5 -4 l5 4 l-5 4"/>
 
-  <text class="head" x="673" y="24">4. The strands agree</text>
-  <text class="ink" x="673" y="42">both strands' consensus show T</text>
+  <text class="head" x="673" y="24">4. Both Strands Read T</text>
+  <text class="ink" x="673" y="42">each strand's consensus shows T</text>
   <text class="ink" x="673" y="160">so Duplex Sequencing calls it</text>
   <rect class="read" x="681" y="81" width="151" height="23" rx="4"/>
   <rect class="read" x="681" y="107" width="151" height="23" rx="4"/>
+  <text class="end" x="673" y="98" text-anchor="middle">5′</text>
+  <text class="end" x="841" y="98" text-anchor="middle">3′</text>
+  <text class="end" x="673" y="124" text-anchor="middle">5′</text>
+  <text class="end" x="841" y="124" text-anchor="middle">3′</text>
   <text class="base" y="98" text-anchor="middle"><tspan x="689 704 719">CTG</tspan><tspan class="alt" x="734">T</tspan><tspan x="749 764 779 794 809 824">GAGGAT</tspan></text>
   <text class="base" y="124" text-anchor="middle"><tspan x="689 704 719">CTG</tspan><tspan class="alt" x="734">T</tspan><tspan x="749 764 779 794 809 824">GAGGAT</tspan></text>
 </svg>
