@@ -9,10 +9,6 @@
 
 Separate somatic variant calls from library-preparation damage artifacts.
 
-The tool `chaff` scores each SNV by where its alternate molecules sit on their templates compared with the reference molecules at the same site: a real mutation's molecules sit where the reference's do, while an artifact's crowd the end of the fragment that made it.
-Each filter turns this into a likelihood ratio of artifact to real mutation, learns from all of a sample's calls how common the artifact is, its prior, and writes the posterior probability that each call is real.
-A low posterior marks a likely artifact, and a threshold filters the calls at or below it.
-
 Install with mamba, conda, or run directly with pixi:
 
 ```bash
@@ -38,7 +34,7 @@ chaff \
 ```
 
 The reference needs a `.fai` beside it.
-The calls land in `calls.chaff.vcf.gz`, each scored call with its posteriors in INFO and the likely copied damage with a FILTER, and the per-sample metrics in `tumor.chaff.tsv`:
+The calls land in `calls.chaff.vcf.gz`, each scored call annotated in INFO and the calls likely to be copied damage filtered, and the per-sample metrics in `tumor.chaff.tsv`:
 
 ```console
 gzip -dc calls.chaff.vcf.gz | grep -v '^#' | cut -f 2,4,5,7,8 | column -t
@@ -52,11 +48,12 @@ gzip -dc calls.chaff.vcf.gz | grep -v '^#' | cut -f 2,4,5,7,8 | column -t
 500  C    G  .                     .
 ```
 
-The sections below explain what each filter scores and how to choose filters and thresholds.
+The sections below explain what each filter scores, how to choose filters, and how strictly to filter.
 
 ## Outputs
 
-Each filter writes a posterior into the INFO of every call it scores, and applies its FILTER where that posterior is at or below its threshold:
+Each filter compares where a call's alternate molecules sit on their templates with where the reference molecules sit, then writes the posterior probability that the call is real, given how common the artifact is in that sample.
+A low posterior marks a likely artifact, and a threshold filters calls at or below it, through these INFO keys and FILTERs:
 
 | Name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | Stands for | Meaning |
 | --- | --- | --- |
