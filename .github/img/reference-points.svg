@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="880" height="190" viewBox="0 0 880 190" role="img" aria-labelledby="title">
-  <title id="title">One fragment with the end each artifact sits near: copied damage at the lesion strand's 5′ end, end repair fill-in at the extended strand's 3′ end, and an added A at a terminal 3′ base.</title>
+  <title id="title">One fragment with the end each artifact sits near: copied damage, a lesion marked on its base, at the lesion strand's 5′ end, end repair fill-in at the extended strand's 3′ end, and an added A at a terminal 3′ base.</title>
   <style>
     text { font-family: Helvetica, Arial, sans-serif; }
     .ink { fill: #57606a; font-size: 13px; }
@@ -11,6 +11,9 @@
     .rule { stroke: #8c8b86; stroke-width: 1; fill: none; }
     .fill { fill: #2a78d6; fill-opacity: 0.14; }
     .read { fill: #8c8b86; fill-opacity: 0.11; }
+    .lesion { fill: #e34948; }
+    .lesion-stem { stroke: #e34948; stroke-width: 1.5; }
+    .lesion-label { fill: #e34948; font-size: 10px; font-weight: 700; }
     @media (prefers-color-scheme: dark) {
       .head, .ink { fill: #9198a1; }
       .end { fill: #1baf7a; }
@@ -20,7 +23,6 @@
 
   <text class="head" x="120" y="24">Copied damage</text>
   <text class="ink" x="120" y="42">sits near the lesion strand's 5′ end</text>
-  <path class="rule" d="M165 48 V70"/>
 
   <text class="head" x="760" y="24" text-anchor="end">A-tailing</text>
   <text class="ink" x="760" y="42" text-anchor="end">adds an A at a 3′ end's last base</text>
@@ -28,6 +30,9 @@
 
   <rect class="read" x="120" y="71" width="648" height="23" rx="4"/>
   <rect class="read" x="120" y="97" width="648" height="23" rx="4"/>
+  <path class="lesion-stem" d="M165 76 V63"/>
+  <circle class="lesion" cx="165" cy="59.5" r="3.5"/>
+  <text class="lesion-label" x="172" y="62.5">U</text>
   <text class="end" x="100" y="88" text-anchor="middle">5′</text>
   <text class="base" y="88" text-anchor="middle"><tspan x="129 147">AT</tspan><tspan class="alt" x="165">T</tspan><tspan x="183 201 219 237 255 273 291 309 327 345 363 381 399 417 435 453 471 489 507 525 543 561 579 597 615 633 651 669 687 705 723 741">GACTGGTCAAGTCCATGCTAGGACTTCAGGCT</tspan><tspan class="alt" x="759">A</tspan></text>
   <text class="end" x="786" y="88" text-anchor="middle">3′</text>

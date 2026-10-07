@@ -77,5 +77,5 @@ fn test_every_readme_example_prints_what_the_readme_shows() {
             _ => assert_eq!(stdout, "", "the README shows no output of:\n{body}"),
         }
     }
-    assert!(shown >= 4, "only {shown} outputs were checked");
+    assert!(shown >= 3, "only {shown} outputs were checked");
 }

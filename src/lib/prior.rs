@@ -13,7 +13,7 @@
 //!
 //! which is the maximum a posteriori `pi` under a [`BetaPrior`] of `k`
 //! pseudo-calls at mean `m`, `Beta(k m + 1, k (1 - m) + 1)`. The objective is
-//! concave in `pi`, so the fixed point is unique, and chaff solves for it
+//! concave in `pi`, so the fixed point is unique, and `chaff` solves for it
 //! directly rather than iterating.
 //!
 //! The prior is learned twice. Each filter first learns one fraction from all

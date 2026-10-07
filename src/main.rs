@@ -234,8 +234,8 @@ struct Cli {
 
     /// Decay scale in bases from the lesion strand's 5' end, or `learned`.
     ///
-    /// The mean length a polymerase copies a lesion strand over, learned per
-    /// library under either model unless a number fixes it. Molecules within it
+    /// The mean length over which a polymerase copies a lesion strand onto its
+    /// partner, learned per library under either model unless a number fixes it. Molecules within it
     /// count as congruent in the metrics.
     #[arg(
         long,
