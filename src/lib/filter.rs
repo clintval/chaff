@@ -383,12 +383,16 @@ pub fn resolve_sample(header: &vcf::Header, sample: Option<&str>) -> Result<(usi
     match sample {
         Some(name) => match names.get_index_of(name) {
             Some(i) => Ok((i, name.to_string())),
-            None => bail!("there is no genotype with the following sample in the input VCF/BCF: {name}"),
+            None => {
+                bail!("there is no genotype with the following sample in the input VCF/BCF: {name}")
+            }
         },
         None => match names.len() {
             1 => Ok((0, names[0].clone())),
             0 => bail!("the input VCF/BCF has no samples"),
-            n => bail!("the input VCF/BCF has {n} samples, so --sample must name the one whose reads are in the BAM"),
+            n => bail!(
+                "the input VCF/BCF has {n} samples, so --sample must name the one the BAM holds"
+            ),
         },
     }
 }
@@ -664,36 +668,44 @@ fn score_decays(calls: &mut [Vec<Annotation>], options: &FilterOptions) -> Scale
         if held.is_empty() {
             continue;
         }
+        let weights = |scale: f64| -> BTreeMap<&str, f64> {
+            pools
+                .iter()
+                .filter_map(|(stratum, pool)| Some((stratum.as_str(), pool.ln_mean_weight(scale)?)))
+                .collect()
+        };
+        let ratios = |scale: f64| -> Vec<f64> {
+            let weights = weights(scale);
+            held.iter()
+                .filter_map(|(d, stratum)| {
+                    d.log_likelihood_ratio(scale, weights.get(stratum).copied())
+                })
+                .collect()
+        };
+        let teaching = ratios(fallback).len();
         let scale = match distance {
             Distance::Bases(bases) => bases,
-            Distance::Learned => learn_scale(
-                |scale| {
-                    held.iter()
-                        .filter_map(|(d, stratum)| {
-                            d.log_likelihood_ratio(scale, pools.get(*stratum))
-                        })
-                        .collect()
-                },
-                fallback,
-            ),
+            Distance::Learned => learn_scale(ratios, fallback),
         };
         match kind {
             FilterKind::CopiedDamage => scales.copied_damage = scale,
             _ => scales.end_repair_fill_in = scale,
         }
-        if distance == Distance::Learned {
+        if distance == Distance::Learned && teaching > 0 {
             match kind {
                 FilterKind::CopiedDamage => scales.copied_damage_learned = true,
                 _ => scales.end_repair_fill_in_learned = true,
             }
             info!(
                 "{kind}: learned a decay scale of {scale:.2} bp from {}",
-                plural(held.len(), "call")
+                plural(teaching, "call")
             );
         }
+        let weights = weights(scale);
         for annotation in calls.iter_mut().flatten().filter(|a| a.kind == kind) {
             if let Some(distances) = annotation.distances.take() {
-                annotation.score = distances.score(scale, pools.get(&annotation.stratum));
+                annotation.score =
+                    distances.score(scale, weights.get(annotation.stratum.as_str()).copied());
             }
         }
     }
@@ -1381,35 +1393,49 @@ mod tests {
         }
     }
 
-    /// A learned decay with no call to learn from keeps its default, and the
+    /// A learned decay with no call to learn from, either no call at all or
+    /// only calls without an alternate molecule, keeps its default, and the
     /// header says so rather than calling it learned.
     #[test]
     fn test_a_decay_without_calls_is_not_called_learned() {
         let dir = tempfile::tempdir().unwrap();
         let reference = write_fasta(dir.path(), "chr1", &"ACGTTCAA".repeat(250));
-        let input = VcfBuilder::new(&["tumor"]).write(&dir.path().join("in.vcf"));
-        let output = dir.path().join("out.vcf");
         let mut reference = Reference::open(&reference).unwrap();
-        let options = FilterOptions::default();
-        filter_vcf(
-            &input,
-            &output,
-            &mut MoleculeTable::new(),
-            Some(&mut reference),
-            &options,
-        )
-        .unwrap();
-        let (header, _) = read_records(&output);
-        for id in [CopiedDamage::INFO_POSTERIOR, EndRepairFillIn::INFO] {
-            let description = header.infos()[id].description();
-            assert!(
-                description.contains("the default without a call to learn it from"),
-                "{description}"
-            );
-            assert!(
-                !description.contains("learned from the calls"),
-                "{description}"
-            );
+        let mut unmeasured = VcfBuilder::new(&["tumor"]);
+        unmeasured.add(Variant::new(1002, &["C", "T"], vec![gt("tumor", "0/1")]));
+        let mut table = MoleculeTable::new();
+        table.insert(
+            "chr1",
+            1002,
+            (0..20).map(|d| Molecule::new(b'C', 30, d, 90)).collect(),
+        );
+        for (name, vcf) in [
+            ("empty", VcfBuilder::new(&["tumor"])),
+            ("unmeasured", unmeasured),
+        ] {
+            let input = vcf.write(&dir.path().join(format!("{name}.vcf")));
+            let output = dir.path().join(format!("{name}.out.vcf"));
+            let options = FilterOptions::default();
+            filter_vcf(
+                &input,
+                &output,
+                &mut table.clone(),
+                Some(&mut reference),
+                &options,
+            )
+            .unwrap();
+            let (header, _) = read_records(&output);
+            for id in [CopiedDamage::INFO_POSTERIOR, EndRepairFillIn::INFO] {
+                let description = header.infos()[id].description();
+                assert!(
+                    description.contains("the default without a call to learn it from"),
+                    "{name}: {description}"
+                );
+                assert!(
+                    !description.contains("learned from the calls"),
+                    "{name}: {description}"
+                );
+            }
         }
     }
 

@@ -59,7 +59,7 @@ Feature: CLI contract
   Scenario: a multi-sample VCF needs --sample
     When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --filters a-tailing`
     Then the exit code is 1
-    And stderr contains "--sample must name the one whose reads are in the BAM"
+    And stderr contains "--sample must name the one the BAM holds"
 
   Scenario: an unknown sample is an error
     When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --filters a-tailing --sample WhoDis`

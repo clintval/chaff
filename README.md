@@ -52,7 +52,7 @@ The sections below explain how damage becomes a call, what each filter scores, h
 
 ## How DNA Damage Becomes a Variant Call
 
-A *template* is one DNA fragment as its pair of reads, or of consensus, holds it, counted as one *molecule*, and its *template ends* are its outermost bases, the 5′ ends of its two strands.
+A *template* is one DNA fragment as its two mates, reads or consensus, hold it, counted as one *molecule*, and its *template ends* are its outermost bases, the 5′ ends of its two strands.
 A *lesion* is a damaged base on one strand that a polymerase copies as another base:
 
 - **5-methylcytosine deaminates to thymine**, so a methylated CpG reads C>T.
@@ -80,6 +80,8 @@ Copied damage scores the SNVs in its damage classes on either strand: C>T covers
 A-tailing scores those whose alternate base is A or T, and end repair fill-in all of them.
 
 ### Copied Damage
+
+![Copied damage makes a call: a methylated C at a CpG is deaminated to T near one strand's 5′ end, a polymerase fills in the partner's recessed 3′ end and copies the T as an A, the UMI-bearing adapters are ligated, and both strands carry the change, so they agree and Duplex Sequencing calls it.](.github/img/copied-damage-steps.svg)
 
 Copied damage carries its change on both strands, so the duplex consensus agrees on it, which makes this the filter for Duplex Sequencing.
 Fragmenting with a restriction enzyme that leaves blunt ends, as NanoSeq does [[3]](#references), or repairing lesions before end repair, as Duplex-Repair does [[4]](#references), keeps lesions from being copied.
@@ -233,7 +235,8 @@ The call at position 100 is filtered as copied damage and end repair fill-in.
 The calls at positions 400 and 500 pass: their alternate molecules sit at the 5′ end of the strand each template was copied from, where end repair adds no bases, and 2 of the A>T's 5 alternate molecules sit where A-tailing cannot put them.
 The deletion at position 300 is not scored.
 
-To check a threshold, append germline heterozygous calls from the same BAM, down-sampled to the 2 to 10 alternate molecules of your somatic calls and marked by their record ID, to the somatic VCF and run once: they share the somatic calls' prior and are real, so the share of them filtered estimates how often real somatic calls are.
+To check a threshold, run `chaff` a second time on the somatic VCF merged with a few germline heterozygous SNVs of the same sample, in sorted order as by `bcftools concat -a` and marked by their ID, far fewer than the somatic calls so they barely move the learned prior.
+Germline calls are real, so the share of those with 2 to 10 alternate molecules that this run filters estimates how often real somatic calls are filtered in the run without them.
 Where a matched normal or a replicate library exists, the somatic calls it shares are a second check.
 
 On the simulated sample of the copied damage section, a threshold of 0.05 filters 821 of the 2,000 copied-damage calls and 9 of the 1,065 real C>T at CpG, and none of the 4,935 calls in other channels: 73% of the copied damage with 10 alternate molecules, 50% with 5, 34% with 3, and only 6% with 2.

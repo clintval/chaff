@@ -116,11 +116,9 @@ impl Spectrum {
         }
     }
 
-    /// The figure: a panel of 96 bars per view, stacked on one axis, each
-    /// under a strip of the class colours, with the CpG C>T contexts named
-    /// after filtering.
-    fn figure(&self, sample: &str) -> Figure {
-        let top = self.before.iter().copied().fold(1.0, f64::max);
+    /// The views a figure draws: each one's values, title, and y label, and
+    /// whether it names the CpG C>T contexts, as the views after filtering do.
+    fn views(&self) -> Vec<(&[f64; CHANNELS], &'static str, &'static str, bool)> {
         let mut views = vec![
             (
                 &self.before,
@@ -143,13 +141,36 @@ impl Spectrum {
                 true,
             ));
         }
+        views
+    }
+
+    /// The tallest bar before filtering, and the height every panel keeps
+    /// clear below its class strip: that bar's, or a CpG C>T name's top.
+    fn heights(&self) -> (f64, f64) {
+        let top = self.before.iter().copied().fold(1.0, f64::max);
+        let clear = self
+            .views()
+            .into_iter()
+            .filter(|view| view.3)
+            .flat_map(|view| cpg_c_to_t().map(move |i| name_y(view.0, i, top)))
+            .map(|y| y + NAME_HEIGHT * top)
+            .fold(top, f64::max);
+        (top, clear)
+    }
+
+    /// The figure: a panel of 96 bars per view, stacked on one axis, each
+    /// under a strip of the class colours, with the CpG C>T contexts named
+    /// after filtering.
+    fn figure(&self, sample: &str) -> Figure {
+        let (top, clear) = self.heights();
+        let axis = axis(clear);
         let (mut plots, mut layouts) = (Vec::new(), Vec::new());
-        for (values, title, y_label, named) in views {
-            let (panel_plots, mut layout) = panel(values, title, y_label, top);
+        for (values, title, y_label, named) in self.views() {
+            let (panel_plots, mut layout) = panel(values, title, y_label, axis);
             if named {
-                for i in (0..CHANNELS).filter(|&i| is_cpg_c_to_t(i)) {
+                for i in cpg_c_to_t() {
                     let label =
-                        TextAnnotation::new(context(i), i as f64 + 1.0, values[i] + top * 0.03)
+                        TextAnnotation::new(context(i), i as f64 + 1.0, name_y(values, i, top))
                             .with_color(CPG_COLOR)
                             .with_font_size(10);
                     layout = layout.with_annotation(label);
@@ -193,35 +214,61 @@ fn title(sample: &str) -> String {
     format!("Trinucleotide Spectrum of {sample}")
 }
 
-/// The share of a panel's axis above its last tick that holds the class
-/// strip and names.
-const STRIP_SHARE: f64 = 0.24;
+/// The share of a panel's axis above its bars that holds the class strip and
+/// names.
+const STRIP_SHARE: f64 = 0.18;
 
-/// A panel's y axis for bars up to `top`: the tick step, the last tick at or
-/// above `top`, and the axis maximum. The step is the smallest round one,
-/// from a fifth of `top` up, whose next tick lies past the maximum, so the
-/// band above the last tick, [`STRIP_SHARE`] of the axis, holds no tick.
-fn axis(top: f64) -> (f64, f64, f64) {
-    let magnitude = 10f64.powf((top / 5.0).log10().floor());
-    let steps = (0..4).flat_map(|e| [1.0, 2.0, 2.5, 5.0].map(|m| m * magnitude * 10f64.powi(e)));
-    for step in steps.filter(|s| *s >= top / 5.0) {
-        let ceiling = (top / step).ceil() * step;
-        let max = ceiling / (1.0 - STRIP_SHARE);
-        if max - ceiling < step {
-            return (step, ceiling, max);
-        }
-    }
-    (top, top, top / (1.0 - STRIP_SHARE))
+/// The height of a CpG C>T context's name, as a share of the tallest bar.
+const NAME_HEIGHT: f64 = 0.08;
+
+/// The CpG C>T channels.
+fn cpg_c_to_t() -> impl Iterator<Item = usize> {
+    (0..CHANNELS).filter(|&i| is_cpg_c_to_t(i))
 }
 
-/// One panel: a bar per channel in its class's colour, under the class names
-/// and a strip of their colours. The axis ticks stop at the first tick at or
-/// above `top`, the tallest bar before filtering, and the strip and names sit
-/// between it and the next tick, which the axis never reaches, with room above
-/// the names. The strip is a stacked bar per channel on an unpainted base.
-fn panel(values: &[f64; CHANNELS], title: &str, y_label: &str, top: f64) -> (Vec<Plot>, Layout) {
-    let (step, ceiling, max) = axis(top);
-    let band = max - ceiling;
+/// The height of the name of `channel` in a panel whose tallest bar before
+/// filtering is `top`: above its own bar and the bars beside it, which the
+/// name is wider than.
+fn name_y(values: &[f64; CHANNELS], channel: usize, top: f64) -> f64 {
+    let beside = channel.saturating_sub(1)..=(channel + 1).min(CHANNELS - 1);
+    values[beside].iter().copied().fold(0.0, f64::max) + top * 0.03
+}
+
+/// A panel's y axis for a height `clear` kept clear: the tick step, the base
+/// of the band that holds the class strip and names, and the axis maximum,
+/// with the band [`STRIP_SHARE`] of the axis. The step is a round one from a
+/// fifth of `clear` up, with at least two ticks up to the base and none in
+/// the band. The band starts at `clear` when the next tick lies past the
+/// maximum, or else at the first tick above `clear`, and of these axes the
+/// one with the lowest maximum is kept, so the bars fill the most of it.
+fn axis(clear: f64) -> (f64, f64, f64) {
+    let magnitude = 10f64.powf((clear / 5.0).log10().floor());
+    let steps = (0..4).flat_map(|e| [1.0, 2.0, 2.5, 5.0].map(|m| m * magnitude * 10f64.powi(e)));
+    let mut best: Option<(f64, f64, f64)> = None;
+    for step in steps.filter(|s| *s >= clear / 5.0) {
+        let below = (clear / step + 1e-9).floor();
+        let ceiling = (clear / step - 1e-9).ceil();
+        for (base, ticks) in [(clear, below), (ceiling * step, ceiling)] {
+            let max = base / (1.0 - STRIP_SHARE);
+            if ticks >= 2.0 && (ticks + 1.0) * step > max && best.is_none_or(|b| max < b.2) {
+                best = Some((step, base, max));
+            }
+        }
+    }
+    best.unwrap_or((clear, clear, clear / (1.0 - STRIP_SHARE)))
+}
+
+/// One panel on `axis`: a bar per channel in its class's colour, under the
+/// class names and a strip of their colours, which sit in the band from the
+/// axis's base to its maximum, where no tick reaches. The strip is a stacked
+/// bar per channel on an unpainted base.
+fn panel(
+    values: &[f64; CHANNELS],
+    title: &str,
+    y_label: &str,
+    (step, base, max): (f64, f64, f64),
+) -> (Vec<Plot>, Layout) {
+    let band = max - base;
     let mut bars = BarPlot::new();
     let mut strip = BarPlot::new().with_width(1.03).with_stacked();
     for (i, value) in values.iter().enumerate() {
@@ -229,7 +276,7 @@ fn panel(values: &[f64; CHANNELS], title: &str, y_label: &str, top: f64) -> (Vec
         bars = bars.with_colored_bar(context(i), *value, color);
         strip = strip.with_group(
             context(i),
-            [(ceiling + band * 0.12, "none"), (band * 0.15, color)],
+            [(base + band * 0.15, "none"), (band * 0.18, color)],
         );
     }
     let plots = vec![Plot::Bar(strip), Plot::Bar(bars)];
@@ -243,7 +290,7 @@ fn panel(values: &[f64; CHANNELS], title: &str, y_label: &str, top: f64) -> (Vec
         .with_x_tick_rotate(90.0)
         .with_tick_size(8);
     for (class, name) in CLASSES.iter().enumerate() {
-        let label = TextAnnotation::new(*name, 16.0 * class as f64 + 8.5, ceiling + band * 0.48)
+        let label = TextAnnotation::new(*name, 16.0 * class as f64 + 8.5, base + band * 0.58)
             .with_color("black")
             .with_font_size(11);
         layout = layout.with_annotation(label);
@@ -363,20 +410,50 @@ mod tests {
         );
     }
 
-    /// The axis steps round, ends on a tick at or above the tallest bar, and
-    /// leaves the band above it for the strip with no tick in it.
+    /// A CpG C>T context's name clears its own bar and the taller bars beside
+    /// it, and, by more than its height, the class strip, even where it names
+    /// the tallest bar.
+    #[test]
+    fn test_a_context_name_clears_the_bars_and_the_strip() {
+        let acg = 16 * 2 + 2;
+        let mut values = [0.0; CHANNELS];
+        values[acg] = 40.0;
+        values[acg + 1] = 300.0;
+        assert!(name_y(&values, acg, 300.0) > 300.0);
+        for top in [1, 2, 7, 47, 300, 810, 909, 12345] {
+            let mut spectrum = Spectrum::new(true);
+            for _ in 0..top {
+                spectrum.add(acg, false, 1.0);
+            }
+            let (top, clear) = spectrum.heights();
+            let (_, base, max) = axis(clear);
+            let strip = base + (max - base) * 0.15;
+            let gap = strip - name_y(&spectrum.weighted, acg, top);
+            assert!(gap > 0.05 * max, "{top}: {gap} of {max}");
+        }
+    }
+
+    /// The axis steps round, keeps every tick out of the band above the bars,
+    /// has at least two ticks under it, and lets the bars fill most of it.
     #[test]
     fn test_the_axis_keeps_ticks_out_of_the_strip() {
-        for (top, step, ceiling) in [
-            (810.0, 500.0, 1000.0),
+        for (clear, step, base) in [
+            (810.0, 200.0, 810.0),
             (300.0, 100.0, 300.0),
-            (1.0, 0.5, 1.0),
-            (47.0, 20.0, 60.0),
+            (1.0, 0.25, 1.0),
+            (47.0, 20.0, 47.0),
+            (990.0, 250.0, 1000.0),
         ] {
-            let (s, c, max) = axis(top);
-            assert_eq!((s, c), (step, ceiling), "{top}");
-            assert!(c >= top && c + s > max, "{top}");
-            assert!(((max - c) / max - STRIP_SHARE).abs() < 1e-12, "{top}");
+            assert_eq!(axis(clear).0, step, "{clear}");
+            assert_eq!(axis(clear).1, base, "{clear}");
+        }
+        for clear in (1..2000).map(|i| f64::from(i) * 0.37 + 1.0) {
+            let (step, base, max) = axis(clear);
+            let below = (base / step + 1e-9).floor();
+            assert!(base >= clear && below >= 2.0, "{clear}");
+            assert!((below + 1.0) * step > max, "{clear}");
+            assert!(((max - base) / max - STRIP_SHARE).abs() < 1e-12, "{clear}");
+            assert!(clear / max > 0.65, "{clear}");
         }
     }
 }

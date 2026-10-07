@@ -20,6 +20,9 @@ pub enum Skip {
     HomozygousAlternate,
     /// The genotype calls a single copy of an alternate allele.
     HaploidAlternate,
+    /// The genotype calls one allele beside a no-call or a spanning deletion,
+    /// as `./1` does.
+    PartlyCalled,
     /// No enabled filter scores the substitution.
     NoFilter,
 }
@@ -32,6 +35,7 @@ impl Skip {
             Skip::HomozygousReference => "homozygous reference",
             Skip::HomozygousAlternate => "homozygous alternate",
             Skip::HaploidAlternate => "haploid alternate",
+            Skip::PartlyCalled => "partly called",
             Skip::NoFilter => "no enabled filter scores the substitution",
         }
     }
@@ -81,9 +85,9 @@ impl Genotype {
     /// A heterozygous SNV is scored as called. A genotype that calls no
     /// allele, `.` or no `GT` at all, as many somatic callers write, is scored
     /// as heterozygous for the reference and the first alternate allele. A
-    /// genotype calling only the reference, or only one alternate allele, is
-    /// not: the filters compare alternate molecules with the reference
-    /// molecules of the sample at the site.
+    /// genotype calling only the reference, or only one alternate allele, or
+    /// one allele beside a no-call, is not: the filters compare alternate
+    /// molecules with the reference molecules of the sample at the site.
     pub fn scored(record: &RecordBuf, sample_index: usize) -> Result<Self, Skip> {
         let missing = |alleles: Vec<String>| {
             let alt = alleles[1..]
@@ -107,7 +111,9 @@ impl Genotype {
         };
         if !gt.is_het() {
             let reference = gt.reference().to_string();
-            return Err(if gt.called().all(|c| c == reference) {
+            return Err(if gt.called().count() < gt.calls.len() {
+                Skip::PartlyCalled
+            } else if gt.called().all(|c| c == reference) {
                 Skip::HomozygousReference
             } else if gt.calls.len() == 1 {
                 Skip::HaploidAlternate
@@ -204,7 +210,8 @@ mod tests {
 
     /// Heterozygous SNVs are scored as called, and SNVs whose genotype calls
     /// nothing, or that have none, as heterozygous for the first alternate
-    /// allele; homozygous, haploid alternate, and non-SNV calls are not.
+    /// allele; homozygous, haploid alternate, partly called, and non-SNV calls
+    /// are not.
     #[test]
     fn test_which_genotypes_are_scored() {
         let lines = [
@@ -219,6 +226,11 @@ mod tests {
             "chr1\t18\t.\tCT\tC\t.\t.\t.\tGT\t0/1",
             "chr1\t19\t.\tCT\tC\t.\t.\t.\tGT\t.",
             "chr1\t20\t.\tC\t*\t.\t.\t.\tGT\t.",
+            "chr1\t21\t.\tC\tT\t.\t.\t.\tGT\t./1",
+            "chr1\t22\t.\tC\tT\t.\t.\t.\tGT\t0/.",
+            "chr1\t23\t.\tC\tT,*\t.\t.\t.\tGT\t1/2",
+            "chr1\t24\t.\tC\tA,T\t.\t.\t.\tGT\t0|2",
+            "chr1\t25\t.\tC\tA,T\t.\t.\t.\tGT\t2/1",
         ];
         let scored: Vec<Result<Option<String>, Skip>> = records(&lines)
             .iter()
@@ -239,6 +251,11 @@ mod tests {
                 Err(Skip::NotSnv),
                 Err(Skip::NotSnv),
                 Err(Skip::NotSnv),
+                Err(Skip::PartlyCalled),
+                Err(Skip::PartlyCalled),
+                Err(Skip::PartlyCalled),
+                alt("T"),
+                alt("T"),
             ]
         );
     }

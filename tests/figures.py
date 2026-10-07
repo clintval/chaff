@@ -286,6 +286,7 @@ def outcome_figure(truth, chaff, fgbio):
 LIBRARIES = [(f, 30) for f in (0, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6)] + [(0.4, 15), (0.4, 60)]
 LIBRARY_CALLS, LIBRARY_COUNTS = 400, (2, 2, 2, 2, 3, 3, 3, 4, 4, 5)
 BINS = [0, 0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99, 1.0001]
+SHAPES = {15: ("s", "none", 44), 30: ("o", ALT_COLOR, 30), 60: ("D", "none", 70)}
 
 
 def libraries():
@@ -314,8 +315,8 @@ def learning_figure(libs):
         ax.set_box_aspect(1)
     left.plot([0, 70], [0, 70], color=GRAY, lw=0.9, ls="--", zorder=1)
     for lib in libs:
-        marker, nudge = {15: ("s", -2.4), 30: ("o", 0.0), 60: ("D", 2.4)}[lib["scale"]]
-        left.scatter(100 * lib["fraction"] + nudge, 100 * lib["learned"], s=36, marker=marker, color=ALT_COLOR, zorder=3, clip_on=False)
+        marker, face, size = SHAPES[lib["scale"]]
+        left.scatter(100 * lib["fraction"], 100 * lib["learned"], s=size, marker=marker, facecolors=face, edgecolors=ALT_COLOR, linewidths=1.3, zorder=3, clip_on=False)
     left.set_xlim(0, 70)
     left.set_ylim(0, 70)
     left.set_xlabel("True copied damage (% of calls)")
@@ -325,8 +326,8 @@ def learning_figure(libs):
     inset.plot([0, 80], [0, 80], color=GRAY, lw=0.8, ls="--", zorder=1)
     for lib in libs:
         if lib["fraction"] > 0:
-            marker = {15: "s", 30: "o", 60: "D"}[lib["scale"]]
-            inset.scatter(lib["scale"], lib["learned_scale"], s=16, marker=marker, color=ALT_COLOR, zorder=3)
+            marker, face, size = SHAPES[lib["scale"]]
+            inset.scatter(lib["scale"], lib["learned_scale"], s=size / 2.5, marker=marker, facecolors=face, edgecolors=ALT_COLOR, linewidths=1.0, zorder=3)
     inset.set_xlim(0, 80)
     inset.set_ylim(0, 80)
     inset.set_xticks([0, 30, 60])
@@ -346,7 +347,7 @@ def learning_figure(libs):
     right.set_ylabel("Calls that are real")
     right.set_title("Its Posteriors Lean Toward Real", fontsize=10, fontweight="bold", loc="left")
     right.legend(loc="lower right", fontsize=8.5, handlelength=1.4)
-    shapes = [Line2D([], [], ls="", marker=m, ms=6, color=ALT_COLOR, label=f"{scale} bp fill-in") for m, scale in (("s", 15), ("o", 30), ("D", 60))]
+    shapes = [Line2D([], [], ls="", marker=m, ms=6, mfc=face, mec=ALT_COLOR, mew=1.3, label=f"{scale} bp fill-in") for scale, (m, face, _) in SHAPES.items()]
     left.legend(handles=shapes, loc="upper left", fontsize=8.5, handlelength=1.0)
     fig.tight_layout(w_pad=3.0)
     finish(fig, "copied-damage-learning.png", LEARNING_TITLE)
