@@ -277,9 +277,10 @@ The tool learns per sample how common each artifact is and how far it reaches, s
 | `--input` | The coordinate-sorted VCF or BCF of somatic calls (short `-i`; required). |
 | `--output` | The output VCF or BCF, its format set by its extension: `.vcf`, `.vcf.gz`, `.bcf`, or `-` for standard output (short `-o`; required). |
 | `--bam` | The coordinate-sorted BAM of the sample's reads (short `-b`; required). |
-| `--ref` | The reference FASTA, with its `.fai`, which copied damage needs (short `-r`). |
+| `--ref` | The reference FASTA, with its `.fai`, which copied damage and `--spectrum` need (short `-r`). |
 | `--sample` | The sample whose reads are in the BAM, required when the VCF has more than one (short `-s`). |
 | `--metrics` | The per-sample metrics TSV, one row per filter and stratum (default none). |
+| `--spectrum` | A PDF of the sample's SNVs by trinucleotide context before and after filtering, where after counts the calls passing every threshold or, without a threshold, weighs each call by its posteriors (default none). |
 | `--filters` | The filters to run (default all three). |
 | `--model` | The model, either `chaff`, which learns each sample's artifact fractions and decay scales, or `fgbio`, which uses fgbio's per-call prior and windows to reproduce its values (default `chaff`). |
 | `--copied-damage-threshold` | The posterior at or below which copied damage applies its FILTER (default none). |
@@ -287,16 +288,16 @@ The tool learns per sample how common each artifact is and how far it reaches, s
 | `--a-tailing-threshold` | The posterior at or below which A-tailing applies its FILTER (default none). |
 | `--copied-damage-classes` | The damage classes, damaged base `>` read base: `C>T` for deamination from heat, storage, or formalin, and `G>T` for oxidation from shearing or heat (default `C>T,G>T`). |
 | `--copied-damage-distance` | The decay scale in bases from the lesion strand's 5′ end, the mean length over which a polymerase copies a lesion strand onto its partner, or `learned` (default `learned`). |
-| `--end-repair-fill-in-distance` | The decay scale in bases from the 3′ end of the strand each template was copied from, or `learned` (default `learned`). |
+| `--end-repair-fill-in-distance` | The decay scale in bases from the 3′ end of the strand each template was copied from, or `learned` (default `learned`); under `--model fgbio`, the window from the nearest template end (default 15). |
 | `--a-tailing-distance` | The window from the template end, in bases (default 2). |
-| `--min-mapping-quality` | The mapping quality floor of a read (default 20). |
-| `--min-base-quality` | The base quality floor at the call (default 20). |
-| `--paired-reads-only` | Keep only reads whose mate is mapped (default off). |
+| `--min-mapping-quality` | The mapping quality floor of a read (short `-m`; default 20). |
+| `--min-base-quality` | The base quality floor at the call (short `-q`; default 20). |
+| `--paired-reads-only` | Keep only reads whose mate is mapped (short `-p`; default off). |
 
-The VCF/BCF and the BAM must be coordinate sorted and need no index; the FASTA needs a `.fai`.
+The VCF/BCF and the BAM must be coordinate sorted, with their contigs in the same order, and need no index; the FASTA needs a `.fai`.
 Each template counts once, and a read whose mate maps to the same contig needs the mate's CIGAR in its `MC` tag.
 Both ends of a template are measured for an FR pair, whose forward read starts at or before its reverse read's 5′ end; a read of any other pair knows only its own end.
-An option of a filter that `--filters` leaves out is a usage error, and so is `--ref` without `copied-damage`.
+An option of a filter that `--filters` leaves out is a usage error, and so is `--ref` without `copied-damage` or `--spectrum`.
 A VCF that already declares an enabled filter's INFO or FILTER, from an earlier run, is refused, so a FILTER never outlives the run that applied it; remove them first, as with `bcftools annotate -x`.
 
 ## Development and Testing

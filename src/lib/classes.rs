@@ -94,7 +94,7 @@ impl FromStr for DamageClass {
         let upper = s.trim().to_ascii_uppercase();
         let bytes = upper.as_bytes();
         if bytes.len() != 3 || bytes[1] != b'>' || !is_dna(bytes[0]) || !is_dna(bytes[2]) {
-            bail!("a damage class is two bases joined by '>', like C>T, but found: {s}");
+            bail!("a damage class is two bases joined by '>', quoted in a shell as 'C>T', but found: {s}");
         }
         if bytes[0] == bytes[2] {
             bail!("a damage class must change the base, but found: {s}");
@@ -111,7 +111,10 @@ impl FromStr for DamageClass {
 pub fn validate_classes(classes: &[DamageClass]) -> Result<()> {
     for (i, a) in classes.iter().enumerate() {
         for b in &classes[i + 1..] {
-            if a == b || *a == b.reverse_complement() {
+            if a == b {
+                bail!("damage class {a} is given twice");
+            }
+            if *a == b.reverse_complement() {
                 bail!("damage classes {a} and {b} describe the same change on opposite strands");
             }
         }
@@ -191,6 +194,14 @@ mod tests {
         assert!(text.parse::<DamageClass>().is_err());
     }
 
+    /// An unquoted `C>T` reaches the tool as `C`, the shell having taken `>T`
+    /// as a redirection, so the error says to quote it.
+    #[test]
+    fn test_a_damage_class_cut_short_by_the_shell_says_to_quote_it() {
+        let error = "C".parse::<DamageClass>().unwrap_err().to_string();
+        assert!(error.contains("quoted in a shell as 'C>T'"), "{error}");
+    }
+
     #[test]
     fn test_damage_class_display_round_trips() {
         assert_eq!(DamageClass::DEAMINATION.to_string(), "C>T");
@@ -216,8 +227,14 @@ mod tests {
     #[test]
     fn test_validate_classes_rejects_reverse_complement_duplicates() {
         let classes = vec![DamageClass::DEAMINATION, "G>A".parse().unwrap()];
-        assert!(validate_classes(&classes).is_err());
-        assert!(validate_classes(&[DamageClass::DEAMINATION, DamageClass::DEAMINATION]).is_err());
+        let error = validate_classes(&classes).unwrap_err().to_string();
+        assert!(
+            error.contains("C>T and G>A describe the same change"),
+            "{error}"
+        );
+        let twice = [DamageClass::DEAMINATION, DamageClass::DEAMINATION];
+        let error = validate_classes(&twice).unwrap_err().to_string();
+        assert_eq!(error, "damage class C>T is given twice");
         assert!(validate_classes(&[DamageClass::DEAMINATION, DamageClass::OXIDATION]).is_ok());
     }
 

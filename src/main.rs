@@ -98,13 +98,12 @@ pub(crate) const CARGO_STYLING: Styles = Styles::styled()
 ///   chaff -i calls.vcf.gz -b tumor.bam -r ref.fa -o out.vcf.gz \
 ///       --metrics tumor.chaff.tsv
 ///
-///  2. Filter an end-repaired, A-tailed duplex library with suspected deamination:
+///  2. Filter copied deamination in a Duplex Sequencing library:
 ///
 ///   chaff -i calls.vcf.gz -b tumor.bam -r ref.fa -s tumor \
 ///       -o calls.chaff.vcf.gz --metrics tumor.chaff.tsv \
-///       --filters copied-damage,end-repair-fill-in,a-tailing \
-///       --copied-damage-classes C>T --copied-damage-threshold 0.05 \
-///       --end-repair-fill-in-threshold 0.001 --a-tailing-threshold 0.001
+///       --filters copied-damage --copied-damage-classes 'C>T' \
+///       --copied-damage-threshold 0.05
 ///
 ///  3. Reproduce fgbio FilterSomaticVcf:
 ///
@@ -146,7 +145,8 @@ struct Cli {
 
     /// Indexed reference FASTA (`.fai` alongside) for CpG context.
     ///
-    /// Required by the `copied-damage` filter, and an error without it.
+    /// Required by the `copied-damage` filter and by `--spectrum`, and an
+    /// error without either.
     #[arg(short = 'r', long = "ref", value_name = "FASTA", verbatim_doc_comment)]
     reference: Option<PathBuf>,
 
@@ -159,6 +159,14 @@ struct Cli {
     /// Per-sample metrics TSV: one row per filter and stratum.
     #[arg(long, value_name = "TSV", verbatim_doc_comment)]
     metrics: Option<PathBuf>,
+
+    /// PDF of the sample's SNVs by trinucleotide context, before and after
+    /// filtering.
+    ///
+    /// After filtering, it counts the calls no filter flagged when a filter
+    /// has a threshold, or else weighs each call by its posteriors.
+    #[arg(long, value_name = "PDF", verbatim_doc_comment)]
+    spectrum: Option<PathBuf>,
 
     /// Minimum mapping quality of a read.
     #[arg(
@@ -195,7 +203,7 @@ struct Cli {
         value_enum,
         value_delimiter = ',',
         value_name = "FILTER",
-        default_values_t = FilterKind::ALL,
+        default_value = "copied-damage,a-tailing,end-repair-fill-in",
         hide_possible_values = true,
         verbatim_doc_comment
     )]
@@ -227,7 +235,7 @@ struct Cli {
         long,
         value_delimiter = ',',
         value_name = "CLASS",
-        default_values = ["C>T", "G>T"],
+        default_value = "C>T,G>T",
         verbatim_doc_comment
     )]
     copied_damage_classes: Vec<DamageClass>,
@@ -235,8 +243,8 @@ struct Cli {
     /// Decay scale in bases from the lesion strand's 5' end, or `learned`.
     ///
     /// The mean length over which a polymerase copies a lesion strand onto its
-    /// partner, learned per library under either model unless a number fixes it. Molecules within it
-    /// count as congruent in the metrics.
+    /// partner, learned per library under either model unless a number fixes
+    /// it. Molecules within it count as congruent in the metrics.
     #[arg(
         long,
         value_name = "BP",
@@ -276,7 +284,13 @@ struct Cli {
     end_repair_fill_in_threshold: Option<f64>,
 
     /// Window in bases from the template end, under either model.
-    #[arg(long, value_name = "BP", default_value_t = 2, verbatim_doc_comment)]
+    #[arg(
+        long,
+        value_name = "BP",
+        default_value_t = 2,
+        value_parser = clap::value_parser!(u32).range(1..),
+        verbatim_doc_comment
+    )]
     a_tailing_distance: u32,
 
     /// Apply `ATailingArtifact` at or below this posterior.
@@ -321,16 +335,18 @@ fn probability(text: &str) -> Result<f64, String> {
 
 impl Cli {
     /// Reject, as usage errors of `cmd`, an option typed on the command line for
-    /// a filter `--filters` leaves out, the copied damage filter without a
-    /// reference, an input and outputs that name one file, and damage classes
-    /// that repeat a change.
+    /// a filter `--filters` leaves out, the copied damage filter or the
+    /// spectrum without a reference, an input and outputs that name one file,
+    /// and damage classes that repeat a change.
     fn validate(&self, matches: &ArgMatches, cmd: &mut Command) -> Result<(), clap::Error> {
         for kind in FilterKind::ALL {
             if self.filters.contains(&kind) {
                 continue;
             }
             for id in kind.arguments() {
-                if matches.value_source(id) != Some(ValueSource::CommandLine) {
+                if matches.value_source(id) != Some(ValueSource::CommandLine)
+                    || (*id == "reference" && self.spectrum.is_some())
+                {
                     continue;
                 }
                 let arg = cmd
@@ -359,6 +375,12 @@ impl Cli {
                 "the copied-damage filter needs a reference FASTA: '--ref <FASTA>'",
             ));
         }
+        if self.spectrum.is_some() && self.reference.is_none() {
+            return Err(cmd.error(
+                ErrorKind::MissingRequiredArgument,
+                "'--spectrum' needs a reference FASTA: '--ref <FASTA>'",
+            ));
+        }
         let files = [
             ("--input", Some(&self.input)),
             (
@@ -366,12 +388,27 @@ impl Cli {
                 Some(&self.output).filter(|p| *p != Path::new("-")),
             ),
             ("--metrics", self.metrics.as_ref()),
+            ("--spectrum", self.spectrum.as_ref()),
         ];
         for (i, (a, first)) in files.iter().enumerate() {
             for (b, second) in &files[i + 1..] {
                 if let (Some(first), Some(second)) = (first, second) {
                     if resolve(first).is_some_and(|path| Some(path) == resolve(second)) {
                         let message = format!("'{a}' and '{b}' name the same file: {first:?}");
+                        return Err(cmd.error(ErrorKind::ArgumentConflict, message));
+                    }
+                }
+            }
+        }
+        let reads = [
+            ("--bam", Some(&self.bam)),
+            ("--ref", self.reference.as_ref()),
+        ];
+        for (a, written) in &files[1..] {
+            for (b, read) in &reads {
+                if let (Some(written), Some(read)) = (written, read) {
+                    if resolve(written).is_some_and(|path| Some(path) == resolve(read)) {
+                        let message = format!("'{a}' and '{b}' name the same file: {written:?}");
                         return Err(cmd.error(ErrorKind::ArgumentConflict, message));
                     }
                 }
@@ -407,6 +444,7 @@ impl Cli {
             bam: self.bam,
             reference: self.reference,
             metrics: self.metrics,
+            spectrum: self.spectrum,
             pileup: PileupOptions {
                 min_mapping_quality: self.min_mapping_quality,
                 min_base_quality: self.min_base_quality,
@@ -502,22 +540,28 @@ fn split_two_column(content: &str) -> Option<(&str, &str, &str)> {
 /// - indented two-column rows: the left code term in [`CODE`], the right
 ///   description column in [`FADED`];
 /// - indented description continuations (deeper indent, no term): all [`FADED`];
-/// - indented single-column examples (a bare command): all [`CODE`];
+/// - indented single-column examples (a bare command), and the lines a
+///   trailing `\` continues: all [`CODE`];
 /// - prose: default color, with backtick terms painted in [`CODE`].
 fn style_help_text(text: &str, color: bool) -> String {
     let code = esc(CODE, color);
     let faded = esc(FADED, color);
     let reset = esc_reset(CODE, color);
+    let mut continues = false;
     text.split_inclusive('\n')
         .map(|line| {
             let (content, newline) = match line.strip_suffix('\n') {
                 Some(content) => (content, "\n"),
                 None => (line, ""),
             };
+            let continued = std::mem::replace(&mut continues, content.ends_with('\\'));
             if !content.starts_with("  ") || content.trim().is_empty() {
                 return format!("{}{newline}", paint_backtick_terms(content, &code, &reset));
             }
-            if let Some((left, gap, right)) = split_two_column(content) {
+            if continued {
+                let painted = paint_backtick_terms(content, &code, &code);
+                format!("{code}{painted}{reset}{newline}")
+            } else if let Some((left, gap, right)) = split_two_column(content) {
                 let left = paint_backtick_terms(left, &code, &code);
                 let right = paint_backtick_terms(right, &code, &faded);
                 format!("{code}{left}{reset}{gap}{faded}{right}{reset}{newline}")
@@ -583,7 +627,7 @@ fn decorate_help(cmd: clap::Command, color: bool) -> clap::Command {
 fn main() -> Result<(), Error> {
     let color = std::env::var_os("NO_COLOR").is_none();
 
-    let env = Env::default().default_filter_or("info");
+    let env = Env::default().default_filter_or("info,usvg=error");
     let write_style = if color {
         env_logger::WriteStyle::Auto
     } else {
@@ -659,6 +703,26 @@ mod tests {
     }
 
     #[test]
+    fn test_the_spectrum_without_a_reference_is_a_usage_error() {
+        let error = args(&["--filters", "a-tailing", "--spectrum", "out.pdf"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+        let message = "'--spectrum' needs a reference FASTA: '--ref <FASTA>'";
+        assert!(error.to_string().contains(message), "{error}");
+        let extra = [
+            "--filters",
+            "a-tailing",
+            "--spectrum",
+            "out.pdf",
+            "--ref",
+            "ref.fa",
+        ];
+        assert_eq!(
+            args(&extra).unwrap().spectrum,
+            Some(PathBuf::from("out.pdf"))
+        );
+    }
+
+    #[test]
     fn test_standard_input_is_a_usage_error() {
         let error = args(&["-i", "-", "--ref", "ref.fa"]).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::ValueValidation);
@@ -694,6 +758,17 @@ mod tests {
             (
                 vec!["-o", &metrics, "--metrics", &metrics],
                 "'--output' and '--metrics' name the same file",
+            ),
+            (
+                vec![
+                    "--metrics",
+                    &metrics,
+                    "--spectrum",
+                    &metrics,
+                    "--ref",
+                    "ref.fa",
+                ],
+                "'--metrics' and '--spectrum' name the same file",
             ),
         ] {
             let error = args(&[&["-i", &input][..], &filters, &extra].concat()).unwrap_err();
@@ -768,5 +843,59 @@ mod tests {
     #[case(&["--ref", "ref.fa", "--model", "fgbio", "--copied-damage-distance", "20"])]
     fn test_options_of_enabled_filters_and_defaults_are_accepted(#[case] extra: &[&str]) {
         args(extra).unwrap();
+    }
+
+    #[test]
+    fn test_list_defaults_are_every_filter_and_both_classes_shown_comma_separated() {
+        let options = args(&["--ref", "ref.fa"]).unwrap().options;
+        assert_eq!(options.filters, FilterKind::ALL);
+        let classes = [DamageClass::DEAMINATION, DamageClass::OXIDATION];
+        assert_eq!(options.copied_damage.classes, classes);
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("[default: copied-damage,a-tailing,end-repair-fill-in]"));
+        assert!(help.contains("[default: C>T,G>T]"));
+    }
+
+    #[test]
+    fn test_an_a_tailing_window_of_zero_bases_is_a_usage_error() {
+        let error = args(&["--filters", "a-tailing", "--a-tailing-distance", "0"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+        assert_eq!(error.exit_code(), 2);
+        let message = "invalid value '0' for '--a-tailing-distance <BP>'";
+        assert!(error.to_string().contains(message), "{error}");
+    }
+
+    #[test]
+    fn test_a_command_continued_by_a_backslash_is_code_on_every_line() {
+        let text = "  chaff -i in.vcf \\\n      --metrics out.tsv\n      a description\n";
+        let (code, faded, reset) = (esc(CODE, true), esc(FADED, true), esc_reset(CODE, true));
+        let expected = format!(
+            "{code}  chaff -i in.vcf \\{reset}\n{code}      --metrics out.tsv{reset}\n{faded}      a description{reset}\n"
+        );
+        assert_eq!(style_help_text(text, true), expected);
+    }
+
+    #[test]
+    fn test_outputs_that_name_the_bam_or_the_reference_are_a_usage_error() {
+        let filters = ["--filters", "a-tailing"];
+        for (extra, message) in [
+            (
+                [&filters[..], &["-o", "in.bam"]].concat(),
+                "'--output' and '--bam' name the same file",
+            ),
+            (
+                [&filters[..], &["--metrics", "./in.bam"]].concat(),
+                "'--metrics' and '--bam' name the same file",
+            ),
+            (
+                vec!["--ref", "ref.fa", "--metrics", "ref.fa"],
+                "'--metrics' and '--ref' name the same file",
+            ),
+        ] {
+            let error = args(&extra).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+            assert_eq!(error.exit_code(), 2);
+            assert!(error.to_string().contains(message), "{error}");
+        }
     }
 }

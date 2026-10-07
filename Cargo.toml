@@ -37,6 +37,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 csv = "1"
 env_logger = "0.11"
+kuva = { version = "0.4.0", features = ["pdf"] }
 log = "0.4"
 mimalloc = "0.1"
 noodles = { version = "0.116", features = ["bam", "bcf", "bgzf", "core", "fasta", "sam", "vcf"] }

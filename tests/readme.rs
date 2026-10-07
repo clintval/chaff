@@ -1,10 +1,10 @@
 //! The README's examples, run on `tests/data` by the real binary.
 //!
-//! Every `console` block but the installation runs in order, under bash, in
-//! one working directory holding a copy of `tests/data`, with `chaff` on the
-//! `PATH`. The `text` block right after a `console` block is what that block
-//! prints, compared line by line and field by field in both directions, and a
-//! `console` block without one must print nothing.
+//! Every `console` block runs in order, under bash, in one working directory
+//! holding a copy of `tests/data`, with `chaff` on the `PATH`. The `text` block
+//! right after a `console` block is what that block prints, compared line by
+//! line and field by field in both directions, and a `console` block without
+//! one must print nothing.
 
 use std::fs;
 use std::path::Path;
@@ -56,7 +56,7 @@ fn test_every_readme_example_prints_what_the_readme_shows() {
     let blocks = blocks();
     let mut shown = 0;
     for (i, (language, body)) in blocks.iter().enumerate() {
-        if *language != "console" || body.starts_with("cargo install") {
+        if *language != "console" {
             continue;
         }
         let output = Command::new("bash")

@@ -40,7 +40,7 @@
 //!   alternate molecule contributes `ln(1 - e) - ln((1 - e) f + e (1 - f))`
 //!   and an incongruent one `ln(e) - ln((1 - e)(1 - f) + e f)`.
 //!
-//! A call without a measured reference molecule, or for a decay without a
+//! A call with alternate but no reference molecules, or for a decay without a
 //! measured alternate molecule, gets no ratio and no posterior.
 //!
 //! ## Priors and posteriors
@@ -154,4 +154,5 @@ pub mod prior;
 pub mod read_end;
 pub mod reference;
 pub mod simplex;
+pub mod spectrum;
 pub mod testing;

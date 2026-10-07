@@ -24,16 +24,16 @@
 //! stratum of hundreds keeps nearly its own.
 //!
 //! The `chaff` model learns each decay filter's scale `s` with its fraction.
-//! The maximum likelihood scale maximizes the filter's marginal likelihood
-//! over `(pi, s)`, a profile over `s` with the maximum likelihood `pi` solved
+//! The maximum likelihood scale maximizes the filter's marginal likelihood over
+//! `(pi, s)`, a profile over `s` with the maximum likelihood `pi` solved
 //! exactly at each. The fraction's prior stays out of the scale's fit: it
 //! favors `pi` near one half, which a scale so long that every ratio is near
-//! zero would allow, so a library without the artifact would learn a flat
-//! decay and a fraction near the prior's. The scale is then shrunk toward the filter's default the way a stratum's fraction is
-//! shrunk toward its filter's: the two are averaged in log space, weighted by
-//! the calls' expected artifacts `sum_i r_i`, under the maximum likelihood
-//! `pi` at the default scale, and [`SCALE_PRIOR_STRENGTH`]
-//! pseudo-calls at the default,
+//! zero would allow, so a library without the artifact would learn a flat decay
+//! and a fraction near the prior's. The scale is then shrunk toward the
+//! filter's default the way a stratum's fraction is shrunk toward its filter's:
+//! the two are averaged in log space, weighted by the calls' expected artifacts
+//! `sum_i r_i`, under the maximum likelihood `pi` at the default scale, and
+//! [`SCALE_PRIOR_STRENGTH`] pseudo-calls at the default,
 //!
 //! ```text
 //! ln s = (sum_i r_i ln s_mle + k ln s_default) / (sum_i r_i + k)
@@ -44,16 +44,16 @@
 //! default and one of hundreds keeps nearly its own. It counts them at the
 //! default, where the ratios are informative, since a library without the
 //! artifact may fit a scale so long that its ratios vanish and its fraction is
-//! undetermined. The scale is one per
-//! filter, shared by its strata, since how far a polymerase copies is a
-//! property of the library's enzymes and not of the substitution, and pooling
-//! the strata gives the fit the most artifact calls.
+//! undetermined. The scale is one per filter, shared by its strata, since how
+//! far a polymerase copies is a property of the library's enzymes and not of
+//! the substitution, and pooling the strata gives the fit the most artifact
+//! calls.
 //!
-//! The `fgbio` model keeps fgbio's prior for parity: a mutation prior of `min((2 * maf)^2,
-//! 0.9999)`, where `maf` is the call's alternate molecule fraction, or one over
-//! the depth when no alternate molecule is seen. At the low allele fractions of
-//! Duplex Sequencing it is near zero, which makes any call whose alternate
-//! molecules all sit inside the window an artifact.
+//! The `fgbio` model keeps fgbio's prior for parity: a mutation prior of
+//! `min((2 * maf)^2, 0.9999)`, where `maf` is the call's alternate molecule
+//! fraction, or one over the depth when no alternate molecule is seen. At the
+//! low allele fractions of Duplex Sequencing it is near zero, which makes any
+//! call whose alternate molecules all sit inside the window an artifact.
 
 /// A Beta prior on an artifact fraction: `strength` pseudo-calls at `mean`
 /// over a flat `Beta(1, 1)`, `Beta(strength mean + 1, strength (1 - mean) + 1)`.
@@ -194,8 +194,9 @@ pub fn log_marginal_likelihood(log_likelihood_ratios: &[f64], pi: f64, prior: Be
 /// A set of calls' decay scale: the maximum likelihood scale of
 /// [`max_likelihood_scale`] and `default` averaged in log space, weighted by
 /// the calls' expected artifacts, under their maximum likelihood fraction at
-/// `default`, and [`SCALE_PRIOR_STRENGTH`] pseudo-calls at `default`. `log_likelihood_ratios` gives the calls' ratios at a scale;
-/// without a call to learn from, the scale is `default`.
+/// `default`, and [`SCALE_PRIOR_STRENGTH`] pseudo-calls at `default`.
+/// `log_likelihood_ratios` gives the calls' ratios at a scale; without a call
+/// to learn from, the scale is `default`.
 pub fn learn_scale(log_likelihood_ratios: impl Fn(f64) -> Vec<f64>, default: f64) -> f64 {
     if log_likelihood_ratios(default).is_empty() {
         return default;

@@ -131,6 +131,12 @@ async fn stderr_contains(world: &mut ChaffWorld, needle: String) {
     );
 }
 
+#[then(regex = r#"^the file "([^"]+)" is a PDF$"#)]
+async fn file_is_a_pdf(world: &mut ChaffWorld, name: String) {
+    let bytes = fs::read(world.work_dir().join(&name)).expect("read the file");
+    assert!(bytes.starts_with(b"%PDF-"), "{name} is not a PDF");
+}
+
 fn main() {
     futures::executor::block_on(ChaffWorld::cucumber().run_and_exit("tests/features"));
 }

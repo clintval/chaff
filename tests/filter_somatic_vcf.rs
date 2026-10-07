@@ -138,6 +138,7 @@ fn run(
         bam: PathBuf::from("reads.bam"),
         reference: None,
         metrics: None,
+        spectrum: None,
         pileup: PileupOptions::default(),
         options,
     };
@@ -478,6 +479,7 @@ fn test_metrics_rows_of_the_shared_vcf() {
         bam: PathBuf::from("reads.bam"),
         reference: None,
         metrics: Some(metrics.clone()),
+        spectrum: None,
         pileup: PileupOptions::default(),
         options: thresholded(Model::Chaff),
     };
@@ -523,6 +525,7 @@ fn test_raise_an_error_if_the_reads_are_not_coordinate_sorted() {
         bam,
         reference: None,
         metrics: None,
+        spectrum: None,
         pileup: PileupOptions::default(),
         options: options(Some("tumor"), Model::Fgbio),
     };
@@ -817,6 +820,7 @@ fn run_with_metrics(
         bam: PathBuf::from("reads.bam"),
         reference: None,
         metrics: Some(metrics.clone()),
+        spectrum: None,
         pileup: PileupOptions::default(),
         options,
     };
