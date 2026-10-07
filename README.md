@@ -282,13 +282,13 @@ The tool learns per sample how common each artifact is and how far it reaches, s
 | `--a-tailing-threshold` | The posterior at or below which A-tailing applies its FILTER (default none). |
 | `--copied-damage-classes` | The damage classes, damaged base `>` read base: `C>T` for deamination from heat, storage, or formalin, and `G>T` for oxidation from shearing or heat (default `C>T,G>T`). |
 | `--copied-damage-distance` | The decay scale in bases from the lesion strand's 5′ end, the mean length over which a polymerase copies a lesion strand onto its partner, or `learned` (default `learned`). |
-| `--end-repair-fill-in-distance` | The decay scale in bases from the 3′ end of the strand each template was copied from, or `learned` (default `learned`). |
+| `--end-repair-fill-in-distance` | The decay scale in bases from the 3′ end of the strand each template was copied from, or `learned` (default `learned`); under `--model fgbio`, the window from the nearest template end (default 15). |
 | `--a-tailing-distance` | The window from the template end, in bases (default 2). |
-| `--min-mapping-quality` | The mapping quality floor of a read (default 20). |
-| `--min-base-quality` | The base quality floor at the call (default 20). |
-| `--paired-reads-only` | Keep only reads whose mate is mapped (default off). |
+| `--min-mapping-quality` | The mapping quality floor of a read (short `-m`; default 20). |
+| `--min-base-quality` | The base quality floor at the call (short `-q`; default 20). |
+| `--paired-reads-only` | Keep only reads whose mate is mapped (short `-p`; default off). |
 
-The VCF/BCF and the BAM must be coordinate sorted and need no index; the FASTA needs a `.fai`.
+The VCF/BCF and the BAM must be coordinate sorted, with their contigs in the same order, and need no index; the FASTA needs a `.fai`.
 Each template counts once, and a read whose mate maps to the same contig needs the mate's CIGAR in its `MC` tag.
 Both ends of a template are measured for an FR pair, whose forward read starts at or before its reverse read's 5′ end; a read of any other pair knows only its own end.
 An option of a filter that `--filters` leaves out is a usage error, and so is `--ref` without `copied-damage` or `--spectrum`.
