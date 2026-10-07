@@ -139,7 +139,9 @@
 //!   writes its prior's posterior.
 //! - **Missing genotypes.** An SNV whose genotype is `.` or absent, as many
 //!   somatic callers write it, is scored as heterozygous for its first
-//!   alternate allele; fgbio scores only called heterozygous genotypes.
+//!   alternate allele under either model; fgbio scores only called
+//!   heterozygous genotypes, so `--model fgbio` writes values on such a call
+//!   where fgbio writes none.
 //! - **Streaming.** The BAM is always streamed, never queried by index.
 //! - **Number format.** Values keep htsjdk's rounding but are written in
 //!   decimal: `0.00003218` for fgbio's `3.218e-05`.
