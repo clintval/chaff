@@ -540,22 +540,28 @@ fn split_two_column(content: &str) -> Option<(&str, &str, &str)> {
 /// - indented two-column rows: the left code term in [`CODE`], the right
 ///   description column in [`FADED`];
 /// - indented description continuations (deeper indent, no term): all [`FADED`];
-/// - indented single-column examples (a bare command): all [`CODE`];
+/// - indented single-column examples (a bare command), and the lines a
+///   trailing `\` continues: all [`CODE`];
 /// - prose: default color, with backtick terms painted in [`CODE`].
 fn style_help_text(text: &str, color: bool) -> String {
     let code = esc(CODE, color);
     let faded = esc(FADED, color);
     let reset = esc_reset(CODE, color);
+    let mut continues = false;
     text.split_inclusive('\n')
         .map(|line| {
             let (content, newline) = match line.strip_suffix('\n') {
                 Some(content) => (content, "\n"),
                 None => (line, ""),
             };
+            let continued = std::mem::replace(&mut continues, content.ends_with('\\'));
             if !content.starts_with("  ") || content.trim().is_empty() {
                 return format!("{}{newline}", paint_backtick_terms(content, &code, &reset));
             }
-            if let Some((left, gap, right)) = split_two_column(content) {
+            if continued {
+                let painted = paint_backtick_terms(content, &code, &code);
+                format!("{code}{painted}{reset}{newline}")
+            } else if let Some((left, gap, right)) = split_two_column(content) {
                 let left = paint_backtick_terms(left, &code, &code);
                 let right = paint_backtick_terms(right, &code, &faded);
                 format!("{code}{left}{reset}{gap}{faded}{right}{reset}{newline}")
@@ -857,6 +863,16 @@ mod tests {
         assert_eq!(error.exit_code(), 2);
         let message = "invalid value '0' for '--a-tailing-distance <BP>'";
         assert!(error.to_string().contains(message), "{error}");
+    }
+
+    #[test]
+    fn test_a_command_continued_by_a_backslash_is_code_on_every_line() {
+        let text = "  chaff -i in.vcf \\\n      --metrics out.tsv\n      a description\n";
+        let (code, faded, reset) = (esc(CODE, true), esc(FADED, true), esc_reset(CODE, true));
+        let expected = format!(
+            "{code}  chaff -i in.vcf \\{reset}\n{code}      --metrics out.tsv{reset}\n{faded}      a description{reset}\n"
+        );
+        assert_eq!(style_help_text(text, true), expected);
     }
 
     #[test]
