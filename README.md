@@ -81,7 +81,7 @@ A-tailing scores those whose alternate base is A or T, and end repair fill-in al
 
 ### Copied Damage
 
-![Copied damage makes a call: a methylated C at a CpG is deaminated to T near one strand's 5′ end, a polymerase fills in the partner's recessed 3′ end and copies the T as an A, the UMI-bearing adapters are ligated, and both strands carry the change, so the two strands agree and Duplex Sequencing calls it.](.github/img/copied-damage-steps.svg)
+![Copied damage makes a call: a methylated C at a CpG is deaminated to T near one strand's 5′ end, the partner's recessed 3′ end is filled in and the T is copied as an A, the UMI-bearing adapters are ligated, and both strands read T, so Duplex Sequencing calls it.](.github/img/copied-damage-steps.svg)
 
 Copied damage carries its change on both strands, so the duplex consensus agrees on it, which makes this the filter for Duplex Sequencing.
 Fragmenting with a restriction enzyme that leaves blunt ends, as NanoSeq does [[3]](#references), or repairing lesions before end repair, as Duplex-Repair does [[4]](#references), keeps lesions from being copied.
@@ -97,7 +97,7 @@ Copied damage has one blind spot: a lesion copied from an internal nick, by nick
 
 ### End Repair Fill-In
 
-![End repair fill-in makes an error: a polymerase fills in a recessed 3′ end and misincorporates a C opposite a T, the UMI-bearing adapters are ligated, and only the filled-in strand carries the error, so the two strands disagree and a duplex consensus masks it.](.github/img/end-repair-fill-in.svg)
+![End repair fill-in makes an error: a recessed 3′ end is filled in with a wrong C opposite a T, the UMI-bearing adapters are ligated, and only the filled-in strand reads G, so a duplex consensus masks it.](.github/img/end-repair-fill-in.svg)
 
 End repair's polymerase can misincorporate a base as it fills in a recessed 3′ end, or copy a lesion in the overhang, and in reads or simplex consensus either change sits on the strand it extended, near that strand's 3′ end.
 A misincorporation is on that strand alone, so a duplex consensus removes it, while a copied lesion is on both strands, which is copied damage.
@@ -110,7 +110,7 @@ A call near an end can be flagged by both filters, as the call at position 100 i
 
 ### A-Tailing
 
-![A-tailing makes an error: end repair trims a 3′ end one base too far, A-tailing adds a non-templated A where a C belongs, the UMI-bearing adapters are ligated, and only that strand reads A at the last base of its 3′ end, so the two strands disagree.](.github/img/a-tailing.svg)
+![A-tailing makes an error: end repair over-digests a 3′ end by one base, A-tailing adds a non-templated A where the lost C belongs, the UMI-bearing adapters are ligated, and only that strand reads A, at the last base of its 3′ end.](.github/img/a-tailing.svg)
 
 A-tailing adds a non-templated A to each 3′ end, for adapters with a T overhang to be ligated to.
 Where end repair over-digested a 3′ end by one base, that A stands in for the lost base on that strand alone, which a duplex consensus mostly removes, and reads as an A near the template's higher-coordinate end when it is the forward strand and as a T near its lower-coordinate end when it is the reverse.

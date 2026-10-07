@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="870" height="172" viewBox="0 0 870 172" role="img" aria-labelledby="title">
-  <title id="title">How end repair fill-in makes an error: a polymerase fills in a recessed 3′ end and misincorporates a C opposite a T, the UMI-bearing adapters are ligated, and only the filled-in strand carries the error, so the two strands disagree and a duplex consensus masks it.</title>
+  <title id="title">How end repair fill-in makes an error: a recessed 3′ end is filled in with a wrong C opposite a T, the UMI-bearing adapters are ligated, and only the filled-in strand reads G, so a duplex consensus masks it.</title>
   <style>
     text { font-family: Helvetica, Arial, sans-serif; }
     .head { fill: #57606a; font-size: 13px; font-weight: 700; }
@@ -19,7 +19,7 @@
     }
   </style>
 
-  <text class="head" x="28" y="24">1. A recessed 3′ end</text>
+  <text class="head" x="28" y="24">1. A Recessed 3′ End</text>
   <text class="ink" x="28" y="42">the bottom strand is short</text>
   <text class="ink" x="28" y="160">its 3′ end is recessed</text>
   <rect class="read" x="36" y="81" width="151" height="23" rx="4"/>
@@ -32,7 +32,7 @@
   <text class="base" y="124" text-anchor="middle"><tspan x="119 134 149 164 179">TCCTA</tspan></text>
   <path class="arrow" d="M209 111 h16 m-5 -4 l5 4 l-5 4"/>
 
-  <text class="head" x="243" y="24">2. It is filled in</text>
+  <text class="head" x="243" y="24">2. Fill-In Adds a Wrong C</text>
   <text class="ink" x="243" y="42">a polymerase extends the 3′ end</text>
   <text class="ink" x="243" y="160">and misincorporates a C</text>
   <rect class="read" x="251" y="81" width="151" height="23" rx="4"/>
@@ -46,7 +46,7 @@
   <text class="base" y="124" text-anchor="middle"><tspan class="new" x="259">G</tspan><tspan class="alt" x="274">C</tspan><tspan class="new" x="289 304 319">CGC</tspan><tspan x="334 349 364 379 394">TCCTA</tspan></text>
   <path class="arrow" d="M424 111 h16 m-5 -4 l5 4 l-5 4"/>
 
-  <text class="head" x="458" y="24">3. Adapters are ligated</text>
+  <text class="head" x="458" y="24">3. Adapters Are Ligated</text>
   <text class="ink" x="458" y="42">each carries a UMI</text>
   <text class="ink" x="458" y="160">the error is on one strand</text>
   <rect class="umi" x="451" y="86" width="14" height="15" rx="3"/>
@@ -59,8 +59,8 @@
   <text class="base" y="124" text-anchor="middle"><tspan x="474">G</tspan><tspan class="alt" x="489">C</tspan><tspan x="504 519 534 549 564 579 594 609">CGCTCCTA</tspan></text>
   <path class="arrow" d="M639 111 h16 m-5 -4 l5 4 l-5 4"/>
 
-  <text class="head" x="673" y="24">4. The strands disagree</text>
-  <text class="ink" x="673" y="42">one strand reads G</text>
+  <text class="head" x="673" y="24">4. Only One Strand Reads G</text>
+  <text class="ink" x="673" y="42">the other strand reads T</text>
   <text class="ink" x="673" y="160">so a duplex consensus masks it</text>
   <rect class="read" x="681" y="81" width="151" height="23" rx="4"/>
   <rect class="read" x="681" y="107" width="151" height="23" rx="4"/>

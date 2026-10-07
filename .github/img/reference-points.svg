@@ -21,10 +21,10 @@
     }
   </style>
 
-  <text class="head" x="120" y="24">Copied damage</text>
+  <text class="head" x="120" y="24">Copied Damage</text>
   <text class="ink" x="120" y="42">a lesion near its strand's 5′ end, and its copy</text>
 
-  <text class="head" x="760" y="24" text-anchor="end">A-tailing</text>
+  <text class="head" x="760" y="24" text-anchor="end">A-Tailing</text>
   <text class="ink" x="760" y="42" text-anchor="end">an A fills a base end repair removed</text>
   <path class="rule" d="M759 48 V70"/>
 
@@ -43,7 +43,7 @@
   <text class="end" x="786" y="114" text-anchor="middle">5′</text>
 
   <path class="rule" d="M219 122 V146"/>
-  <text class="head" x="120" y="164">End repair fill-in</text>
+  <text class="head" x="120" y="164">End Repair Fill-In</text>
   <text class="ink" x="120" y="182">an error in the new bases, near the extended strand's 3′ end</text>
   <text class="ink" x="760" y="164" text-anchor="end"><tspan class="alt">red</tspan>: a lesion, its copy, or an error</text>
   <text class="ink" x="760" y="182" text-anchor="end"><tspan class="new">blue</tspan>: bases end repair filled in</text>
