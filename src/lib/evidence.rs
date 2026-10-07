@@ -28,6 +28,7 @@ use streampile::{
 };
 
 use crate::classes::Strand;
+use crate::simplex::LibraryProfile;
 
 /// How the quality of agreeing mates is called: the higher of the two.
 const AGREEMENT: AgreementStrategy = AgreementStrategy::MaxQual;
@@ -93,7 +94,16 @@ impl Molecule {
 pub trait Evidence {
     /// One molecule per template covering the 1-based `pos` on `contig`.
     fn molecules(&mut self, contig: &str, pos: Position) -> Result<Vec<Molecule>>;
+
+    /// The library's single-strand profile, asked for once every site is
+    /// read, or `None` without one.
+    fn library(&mut self) -> Result<Option<LibraryProfile>> {
+        Ok(None)
+    }
 }
+
+/// A library profile still being made, which [`Evidence::library`] waits for.
+pub type PendingLibrary<'f> = Box<dyn FnOnce() -> Result<Option<LibraryProfile>> + 'f>;
 
 /// Which records and bases count as evidence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,6 +154,7 @@ impl PileupOptions {
 /// [`Evidence`] from a streampile pileup builder over a coordinate-sorted BAM.
 pub struct PileupEvidence<'f, S: RecordSource> {
     builder: StreamingPileupBuilder<'f, S>,
+    library: Option<PendingLibrary<'f>>,
 }
 
 impl<'f, S: RecordSource> PileupEvidence<'f, S> {
@@ -151,11 +162,24 @@ impl<'f, S: RecordSource> PileupEvidence<'f, S> {
     pub fn new(builder: StreamingPileupBuilder<'f, S>, options: &PileupOptions) -> Self {
         Self {
             builder: options.configure(builder),
+            library: None,
+        }
+    }
+
+    /// The same evidence with the library profile `library` makes.
+    pub fn with_library(self, library: PendingLibrary<'f>) -> Self {
+        Self {
+            library: Some(library),
+            ..self
         }
     }
 }
 
 impl<S: RecordSource> Evidence for PileupEvidence<'_, S> {
+    fn library(&mut self) -> Result<Option<LibraryProfile>> {
+        self.library.take().map_or(Ok(None), |library| library())
+    }
+
     fn molecules(&mut self, contig: &str, pos: Position) -> Result<Vec<Molecule>> {
         let pileup = self
             .builder
@@ -289,6 +313,7 @@ fn distances<R: AlignmentRecord>(
 #[derive(Clone, Debug, Default)]
 pub struct MoleculeTable {
     sites: HashMap<(String, usize), Vec<Molecule>>,
+    library: Option<LibraryProfile>,
 }
 
 impl MoleculeTable {
@@ -301,9 +326,18 @@ impl MoleculeTable {
     pub fn insert(&mut self, contig: &str, pos: usize, molecules: Vec<Molecule>) {
         self.sites.insert((contig.to_string(), pos), molecules);
     }
+
+    /// Set the library's single-strand profile.
+    pub fn set_library(&mut self, library: LibraryProfile) {
+        self.library = Some(library);
+    }
 }
 
 impl Evidence for MoleculeTable {
+    fn library(&mut self) -> Result<Option<LibraryProfile>> {
+        Ok(self.library.clone())
+    }
+
     fn molecules(&mut self, contig: &str, pos: Position) -> Result<Vec<Molecule>> {
         Ok(self
             .sites

@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use crate::simplex::{germline, negative_binomial, StratumProfile, MAX_CHANGES};
+
 /// The contig names of fgbio's default sequence dictionary.
 fn default_contigs() -> Vec<String> {
     (1..=22)
@@ -211,4 +213,29 @@ pub fn write_fasta(dir: &Path, name: &str, sequence: &str) -> PathBuf {
     )
     .unwrap();
     path
+}
+
+/// A stratum whose duplex and single-strand changes fall as Poisson damage at
+/// `rate` per molecule over `positions` positions of each depth in `depths`,
+/// its duplex changes joined at each depth by `real` positions with 2, and
+/// those the profile would call germline left out.
+pub fn poisson_stratum(depths: &[u32], positions: f64, rate: f64, real: u64) -> StratumProfile {
+    let mut stratum = StratumProfile::default();
+    for &n in depths {
+        let mean = f64::from(n) * rate;
+        for k in 0.. {
+            let count = (positions * negative_binomial(k, mean, f64::INFINITY)).round() as u64;
+            if germline(k, n) || (k > MAX_CHANGES && f64::from(k) > mean && count == 0) {
+                break;
+            }
+            let extra = if k == 2 { real } else { 0 };
+            stratum.positions.insert((n, k), count + extra);
+            stratum.strand_positions.insert((n, k), count);
+            stratum.molecules += u64::from(n) * (count + extra);
+            stratum.changes += u64::from(k) * (count + extra);
+            stratum.strand_molecules += u64::from(n) * count;
+            stratum.single_strand_changes += u64::from(k) * count;
+        }
+    }
+    stratum
 }

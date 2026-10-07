@@ -95,6 +95,12 @@ As the copied damage diagram shows, the copy runs from the partner's recessed en
 
 Copied damage has one blind spot: a lesion copied from an internal nick, by nick translation or strand displacement, or across the gap an abasic site leaves, can sit anywhere in the template, so its alternate molecules carry no signal of an end, and they show only as an excess of the damage class across a library.
 
+A duplex consensus BAM that carries each strand's single-strand consensus, the `ac`, `bc`, `ad` and `bd` tags fgbio and fgumi write, covers it.
+The tool then reads every molecule once more, counting its duplex changes and its *single-strand* changes, lesions on one strand that no polymerase copied, per damage class and context.
+Copied lesions land on a position one molecule at a time, while a real mutation in a clone puts several molecules on one position, so the artifact fraction a call with two or more alternate molecules starts from becomes the share of the library's positions as deep with as many changes that chance explains, unless `--copied-damage-prior learned` keeps the learned one or the call looks germline, alternate in 20% of its molecules.
+Two real mutations on single molecules at one position read as chance too, so where real mutations on one molecule come at a tenth of the damage rate or more, the chance share costs real calls on two molecules, and a position damaged far beyond the rest of its class looks real to it, so a threshold there rests on the decay alone.
+Without those tags, the artifact fraction is learned from the calls.
+
 ### End Repair Fill-In
 
 ![End repair fill-in makes an error: a recessed 3′ end is filled in with a wrong C opposite a T, the UMI-bearing adapters are ligated, and only the filled-in strand reads G, so a duplex consensus masks it.](.github/img/end-repair-fill-in.svg)
@@ -157,6 +163,7 @@ Each row of the metrics describes one filter and *stratum*, a group of calls tha
 - **Distance:** `distance`, the decay scale or window in bases.
 - **Molecules:** `alt_molecules` and `ref_molecules`, the molecules measured, and their `_congruent` counts and fractions, those within the distance of the artifact's end.
 - **Asymmetry:** `expected_alt_congruent`, the alternate molecules each call's own reference molecules predict within the distance, and `asymmetry_p_value`, a one-sided test of whether more sit there; a small value says the library has the artifact.
+- **Single strand:** for copied damage on a BAM with single-strand consensus, `change_rate` and `single_strand_rate`, the duplex and single-strand changes of the class per molecule over positions of more than 10 molecules, their `conversion_ratio`, `chance_fraction`, the mean prior of its calls, and `chance_excess`, the positions with two or more changes that chance expects beyond those seen and their noise, as a share of them, zero when the model fits.
 
 ```console
 cut -f 2,3,6,8,18 tumor.chaff.tsv | column -t
@@ -304,6 +311,7 @@ The tool learns per sample how common each artifact is and how far it reaches, s
 | `--a-tailing-threshold` | The posterior at or below which A-tailing applies its FILTER (default none). |
 | `--copied-damage-classes` | The damage classes, damaged base `>` read base: `C>T` for deamination from heat, storage, or formalin, and `G>T` for oxidation from shearing or heat (default `C>T,G>T`). |
 | `--copied-damage-distance` | The decay scale in bases from the lesion strand's 5′ end, the mean length over which a polymerase copies a lesion strand onto its partner, or `learned` (default `learned`). |
+| `--copied-damage-prior` | Where copied damage takes each call's artifact fraction from under `--model chaff`: `chance`, on a BAM with single-strand consensus, the share of the library's positions as deep with as many changes that chance explains, or `learned`, the fraction learned from the calls (default `chance`). |
 | `--end-repair-fill-in-distance` | The decay scale in bases from the 3′ end of the strand read 1 reports, or `learned` (default `learned`); under `--model fgbio`, the window from the nearest template end (default 15). |
 | `--a-tailing-distance` | The window from the template end, in bases (default 2). |
 | `--min-mapping-quality` | The mapping quality floor of a read or consensus (short `-m`; default 20). |
@@ -313,7 +321,7 @@ The tool learns per sample how common each artifact is and how far it reaches, s
 The VCF/BCF and the BAM must be coordinate sorted, with their contigs in the same order, and need no index; the FASTA needs a `.fai`.
 Each template counts once, and a read or consensus whose mate maps to the same contig needs the mate's CIGAR in its `MC` tag.
 Both ends of a template are measured for an FR pair, whose forward mate starts at or before its reverse mate's 5′ end; a mate of any other pair knows only its own end.
-An option of a filter that `--filters` leaves out is a usage error, and so is `--ref` without `copied-damage` or `--spectrum`.
+An option of a filter that `--filters` leaves out is a usage error, and so are `--ref` without `copied-damage` or `--spectrum` and `--copied-damage-prior` under `--model fgbio`.
 A VCF that already declares an enabled filter's INFO or FILTER, from an earlier run, is refused, so a FILTER never outlives the run that applied it; remove them first, as with `bcftools annotate -x`.
 
 ## Development and Testing

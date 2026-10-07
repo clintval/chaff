@@ -8,7 +8,7 @@ use chaff::classes::{validate_classes, DamageClass};
 use chaff::copied_damage::CopiedDamage;
 use chaff::evidence::PileupOptions;
 use chaff::filter::{run_filter, FilterArgs, FilterKind, FilterOptions};
-use chaff::model::{Distance, Model};
+use chaff::model::{CopiedDamagePrior, Distance, Model};
 use chaff::read_end::{ATailing, EndRepairFillIn};
 use clap::builder::styling::{AnsiColor, Effects, Style, Styles};
 use clap::error::ErrorKind;
@@ -258,6 +258,22 @@ struct Cli {
     )]
     copied_damage_distance: Distance,
 
+    /// Where copied damage takes each call's prior from, under `--model chaff`.
+    ///
+    ///   chance    on a BAM with single-strand consensus, the share of the
+    ///             library's positions as deep, with as many duplex changes,
+    ///             that chance explains; the learned fraction otherwise
+    ///   learned   the fraction learned per sample and stratum from the calls
+    #[arg(
+        long,
+        value_enum,
+        value_name = "PRIOR",
+        default_value_t = CopiedDamagePrior::Chance,
+        hide_possible_values = true,
+        verbatim_doc_comment
+    )]
+    copied_damage_prior: CopiedDamagePrior,
+
     /// Apply `CopiedDamageArtifact` at or below this posterior.
     #[arg(long, value_name = "P", value_parser = probability, verbatim_doc_comment)]
     copied_damage_threshold: Option<f64>,
@@ -383,6 +399,14 @@ impl Cli {
                 "'--end-repair-fill-in-distance learned' needs '--model chaff'; under '--model fgbio' it is a window of bases",
             ));
         }
+        if self.model == Model::Fgbio
+            && matches.value_source("copied_damage_prior") == Some(ValueSource::CommandLine)
+        {
+            return Err(cmd.error(
+                ErrorKind::ArgumentConflict,
+                "'--copied-damage-prior' needs '--model chaff'; under '--model fgbio' each call takes fgbio's prior",
+            ));
+        }
         if self.filters.contains(&FilterKind::CopiedDamage) && self.reference.is_none() {
             return Err(cmd.error(
                 ErrorKind::MissingRequiredArgument,
@@ -441,6 +465,7 @@ impl Cli {
             copied_damage: CopiedDamage {
                 classes: self.copied_damage_classes,
                 distance: self.copied_damage_distance,
+                prior: self.copied_damage_prior,
             },
             copied_damage_threshold: self.copied_damage_threshold,
             end_repair_fill_in: EndRepairFillIn {
@@ -695,6 +720,7 @@ mod tests {
     #[case(&["--filters", "copied-damage", "--a-tailing-p-value", "0.01"], "the argument '--a-tailing-threshold <P>' applies only to the a-tailing filter")]
     #[case(&["--filters", "a-tailing", "--end-repair-fill-in-distance", "15"], "the argument '--end-repair-fill-in-distance <BP>' applies only to the end-repair-fill-in filter")]
     #[case(&["--filters", "a-tailing", "--copied-damage-distance", "20"], "the argument '--copied-damage-distance <BP>' applies only to the copied-damage filter")]
+    #[case(&["--filters", "a-tailing", "--copied-damage-prior", "learned"], "the argument '--copied-damage-prior <PRIOR>' applies only to the copied-damage filter")]
     #[case(&["--filters", "a-tailing,end-repair-fill-in", "--ref", "ref.fa"], "the argument '--ref <FASTA>' applies only to the copied-damage filter")]
     fn test_an_option_of_a_filter_left_out_is_a_usage_error(
         #[case] extra: &[&str],
@@ -834,6 +860,24 @@ mod tests {
         );
         let window = args(&extra).unwrap().options.end_repair_fill_in.window();
         assert_eq!(window, 15.0);
+    }
+
+    #[test]
+    fn test_a_copied_damage_prior_under_fgbio_is_a_usage_error() {
+        let prior = |extra: &[&str]| {
+            let parsed = args(&[&["--ref", "ref.fa"][..], extra].concat());
+            parsed.map(|args| args.options.copied_damage.prior)
+        };
+        assert_eq!(prior(&[]).unwrap(), CopiedDamagePrior::Chance);
+        let learned = prior(&["--copied-damage-prior", "learned"]).unwrap();
+        assert_eq!(learned, CopiedDamagePrior::Learned);
+        let error = prior(&["--model", "fgbio", "--copied-damage-prior", "chance"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+        assert_eq!(error.exit_code(), 2);
+        assert!(
+            error.to_string().contains("needs '--model chaff'"),
+            "{error}"
+        );
     }
 
     #[test]

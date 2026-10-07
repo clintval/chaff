@@ -83,6 +83,30 @@ pub struct StratumMetrics {
     /// The one-sided asymmetry p-value, `P(X >= alt_congruent)`.
     #[serde(serialize_with = "six_digits_or_empty")]
     pub asymmetry_p_value: Option<f64>,
+    /// Copied damage only, from the single-strand consensus of a duplex BAM:
+    /// duplex changes of the stratum's class per molecule over the library,
+    /// leaving out positions with at least 3 changes in 1% of their
+    /// molecules as germline or clonal, and positions of 10 molecules or
+    /// fewer, where a germline variant would pass for one change.
+    #[serde(serialize_with = "six_digits_or_empty")]
+    pub change_rate: Option<f64>,
+    /// Single-strand changes per molecule with both strands called, each by
+    /// at least 2 raw reads, over the same positions.
+    #[serde(serialize_with = "six_digits_or_empty")]
+    pub single_strand_rate: Option<f64>,
+    /// `change_rate / single_strand_rate`.
+    #[serde(serialize_with = "six_digits_or_empty")]
+    pub conversion_ratio: Option<f64>,
+    /// The mean artifact prior of the stratum's calls under the library's
+    /// chance model.
+    #[serde(serialize_with = "six_digits_or_empty")]
+    pub chance_fraction: Option<f64>,
+    /// The positions with two or more changes that the library's chance
+    /// model expects beyond those observed and three standard deviations of
+    /// a Poisson count, at each depth, as a share of those observed: zero
+    /// when the model fits.
+    #[serde(serialize_with = "six_digits_or_empty")]
+    pub chance_excess: Option<f64>,
 }
 
 /// Serialize `value` rounded to six significant digits.

@@ -41,6 +41,11 @@ Feature: CLI contract
     Then the exit code is 2
     And stderr contains "error: damage classes C>T and G>A describe the same change on opposite strands"
 
+  Scenario: the copied damage prior belongs to the chaff model
+    When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam -r ref.fa --model fgbio --copied-damage-prior learned`
+    Then the exit code is 2
+    And stderr contains "error: '--copied-damage-prior' needs '--model chaff'"
+
   Scenario: thresholds are probabilities
     When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --a-tailing-threshold 2`
     Then the exit code is 2
