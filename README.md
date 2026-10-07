@@ -205,7 +205,7 @@ The prior is the chance that a call is an artifact before its molecules are seen
 - Under `--model chaff`, the default, each filter learns its artifact fraction `π_f` from all its calls, `π_f = (Σ r_i + 1) / (n + 2)` with `r_i = σ(LLR_i + logit π_f)`, along with its decay scale, and each stratum then learns `π = (Σ r_i + 10 π_f) / (n + 10)` from its own calls and 10 pseudo-calls at `π_f`, so a stratum of one or two calls mostly inherits `π_f`. A threshold then weighs each call against its own library's artifact rate and means much the same across samples.
 - Under `--model fgbio`, chaff reproduces fgbio's `FilterSomaticVcf`: a mutation prior of `min((2 * maf)^2, 0.9999)` from each call's alternate molecule fraction, which presumes every low-fraction call an artifact whatever the library, and windows from either template end.
 
-The same calls under each model, fgbio's in the first three columns and chaff's in the last two:
+The same calls under each model's end repair fill-in, fgbio's in the first three columns and chaff's in the last two:
 
 ```console
 for model in fgbio chaff; do
@@ -214,7 +214,7 @@ for model in fgbio chaff; do
         --bam tests/data/tumor.bam \
         --sample tumor \
         --output $model.vcf \
-        --filters end-repair-fill-in,a-tailing \
+        --filters end-repair-fill-in \
         --end-repair-fill-in-threshold 0.001 \
         --model $model
 done
@@ -222,11 +222,11 @@ paste fgbio.vcf chaff.vcf | grep -v '^#' | cut -f 2,7,8,18,19 | column -t
 ```
 
 ```text
-100  EndRepairFillInArtifact  ATAP=0.003732;ERFAP=0.00003218  EndRepairFillInArtifact  ATAP=0.963;ERFAP=0.0003782
-200  .                        ATAP=1;ERFAP=1                  .                        ATAP=1;ERFAP=1
-300  .                        .                               .                        .
-400  EndRepairFillInArtifact  ATAP=0.715;ERFAP=0.00001239     .                        ATAP=1;ERFAP=1
-500  EndRepairFillInArtifact  ERFAP=0.00001239                .                        ERFAP=1
+100  EndRepairFillInArtifact  ERFAP=0.00003218  EndRepairFillInArtifact  ERFAP=0.0003782
+200  .                        ERFAP=1           .                        ERFAP=1
+300  .                        .                 .                        .
+400  EndRepairFillInArtifact  ERFAP=0.00001239  .                        ERFAP=1
+500  EndRepairFillInArtifact  ERFAP=0.00001239  .                        ERFAP=1
 ```
 
 The 3 to 5 alternate molecules of the calls at positions 100, 400, and 500 sit within 3 bp of a template end, so fgbio's window filters all three.
