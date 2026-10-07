@@ -69,13 +69,15 @@
 //! On a duplex consensus BAM that carries each strand's single-strand consensus,
 //! copied damage under the `chaff` model takes its prior from the library
 //! instead (see [`simplex`]): for a call with `k` of at least 2 alternate
-//! molecules, the share `E(k) / S(k)` of the library's positions with `k`
-//! duplex changes of its stratum that chance explains. Over every depth it
-//! is `π_p = (min(E(k), S(k)) + k' π_s) / (S(k) + k')` with `k' = 10`
-//! pseudo-positions at the stratum's learned fraction `π_s`, and the call
-//! takes the same share within its own depth bin, shrunk toward `π_p`;
-//! from 8 alternate molecules on, the share is of positions with `k` or
-//! more. A lone change is as likely a copied lesion as a mutation on one
+//! molecules, the share of the library's positions as deep, within a
+//! doubling, with `k` duplex changes of its stratum that chance explains:
+//! `π = (S(k) - R(k) + k' π_0) / (S(k) + k')`, with `R(k)` the positions
+//! beyond chance's `E(k)` and two standard deviations of a Poisson count,
+//! and `k' = 10` pseudo-positions at `π_0`, chance's share at the call's
+//! depth were real positions as dense there as in the neighbouring bins, or
+//! the stratum's learned fraction `π_s` when no bin holds `k'` positions
+//! with `k` changes; from 8 alternate molecules on, the share is of
+//! positions with `k` or more. A lone change is as likely a copied lesion as a mutation on one
 //! molecule, so a one-molecule call keeps `π_s`, as does a call the
 //! profile would call germline, alternate in 20% of its molecules, and
 //! [`model::CopiedDamagePrior::Learned`] keeps `π_s` for every call.

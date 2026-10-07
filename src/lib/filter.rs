@@ -32,8 +32,8 @@ use crate::io::{add_filter, add_info, significant, vcf_float, VariantReader, Var
 use crate::metrics::{null_fraction, write_metrics, StratumMetrics};
 use crate::model::{CopiedDamagePrior, Distance, Model};
 use crate::prior::{
-    chance_prior, fgbio_artifact_prior, learn_artifact_fraction, learn_scale, posterior_mutation,
-    BetaPrior, FILTER_PRIOR, STRATUM_PRIOR_STRENGTH,
+    fgbio_artifact_prior, learn_artifact_fraction, learn_scale, posterior_mutation, BetaPrior,
+    FILTER_PRIOR, STRATUM_PRIOR_STRENGTH,
 };
 use crate::read_end::{is_filtered, ATailing, Distances, EndRepairFillIn, ReferencePool, Score};
 use crate::reference::Reference;
@@ -210,7 +210,7 @@ impl FilterOptions {
     pub fn add_header_lines(&self, header: &mut vcf::Header, scales: &Scales, chance: bool) {
         let prior = self.prior_text();
         let copied_prior = if chance {
-            "an artifact prior learned per sample and stratum, or, for a call with two or more alternate molecules in under 20% of its molecules, the share of the library's positions as deep with as many duplex changes that chance explains, shrunk toward it"
+            "an artifact prior learned per sample and stratum, or, for a call with two or more alternate molecules in under 20% of its molecules, the share of the library's positions as deep with as many duplex changes that chance explains beyond noise, shrunk toward the share of the depths beside it"
         } else {
             prior
         };
@@ -731,9 +731,9 @@ struct Fractions {
 /// at least [`MIN_CHANCE_CHANGES`] alternate molecules, fewer than a
 /// germline share of its molecules, takes each call's prior from its
 /// stratum's chance model in `chances`, unless `prior` asks for the learned
-/// one: the share chance explains at the call's depth, shrunk toward the
-/// share over every depth, itself shrunk toward the stratum's learned
-/// fraction.
+/// one: the share chance explains at the call's depth (see
+/// [`Chance::prior`]), with the stratum's learned fraction as its last
+/// fallback.
 fn assign_posteriors(
     calls: &mut [Vec<Annotation>],
     model: Model,
@@ -784,10 +784,7 @@ fn assign_posteriors(
             if beyond_chance {
                 return learned;
             }
-            let (expected, observed) = chance.at(changes);
-            let pooled = chance_prior(expected, observed, learned);
-            let (expected, observed) = chance.at_depth(annotation.depth, changes);
-            chance_prior(expected, observed, pooled)
+            chance.prior(annotation.depth, changes, learned)
         });
         let artifact_prior = match (model, prior, annotation.chance_prior) {
             (Model::Fgbio, _, _) => annotation.fgbio_prior,
@@ -2072,7 +2069,8 @@ mod tests {
     /// A two-molecule call takes the share of positions chance explains at
     /// its own depth: little where chance rarely puts two changes on one
     /// position, much where it often does, and, at a depth the library has
-    /// no positions of, the share over every depth.
+    /// no positions of, chance's own share at that depth against the real
+    /// positions the library's bins hold per position.
     #[test]
     fn test_a_call_takes_the_chance_share_at_its_depth() {
         use crate::testing::poisson_stratum;
@@ -2104,7 +2102,7 @@ mod tests {
         let priors: Vec<f64> = calls.iter().map(|c| c[0].prior.unwrap()).collect();
         assert!(priors[0] < 0.2, "{priors:?}");
         assert!(priors[1] > 0.85, "{priors:?}");
-        assert!(priors[2] > 0.75 && priors[2] < priors[1], "{priors:?}");
+        assert!(priors[2] > priors[1], "{priors:?}");
     }
 
     /// A call's chance prior counts every alternate molecule with a base at

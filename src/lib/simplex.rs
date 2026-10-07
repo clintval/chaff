@@ -49,7 +49,9 @@
 //! chance explains: few of a clean library's positions with two or more, and
 //! most of a damaged library's. Chance puts `k` changes on a deep position
 //! far more often than on a shallow one, so `E(k)` and `S(k)` are counted
-//! within depth bins, one per doubling of `n_j`. Chance cannot explain more
+//! within depth bins, one per doubling of `n_j`, and the positions beyond
+//! `E(k)` and [`EXCESS_TOLERANCE`] standard deviations of a Poisson count
+//! are the real ones (see [`Chance::prior`]). Chance cannot explain more
 //! positions than there are, so when `a` has `E(k)` exceed `S(k)` in some
 //! bin, for some `k` of two or more, by more than [`FIT_TOLERANCE`] standard
 //! deviations of a Poisson count, the model raises `a` until `E(k)` is
@@ -76,6 +78,7 @@ use noodles_bgzf as bgzf;
 
 use crate::classes::{complement, Context, DamageClass};
 use crate::evidence::PileupOptions;
+use crate::prior::{chance_prior, STRATUM_PRIOR_STRENGTH};
 use crate::reference::Reference;
 
 /// The fewest raw reads behind each strand's base for a molecule to count
@@ -113,6 +116,11 @@ const MAX_SPAN: usize = 100_000;
 /// expects with a count of changes may exceed those observed before the
 /// chance model takes its gamma shape to vary too much.
 pub const FIT_TOLERANCE: f64 = 3.0;
+
+/// The standard deviations of a Poisson count by which the positions
+/// observed with a count of changes may exceed those chance expects before
+/// the excess counts as real.
+pub const EXCESS_TOLERANCE: f64 = 2.0;
 
 /// The deepest positions the chance model keeps at their own depth.
 const EXACT_DEPTH: u32 = 64;
@@ -370,6 +378,19 @@ impl Tally {
         (expected, self.observed.iter().skip(k).sum())
     }
 
+    /// The positions with `changes` changes beyond those chance expects and
+    /// [`EXCESS_TOLERANCE`] standard deviations of a Poisson count: the real
+    /// ones.
+    pub fn real(&self, changes: u32) -> f64 {
+        let (expected, observed) = self.at(changes);
+        real_beyond(expected, observed)
+    }
+
+    /// The positions, whatever their changes.
+    pub fn positions(&self) -> f64 {
+        self.observed.iter().sum::<u64>() as f64
+    }
+
     /// The counts of changes the fit checks: each from 2 below
     /// [`MAX_CHANGES`], and those from it on together.
     fn checked(&self) -> impl Iterator<Item = (f64, u64)> + '_ {
@@ -469,6 +490,49 @@ impl Chance {
             .max_by(|a, b| a.2.total_cmp(&b.2))
             .map(|(bin, k, _)| (bin, k))
     }
+
+    /// A call's artifact prior at `molecules` molecules with `changes`
+    /// changes: the share of its depth bin's positions with as many changes
+    /// that chance explains, those beyond chance's and their noise being
+    /// real, shrunk by [`STRATUM_PRIOR_STRENGTH`] pseudo-positions toward
+    /// the share chance would have at the call's depth were the real
+    /// positions as dense there as in the neighbouring bins, or in every bin
+    /// when the neighbours hold fewer positions with as many changes than
+    /// the pseudo-positions, or `learned` when every bin does. A bin the
+    /// library has no positions in takes chance at the call's own depth.
+    pub fn prior(&self, molecules: u32, changes: u32, learned: f64) -> f64 {
+        let bin = depth_bin(molecules);
+        let own = self.bins.get(&bin);
+        let (expected, observed) = own.map_or((0.0, 0), |tally| tally.at(changes));
+        let per_position = match own.map(Tally::positions) {
+            Some(positions) if positions > 0.0 => expected / positions,
+            _ => negative_binomial(changes, f64::from(molecules) * self.rate, self.dispersion),
+        };
+        let density = |bins: &[&Tally]| {
+            let (real, positions, seen) = bins.iter().fold((0.0, 0.0, 0), |(r, p, s), t| {
+                (r + t.real(changes), p + t.positions(), s + t.at(changes).1)
+            });
+            (seen as f64 >= STRATUM_PRIOR_STRENGTH && positions > 0.0).then(|| real / positions)
+        };
+        let neighbours: Vec<&Tally> = [bin.checked_sub(1), Some(bin + 1)]
+            .into_iter()
+            .flatten()
+            .filter_map(|b| self.bins.get(&b))
+            .collect();
+        let all: Vec<&Tally> = self.bins.values().collect();
+        let fallback = match density(&neighbours).or_else(|| density(&all)) {
+            Some(real) if per_position + real > 0.0 => per_position / (per_position + real),
+            _ => learned,
+        };
+        chance_prior(expected, observed, fallback)
+    }
+}
+
+/// The positions observed with a count of changes beyond those chance
+/// expects and [`EXCESS_TOLERANCE`] standard deviations of a Poisson count:
+/// zero within that noise.
+pub fn real_beyond(expected: f64, observed: u64) -> f64 {
+    (observed as f64 - expected - EXCESS_TOLERANCE * expected.sqrt()).max(0.0)
 }
 
 /// `numerator / denominator`, or `None` without a denominator.
@@ -1638,6 +1702,67 @@ mod tests {
             "{chance:?}"
         );
         assert!(chance.excess > 0.0, "{chance:?}");
+    }
+
+    /// Over depths spread across four doublings, a bin holding one position
+    /// with two changes beside a bin where real mutations put two changes on
+    /// positions beyond chance takes its prior from that neighbour's real
+    /// positions per position, not from the deep bins, where chance explains
+    /// every pair: a call there is nearly real, where the share over every
+    /// depth would call it chance. A call among the neighbour's own pairs
+    /// sits between, its bins on either side holding few real positions,
+    /// and a call among the deep pairs is chance.
+    #[test]
+    fn test_a_sparse_bin_takes_its_neighbours_real_density() {
+        let mut stratum = StratumProfile::default();
+        for step in 0..32u32 {
+            let n = (128.0 * 2f64.powf(f64::from(step) / 8.0)).round() as u32;
+            let mean = f64::from(n) * 1e-4;
+            for k in 0..=MAX_CHANGES {
+                let count = (5_000.0 * negative_binomial(k, mean, f64::INFINITY)).round() as u64;
+                let real = if step < 8 && k == 2 { 3 } else { 0 };
+                stratum.positions.insert((n, k), count + real);
+                stratum.strand_positions.insert((n, k), count);
+            }
+        }
+        stratum.positions.insert((100, 0), 50);
+        stratum.positions.insert((100, 2), 1);
+        let chance = stratum.chance();
+        let (expected, observed) = chance.at(2);
+        assert!(expected / observed as f64 > 0.8, "{chance:?}");
+        let sparse = chance.prior(100, 2, 0.5);
+        assert!(sparse < 0.15, "{sparse} {chance:?}");
+        let real = chance.prior(200, 2, 0.5);
+        assert!(sparse < real && real < 0.6, "{real} {chance:?}");
+        assert_eq!(chance.prior(1500, 2, 0.5), 1.0);
+    }
+
+    /// Pure Poisson damage leaves no position with two changes beyond
+    /// chance, so a two-molecule call is an artifact outright, as it still is
+    /// when the positions with two run 1.5 standard deviations over chance's
+    /// count, as noise does; 3 over leaves what is beyond the noise real.
+    #[test]
+    fn test_pure_chance_leaves_no_real_positions_within_its_noise() {
+        let stratum = poisson_stratum(&[1000], 100_000.0, 1e-4, 0);
+        let chance = stratum.chance();
+        assert_eq!(chance.prior(1000, 2, 0.5), 1.0);
+        let (expected, observed) = chance.at_depth(1000, 2);
+        let over = |sd: f64| {
+            let mut stratum = stratum.clone();
+            let observed = observed + (sd * expected.sqrt()).round() as u64;
+            stratum.positions.insert((1000, 2), observed);
+            let chance = stratum.chance();
+            (chance.prior(1000, 2, 0.5), chance.at_depth(1000, 2))
+        };
+        assert_eq!(over(1.5).0, 1.0);
+        let (prior, (expected, observed)) = over(3.0);
+        let observed = observed as f64;
+        let real = observed - expected - EXCESS_TOLERANCE * expected.sqrt();
+        let fallback = expected / (expected + real);
+        let wanted = (observed - real + STRATUM_PRIOR_STRENGTH * fallback)
+            / (observed + STRATUM_PRIOR_STRENGTH);
+        assert!((prior - wanted).abs() < 1e-9, "{prior} {wanted}");
+        assert!(prior < 1.0 && real > 0.0, "{prior} {real}");
     }
 
     /// The rate is where the positions expected with no change meet those
