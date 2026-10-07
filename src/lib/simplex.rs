@@ -33,11 +33,13 @@
 //! often than a uniform rate would. Single-strand changes measure that
 //! variation free of real mutations, which only duplex changes carry: their
 //! counts at each position follow a negative binomial, a Poisson whose rate
-//! varies as a gamma of shape `a`, fitted so the positions expected with no
-//! change and with one both match those observed. With `n_j` molecules at
-//! position `j` and `S(k)` positions holding `k` duplex changes, the duplex
-//! rate `r` solves `sum_j NB(1; n_j r, a) = S(1)`, and chance puts `k`
-//! changes on
+//! varies as a gamma of shape `a`, fitted so that at their rate per molecule
+//! the positions expected with no change match those observed. With `n_j`
+//! molecules at position `j` and `S(k)` positions holding `k` duplex
+//! changes, the duplex rate `r` solves `sum_j NB(0; n_j r, a) = S(0)`, so
+//! that chance explains every position without a change and, but for the
+//! few real mutations on one molecule, every position with one, and chance
+//! puts `k` changes on
 //!
 //! ```text
 //! E(k) = sum_j NB(k; n_j r, a)
@@ -85,7 +87,9 @@ pub const MIN_STRAND_READS: i64 = 2;
 pub const MAX_CHANGES: u32 = 8;
 
 /// The fewest changes at a position the chance model gives a call's prior
-/// for: its rate matches the positions with one, so it explains them all.
+/// for: a lone change is as likely a copied lesion as a mutation on one
+/// molecule, so its count says nothing, and the rate takes nearly all of
+/// them as chance.
 pub const MIN_CHANCE_CHANGES: u32 = 2;
 
 /// The records a library profile reads before it decides the BAM has no
@@ -177,7 +181,7 @@ impl StratumProfile {
     /// The stratum's chance model: the dispersion fitted to its single-strand
     /// changes, raised toward a Poisson's until chance expects no more
     /// positions with any count of two or more than were observed, the rate
-    /// of duplex changes it matches to the positions with one, and the
+    /// of duplex changes it matches to the positions with none, and the
     /// positions expected and observed with each count.
     pub fn chance(&self) -> Chance {
         let fitted = self.single_strand_dispersion();
@@ -213,8 +217,8 @@ impl StratumProfile {
     /// The chance model at a given dispersion.
     pub fn chance_at(&self, dispersion: f64) -> Chance {
         let depths = depths(&self.positions);
-        let ones = observed(&self.positions, 1) as f64;
-        let rate = matched_rate(&depths, ones, dispersion);
+        let zeros = observed(&self.positions, 0) as f64;
+        let rate = matched_rate(&depths, zeros, dispersion);
         let mut bins: BTreeMap<u32, Tally> = BTreeMap::new();
         for (&(n, k), &count) in &self.positions {
             bins.entry(depth_bin(n)).or_default().observe(k, count);
@@ -465,90 +469,75 @@ fn expected_at(depths: &BTreeMap<u32, f64>, k: u32, rate: f64, dispersion: f64) 
         .sum()
 }
 
-/// The rate per molecule at which the positions of `depths` expected with
-/// one change first match `ones`, as the rate rises from zero, or where they
-/// peak when they never rise that high; zero without such positions. A
-/// position of `n` molecules expects at most `n` times the rate, so none
-/// matches below `ones` over the molecules, and its chance of one change
-/// peaks where it expects one, so past one over the fewest molecules every
-/// position's falls.
-fn matched_rate(depths: &BTreeMap<u32, f64>, ones: f64, dispersion: f64) -> f64 {
-    const STEP: f64 = 1.189_207_115_002_721;
+/// The rate per molecule, up to one, at which the positions of `depths`
+/// expected with no change match `zeros`; zero when every position is
+/// without one. A position's chance of no change falls as the rate rises,
+/// so the rate is unique, where the positions expected with one change, which
+/// rise with the rate until each position expects one and fall past that,
+/// would meet their count at a low rate and again at a high one.
+fn matched_rate(depths: &BTreeMap<u32, f64>, zeros: f64, dispersion: f64) -> f64 {
+    let positions: f64 = depths.values().sum();
     let molecules: f64 = depths.iter().map(|(&n, &count)| f64::from(n) * count).sum();
-    let Some(&shallowest) = depths.keys().next() else {
-        return 0.0;
-    };
-    if ones <= 0.0 || molecules <= 0.0 {
+    if positions - zeros <= 0.0 || molecules <= 0.0 {
         return 0.0;
     }
-    let singles = |rate: f64| expected_at(depths, 1, rate, dispersion);
-    let (mut low, last) = (ones / molecules, 1.0 / f64::from(shallowest.max(1)));
-    let mut peak = (singles(low), low);
-    while low < last {
-        let high = (low * STEP).min(last);
-        let value = singles(high);
-        if value >= ones {
-            let (mut low, mut high) = (low.ln(), high.ln());
-            for _ in 0..30 {
-                let mid = (low + high) / 2.0;
-                if singles(mid.exp()) < ones {
-                    low = mid;
-                } else {
-                    high = mid;
-                }
-            }
-            return ((low + high) / 2.0).exp();
-        }
-        if value > peak.0 {
-            peak = (value, high);
-        }
-        low = high;
+    let none = |rate: f64| expected_at(depths, 0, rate, dispersion);
+    if none(1.0) >= zeros {
+        return 1.0;
     }
-    peak.1
+    let (mut low, mut high) = (((positions - zeros) / molecules).ln(), 0.0);
+    for _ in 0..60 {
+        let mid = (low + high) / 2.0;
+        if none(mid.exp()) > zeros {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    ((low + high) / 2.0).exp()
 }
 
 /// The gamma shape of a rate's variation across positions, fitted so the
-/// positions expected with no change match those observed once the rate
-/// matches the positions with one: infinite when they vary no more than a
-/// Poisson allows. Single-strand changes give it free of real mutations,
-/// which only duplex changes carry. Expected zeros fall as the shape falls
-/// from a Poisson's until the rate can no longer match the ones, so the
-/// shape is the first crossing on the way down.
+/// positions expected with no change match those observed at the rate the
+/// changes give per molecule: infinite when they vary no more than a Poisson
+/// allows. Single-strand changes give it free of real mutations, which only
+/// duplex changes carry. At a given mean, a position's chance of no change
+/// rises as the shape falls from a Poisson's, so the shape is where the
+/// expected zeros reach those observed.
 fn fitted_dispersion(positions: &Positions) -> f64 {
-    const STEPS: usize = 24;
     let depths = depths(positions);
-    let (zeros, ones) = (observed(positions, 0) as f64, observed(positions, 1) as f64);
-    if ones == 0.0 {
+    let zeros = observed(positions, 0) as f64;
+    let (molecules, changes) =
+        positions
+            .iter()
+            .fold((0.0, 0.0), |(molecules, changes), (&(n, k), &count)| {
+                let count = count as f64;
+                (
+                    molecules + f64::from(n) * count,
+                    changes + f64::from(k) * count,
+                )
+            });
+    if changes == 0.0 {
         return f64::INFINITY;
     }
-    let excess = |ln_dispersion: f64| {
-        let dispersion = ln_dispersion.exp();
-        let rate = matched_rate(&depths, ones, dispersion);
-        expected_at(&depths, 0, rate, dispersion) - zeros
-    };
-    let (top, bottom) = (DISPERSIONS.1.ln(), DISPERSIONS.0.ln());
-    if excess(top) <= 0.0 {
+    let rate = changes / molecules;
+    let excess = |ln_dispersion: f64| expected_at(&depths, 0, rate, ln_dispersion.exp()) - zeros;
+    if expected_at(&depths, 0, rate, f64::INFINITY) >= zeros {
         return f64::INFINITY;
     }
-    let step = (top - bottom) / STEPS as f64;
-    let mut high = top;
-    for i in 1..=STEPS {
-        let low = top - step * i as f64;
-        if excess(low) < 0.0 {
-            let (mut low, mut high) = (low, high);
-            for _ in 0..30 {
-                let mid = (low + high) / 2.0;
-                if excess(mid) < 0.0 {
-                    low = mid;
-                } else {
-                    high = mid;
-                }
-            }
-            return ((low + high) / 2.0).exp();
+    let (mut low, mut high) = (DISPERSIONS.0.ln(), DISPERSIONS.1.ln());
+    if excess(low) < 0.0 {
+        return DISPERSIONS.0;
+    }
+    for _ in 0..40 {
+        let mid = (low + high) / 2.0;
+        if excess(mid) < 0.0 {
+            high = mid;
+        } else {
+            low = mid;
         }
-        high = low;
     }
-    DISPERSIONS.0
+    ((low + high) / 2.0).exp()
 }
 
 /// The single-strand and duplex changes of a library, per damage stratum,
@@ -1392,10 +1381,10 @@ mod tests {
     }
 
     /// Single-strand changes that vary no more than a Poisson leave the
-    /// chance model a Poisson, whose rate reproduces the positions with one
+    /// chance model a Poisson, whose rate reproduces the positions with no
     /// change.
     #[test]
-    fn test_the_chance_model_matches_the_positions_with_one_change() {
+    fn test_the_chance_model_matches_the_positions_with_no_change() {
         let mut stratum = StratumProfile::default();
         for (k, count) in [(0, 900), (1, 90), (2, 8), (9, 2)] {
             stratum.positions.insert((100, k), count);
@@ -1406,11 +1395,9 @@ mod tests {
         assert!(stratum.chance().dispersion.is_infinite());
         let chance = stratum.chance_at(f64::INFINITY);
         let mean = 100.0 * chance.rate;
-        assert!(
-            (1000.0 * mean * (-mean).exp() - 90.0).abs() < 1e-6,
-            "{chance:?}"
-        );
-        assert!((chance.at(1).0 - 90.0).abs() < 1e-6);
+        assert!((1000.0 * (-mean).exp() - 900.0).abs() < 1e-6, "{chance:?}");
+        assert!((chance.at(0).0 - 900.0).abs() < 1e-6);
+        assert!((chance.at(1).0 - 1000.0 * mean * (-mean).exp()).abs() < 1e-6);
         assert!((chance.at(2).0 - 1000.0 * mean * mean / 2.0 * (-mean).exp()).abs() < 1e-6);
         assert_eq!(chance.at(2).1, 8);
         assert_eq!(chance.at(MAX_CHANGES).1, 2);
@@ -1444,40 +1431,42 @@ mod tests {
             chance.at(2).0 > 1.3 * poisson.at(2).0,
             "{chance:?} {poisson:?}"
         );
-        assert!((chance.at(1).0 - chance.at(1).1 as f64).abs() < 1e-3);
+        assert!((chance.at(0).0 - chance.at(0).1 as f64).abs() < 1e-3);
         assert!(chance.fits(), "{chance:?}");
         assert_eq!(stratum.chance(), chance);
     }
 
     /// Poisson damage at 1e-4 per molecule over 100,000 positions of 1,000
     /// molecules, with 200 real mutations of 2 molecules each, leaves chance
-    /// explaining 69% of the positions with 2 changes.
+    /// explaining 72% of the positions with 2 changes: 69% are its, and the
+    /// real positions, without a change of chance's, draw its rate up by 2%.
     #[test]
     fn test_the_chance_model_leaves_real_mutations_to_the_positions_beyond_chance() {
         let stratum = poisson_stratum(&[1000], 100_000.0, 1e-4, 200);
         let chance = stratum.chance();
+        assert!((chance.rate / 1e-4 - 1.02).abs() < 0.005, "{chance:?}");
         let (expected, observed) = chance.at(2);
         let share = expected / observed as f64;
-        assert!((share - 0.694).abs() < 0.01, "{share} {chance:?}");
+        assert!((share - 0.722).abs() < 0.01, "{share} {chance:?}");
         assert!(chance.fits() && chance.excess < 0.01, "{chance:?}");
     }
 
     /// Chance puts 2 changes on a position of 2,000 molecules a hundred times
     /// as often as on one of 200, so with Poisson damage at 1e-4 over 50,000
     /// positions of each depth and 100 real mutations of 2 molecules at each,
-    /// chance explains 9% of the shallow positions with 2 changes and 89% of
-    /// the deep ones, where over both depths it would explain 80% of either.
+    /// chance explains 9% of the shallow positions with 2 changes and 93% of
+    /// the deep ones, where over both depths it would explain 84% of either.
     #[test]
     fn test_the_chance_model_compares_positions_of_like_depth() {
         let stratum = poisson_stratum(&[200, 2000], 50_000.0, 1e-4, 100);
         let chance = stratum.chance();
         let share = |(expected, observed): (f64, u64)| expected / observed as f64;
         let shallow = share(chance.at_depth(200, 2));
-        assert!((shallow - 0.089).abs() < 0.005, "{shallow} {chance:?}");
+        assert!((shallow - 0.093).abs() < 0.005, "{shallow} {chance:?}");
         let deep = share(chance.at_depth(2000, 2));
-        assert!((deep - 0.891).abs() < 0.005, "{deep} {chance:?}");
+        assert!((deep - 0.926).abs() < 0.005, "{deep} {chance:?}");
         let pooled = share(chance.at(2));
-        assert!((pooled - 0.805).abs() < 0.005, "{pooled} {chance:?}");
+        assert!((pooled - 0.837).abs() < 0.005, "{pooled} {chance:?}");
         assert_eq!(chance.at_depth(150, 2), chance.at_depth(200, 2));
         assert_eq!(chance.at_depth(5000, 2), (0.0, 0));
     }
@@ -1548,18 +1537,49 @@ mod tests {
         assert!(expected <= observed as f64 + FIT_TOLERANCE * expected.sqrt());
     }
 
-    /// Positions of one and of 10,000 molecules each expect one change most
-    /// often at a rate of one over their molecules, so the positions expected
-    /// with one rise, fall, and rise again, and the rate matched to 300 is
-    /// where they first reach it, not where they reach it again.
+    /// The rate is where the positions expected with no change meet those
+    /// observed, which a count of ones, met at a low rate and again at a
+    /// high one, could not fix, and it is at most one change per molecule.
     #[test]
-    fn test_the_matched_rate_is_the_first_to_explain_the_positions_with_one() {
+    fn test_the_matched_rate_reproduces_the_positions_with_no_change() {
         let depths = BTreeMap::from([(1, 100_000.0), (10_000, 1_000.0)]);
-        let rate = matched_rate(&depths, 300.0, f64::INFINITY);
-        assert!(rate < 1e-4, "{rate}");
-        assert!((expected_at(&depths, 1, rate, f64::INFINITY) - 300.0).abs() < 1e-6);
-        let peak = matched_rate(&depths, 1e6, f64::INFINITY);
-        assert!((peak - 1.0).abs() < 0.2, "{peak}");
+        let at = |k, rate| expected_at(&depths, k, rate, f64::INFINITY);
+        for truth in [3e-5, 1e-3, 0.5] {
+            let rate = matched_rate(&depths, at(0, truth), f64::INFINITY);
+            assert!((rate / truth - 1.0).abs() < 1e-6, "{rate} {truth}");
+        }
+        assert_eq!(matched_rate(&depths, 101_000.0, f64::INFINITY), 0.0);
+        assert_eq!(matched_rate(&depths, 0.0, f64::INFINITY), 1.0);
+        assert_eq!(matched_rate(&BTreeMap::new(), 0.0, f64::INFINITY), 0.0);
+    }
+
+    /// Positions that expect two changes each meet their count of ones at
+    /// a rate below the true one too, where a Poisson expects more zeros than
+    /// there are: the chance rate and the single-strand shape both hold,
+    /// at a Poisson and at a shape near which the ones barely move.
+    #[test]
+    fn test_the_fits_hold_where_positions_expect_more_than_one_change() {
+        for (dispersion, tolerance) in [(f64::INFINITY, 0.0), (1.5, 0.02), (0.3, 0.02)] {
+            let mut stratum = StratumProfile::default();
+            for n in [500, 1000, 3000] {
+                let mean = f64::from(n) * 2e-3;
+                for k in 0..200 {
+                    let count = (100_000.0 * negative_binomial(k, mean, dispersion)).round();
+                    if count > 0.0 && !germline(k, n) {
+                        stratum.positions.insert((n, k), count as u64);
+                        stratum.strand_positions.insert((n, k), count as u64);
+                    }
+                }
+            }
+            let fitted = stratum.single_strand_dispersion();
+            assert!(
+                fitted == dispersion || (fitted - dispersion).abs() <= tolerance * dispersion,
+                "{fitted} {dispersion}"
+            );
+            let chance = stratum.chance();
+            assert!((chance.rate / 2e-3 - 1.0).abs() < 0.01, "{chance:?}");
+            assert!(chance.fits() && chance.excess == 0.0, "{chance:?}");
+        }
     }
 
     /// Positions deeper than 64 molecules pool at their mean depth within

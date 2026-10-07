@@ -2210,9 +2210,9 @@ mod tests {
         assert_eq!(run(None).1, cdap);
     }
 
-    /// Chance explains every position with one change, since its rate is
-    /// matched to them, so a one-molecule call keeps the learned fraction
-    /// however damaged the library.
+    /// A lone change is as likely a copied lesion as a mutation on one
+    /// molecule, so a one-molecule call keeps the learned fraction however
+    /// damaged the library.
     #[test]
     fn test_one_molecule_calls_keep_the_learned_fraction() {
         use crate::simplex::{LibraryProfile, StratumProfile};
