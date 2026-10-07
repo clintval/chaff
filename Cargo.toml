@@ -10,6 +10,7 @@ description = "Flag somatic variant calls that are library-preparation artifacts
 categories = ["command-line-utilities", "science"]
 keywords = ["bioinformatics", "somatic", "duplex", "artifact", "vcf"]
 exclude = [".github/", "pixi.lock", "pixi.toml", "tests/figures.py"]
+publish = false
 
 [profile.release]
 codegen-units = 1

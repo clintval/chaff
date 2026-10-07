@@ -57,71 +57,10 @@ jobs:
       contents: read  # to check out the repository in the called workflow
     uses: ./.github/workflows/ci.yml # zizmor: ignore[self-repository] GitHub does not document $/ for reusable workflows
 
-  check-package:
-    name: check-package
-    needs: tests
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read  # to check out the tagged commit
-    steps:
-      - name: Check out the repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install the stable Rust toolchain
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-
-      - name: Package the crate as crates.io would publish it
-        run: |
-          cargo package --list --locked
-          cargo publish --dry-run --locked
-
-  publish-to-crates-io:
-    name: publish-to-crates-io
-    runs-on: ubuntu-latest
-    needs: check-package
-    environment: crates-io
-    permissions:
-      contents: read  # to check out the tagged commit
-      id-token: write  # to publish to crates.io as a trusted publisher
-    steps:
-      - name: Check out the repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install the stable Rust toolchain
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-
-      - name: Check whether crates.io already has this version
-        id: published
-        run: |
-          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
-          status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
-            --user-agent "chaff release (https://github.com/clintval/chaff)" \
-            "https://crates.io/api/v1/crates/chaff/$version")
-          echo "exists=$([ "$status" = 200 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-
-      - name: Get a short-lived crates.io token
-        if: ${{ steps.published.outputs.exists != 'true' }}
-        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
-        id: auth
-
-      - name: Publish to crates.io
-        if: ${{ steps.published.outputs.exists != 'true' }}
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: cargo publish --locked
-
   make-changelog:
     name: make-changelog
     runs-on: ubuntu-latest
-    needs: publish-to-crates-io
+    needs: tests
     permissions:
       contents: read  # to check out the tagged commit and its history
     outputs:
