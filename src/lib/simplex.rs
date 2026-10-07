@@ -147,7 +147,8 @@ pub type Positions = BTreeMap<(u32, u32), u64>;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StratumProfile {
     /// Molecules whose consensus base passes the quality floor at a base of
-    /// the class.
+    /// the class, over positions of more than ten such molecules, where two
+    /// changes are not yet germline.
     pub molecules: u64,
     /// Those whose consensus base is the damaged base.
     pub changes: u64,
@@ -271,11 +272,11 @@ pub fn germline(changes: u32, molecules: u32) -> bool {
     changes >= 2 && f64::from(changes) / f64::from(molecules.max(1)) >= GERMLINE_FRACTION
 }
 
-/// Whether a position of `molecules` molecules counts toward the chance
-/// model: deep enough that [`MIN_CHANCE_CHANGES`] changes would not make it
-/// germline, so a call there could take its prior from the model. A
-/// shallower position shows a germline variant as one change, or none, as
-/// damage would, and off-target consensus leaves many of them.
+/// Whether a position of `molecules` molecules counts: deep enough that
+/// [`MIN_CHANCE_CHANGES`] changes would not make it germline, so a call
+/// there could take its prior from the chance model. A shallower position
+/// shows a germline variant as one change, or none, as damage would, and
+/// off-target consensus leaves many of them.
 fn priced(molecules: u32) -> bool {
     !germline(MIN_CHANCE_CHANGES, molecules)
 }
@@ -778,6 +779,9 @@ impl<'a> Scanner<'a> {
         let Some(context) = site.context else {
             return;
         };
+        if !priced(site.molecules) {
+            return;
+        }
         for class in self.classes {
             let alt = if site.reference == class.lesion {
                 class.reads_as
@@ -802,7 +806,7 @@ impl<'a> Scanner<'a> {
                 stratum.strand_molecules += u64::from(site.strand_molecules);
                 stratum.single_strand_changes += u64::from(site.single_strand[a]);
             }
-            if priced(site.molecules) && !germline(changes, site.molecules) {
+            if !germline(changes, site.molecules) {
                 *stratum
                     .positions
                     .entry((site.molecules, changes))
@@ -1127,6 +1131,15 @@ mod tests {
             .attr(Tag::new(b'b', b'd'), depths(40))
     }
 
+    /// Plain consensus over positions 1 to 40: ten make the positions there
+    /// deep enough to count once a consensus under test joins them, and one
+    /// more covers a base the consensus under test leaves uncalled.
+    fn fill(reads: &mut SamBuilder, consensus: usize) {
+        for _ in 0..consensus {
+            reads.add_frag(frag(&[], Strand::Plus));
+        }
+    }
+
     /// Raw-read depths of 3 at each of `length` bases.
     fn depths(length: usize) -> BufValue {
         BufValue::Array(BufArray::Int16(vec![3; length]))
@@ -1178,47 +1191,41 @@ mod tests {
         profile_library(&bam, &fasta, &classes, &PileupOptions::default(), &stop).unwrap()
     }
 
-    /// Of eleven consensus over positions 1 to 40, one holds a duplex C>T at
-    /// the C of a CpG, one a C>T on one strand at a C outside CpG, and one
-    /// the same change read by a single raw read, which does not count. The
-    /// chance model holds the positions, deep enough for two changes not to
-    /// be germline, which ten consensus would not be.
+    /// Of thirteen consensus over positions 1 to 40, one holds a duplex C>T
+    /// at the C of a CpG, one a C>T on one strand at a C outside CpG, and
+    /// one the same change read by a single raw read, which does not count.
+    /// Every position holds at least eleven called molecules, so all count,
+    /// where ten consensus would count nowhere.
     #[test]
     fn test_a_profile_counts_duplex_and_single_strand_changes_per_stratum() {
         let mut reads = SamBuilder::new().read_length(40);
         reads.add_frag(frag(&[(2, b'T', 30, b'T', b'T', 3)], Strand::Plus));
         reads.add_frag(frag(&[(6, b'N', 2, b'T', b'C', 3)], Strand::Plus));
         reads.add_frag(frag(&[(6, b'N', 2, b'T', b'C', 1)], Strand::Plus));
-        for _ in 0..8 {
-            reads.add_frag(frag(&[], Strand::Plus));
-        }
+        fill(&mut reads, 10);
         let profile = profile(&reads).unwrap();
         let cpg = profile.stratum("C>T:CpG").unwrap();
         let other = profile.stratum("C>T:non-CpG").unwrap();
         // Positions 1 to 40 hold five units: a CpG C and G and one other C each.
-        assert_eq!(cpg.molecules, 110);
+        assert_eq!(cpg.molecules, 130);
         assert_eq!(cpg.changes, 1);
-        assert_eq!(cpg.strand_molecules, 110);
+        assert_eq!(cpg.strand_molecules, 130);
         assert_eq!(cpg.single_strand_changes, 0);
-        assert_eq!(cpg.positions.get(&(11, 1)), Some(&1));
-        assert_eq!(cpg.positions.get(&(11, 0)), Some(&9));
-        assert_eq!(other.molecules, 53);
+        assert_eq!(cpg.positions.get(&(13, 1)), Some(&1));
+        assert_eq!(cpg.positions.get(&(13, 0)), Some(&9));
+        assert_eq!(other.molecules, 63);
         assert_eq!(other.changes, 0);
-        assert_eq!(other.strand_molecules, 54);
+        assert_eq!(other.strand_molecules, 64);
         assert_eq!(other.single_strand_changes, 1);
-        assert_eq!(other.single_strand_rate(), Some(1.0 / 54.0));
+        assert_eq!(other.single_strand_rate(), Some(1.0 / 64.0));
         assert_eq!(cpg.conversion_ratio(), None);
         let oxidation = profile.stratum("G>T:CpG").unwrap();
-        assert_eq!((oxidation.molecules, oxidation.changes), (110, 0));
+        assert_eq!((oxidation.molecules, oxidation.changes), (130, 0));
 
         let mut reads = SamBuilder::new().read_length(40);
-        for _ in 0..10 {
-            reads.add_frag(frag(&[], Strand::Plus));
-        }
+        fill(&mut reads, 10);
         let shallow = super::tests::profile(&reads).unwrap();
-        let cpg = shallow.stratum("C>T:CpG").unwrap();
-        assert_eq!((cpg.molecules, cpg.positions.len()), (100, 0));
-        assert!(cpg.strand_positions.is_empty());
+        assert!(shallow.strata.is_empty(), "{shallow:?}");
     }
 
     /// A consensus base that only one strand carries is no duplex change,
@@ -1226,13 +1233,14 @@ mod tests {
     #[test]
     fn test_a_duplex_change_needs_both_strands() {
         let mut reads = SamBuilder::new().read_length(40);
+        fill(&mut reads, 10);
         reads.add_frag(frag(&[(2, b'T', 30, b'T', b'C', 3)], Strand::Plus));
         reads.add_frag(frag(&[(10, b'T', 30, b'T', b'T', 3)], Strand::Plus));
         let profile = profile(&reads).unwrap();
         let cpg = profile.stratum("C>T:CpG").unwrap();
         assert_eq!(
             (cpg.molecules, cpg.changes, cpg.single_strand_changes),
-            (20, 1, 1)
+            (120, 1, 1)
         );
     }
 
@@ -1282,8 +1290,9 @@ mod tests {
 
     /// Mates over the same positions are one molecule there: the mate that
     /// sorts second leaves its mate's span to it, with or without the mates'
-    /// CIGARs, and counts alone where its mate is left out. Of positions 1 to
-    /// 50, mates over 1 to 40 and 11 to 50 cover all 12 CpG positions.
+    /// CIGARs, and counts alone where its mate is left out. Mates over 1 to
+    /// 40 and 11 to 50 cover the 10 CpG positions of 1 to 40, where ten
+    /// other consensus make them deep enough to count, and 2 more beyond.
     #[test]
     fn test_overlapping_mates_count_once() {
         let molecules = |mate_cigars: bool, first_mapq: u8| {
@@ -1291,6 +1300,7 @@ mod tests {
                 SamBuilder::new().read_length(40),
                 SamBuilder::new().read_length(40),
             );
+            fill(&mut reads, 10);
             let pair = Pair::at(1, 11)
                 .bases1(&reference()[..40])
                 .bases2(&reference()[10..50])
@@ -1306,9 +1316,9 @@ mod tests {
             let profile = profile(&reads).unwrap();
             profile.stratum("C>T:CpG").unwrap().molecules
         };
-        assert_eq!(molecules(true, 60), 12);
-        assert_eq!(molecules(false, 60), 12);
-        assert_eq!(molecules(true, 5), 10);
+        assert_eq!(molecules(true, 60), 110);
+        assert_eq!(molecules(false, 60), 110);
+        assert_eq!(molecules(true, 5), 88);
     }
 
     /// A strand change on a reverse consensus, its tags reverse complemented
@@ -1317,6 +1327,7 @@ mod tests {
     #[test]
     fn test_a_reverse_consensus_counts_its_strand_changes_where_they_align() {
         let mut reads = SamBuilder::new().read_length(40);
+        fill(&mut reads, 11);
         reads.add_frag(frag(&[(3, b'N', 2, b'A', b'G', 3)], Strand::Minus));
         let profile = profile(&reads).unwrap();
         assert_eq!(profile.stratum("C>T:CpG").unwrap().single_strand_changes, 1);
@@ -1334,7 +1345,8 @@ mod tests {
             &reference[10..20],
             &reference[23..41]
         );
-        let mut reads = SamBuilder::new();
+        let mut reads = SamBuilder::new().read_length(40);
+        fill(&mut reads, 10);
         reads.add_frag(tagged(
             Frag::at(1).bases(&bases).cigar("10M2I10M3D18M"),
             tags(&bases, Some((29, b'T'))),
@@ -1354,7 +1366,8 @@ mod tests {
         let reference = reference();
         let full = &reference[..40];
         let clipped = |tags: [(Tag, BufValue); 4]| {
-            let mut reads = SamBuilder::new();
+            let mut reads = SamBuilder::new().read_length(40);
+            fill(&mut reads, 10);
             reads.add_frag(tagged(
                 Frag::at(6).bases(&full[5..38]).cigar("5H33M2H"),
                 tags,
@@ -1369,7 +1382,7 @@ mod tests {
             let other = other.stratum("C>T:non-CpG").unwrap();
             assert_eq!(
                 (other.single_strand_changes, other.strand_molecules),
-                (1, 4)
+                (1, 44)
             );
         }
         let misfit = clipped(tags(&full[..39], Some((6, b'T'))));
@@ -1388,6 +1401,7 @@ mod tests {
     fn test_only_primary_well_mapped_consensus_counts() {
         let full = &reference()[..40];
         let mut reads = SamBuilder::new().read_length(40);
+        fill(&mut reads, 10);
         for _ in 0..TAG_PROBE {
             reads.add_frag(tagged(Frag::at(1).bases(full).mapq(5), tags(full, None)));
         }
@@ -1399,7 +1413,7 @@ mod tests {
             reads.extend([SamBuilder::with_flags(record, bits)]);
         }
         let profile = profile(&reads).unwrap();
-        assert_eq!(profile.stratum("C>T:CpG").unwrap().molecules, 10);
+        assert_eq!(profile.stratum("C>T:CpG").unwrap().molecules, 110);
     }
 
     /// Single-strand changes that vary no more than a Poisson leave the

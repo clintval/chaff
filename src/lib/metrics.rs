@@ -86,7 +86,8 @@ pub struct StratumMetrics {
     /// Copied damage only, from the single-strand consensus of a duplex BAM:
     /// duplex changes of the stratum's class per molecule over the library,
     /// leaving out positions with at least 3 changes in 1% of their
-    /// molecules as germline or clonal.
+    /// molecules as germline or clonal, and positions of 10 molecules or
+    /// fewer, where a germline variant would pass for one change.
     #[serde(serialize_with = "six_digits_or_empty")]
     pub change_rate: Option<f64>,
     /// Single-strand changes per molecule with both strands called, each by
