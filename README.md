@@ -142,7 +142,7 @@ Damage copied onto both strands before the adapters were ligated looks the same 
 
 ### 2. Measure
 
-Run the filters without thresholds, so they annotate the calls without filtering them, and write the metrics:
+Run the filters without thresholds, so they annotate the calls without filtering them, and write the metrics; each prior is learned from every scored call, whatever its FILTER, so remove heavily rejected caller output first:
 
 ```console
 chaff \
@@ -227,7 +227,7 @@ The call at position 100 is filtered as copied damage and end repair fill-in.
 The calls at positions 400 and 500 pass: their alternate molecules sit at the 5′ end of the strand each template was copied from, where end repair adds no bases, and 2 of the A>T's 5 alternate molecules sit where A-tailing cannot put them.
 The deletion at position 300 is not scored.
 
-To check a threshold, run the tool on germline heterozygous calls from the same reads, down-sampled to the 2 to 10 alternate molecules of your somatic calls: they are real, so the share it filters estimates how often it filters real somatic calls.
+To check a threshold, append germline heterozygous calls from the same reads, down-sampled to the 2 to 10 alternate molecules of your somatic calls and marked by their record ID, to the somatic VCF and run once: they share the somatic calls' prior and are real, so the share of them filtered estimates how often real somatic calls are.
 Where a matched normal or a replicate library exists, the somatic calls it shares are a second check.
 
 On the simulated sample of the copied damage section, a threshold of 0.05 filters 821 of the 2,000 copied-damage calls and 9 of the 1,065 real C>T at CpG, and none of the 4,935 calls in other channels: 73% of the copied damage with 10 alternate molecules, 50% with 5, 34% with 3, and only 6% with 2.
