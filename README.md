@@ -62,7 +62,7 @@ Each filter scores heterozygous SNVs: copied damage those in its damage classes,
 
 Each filter also weighs how far a call's molecules sit from the end its artifact favors, out to its *distance*:
 
-| Filter&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | Distance from | Under `--model chaff` | Under `--model fgbio` |
+| Filter&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | Distance from | Model chaff | Model fgbio |
 | --- | --- | --- | --- |
 | `copied-damage` | The lesion strand's 5′ end | A decay with a learned scale | The same decay |
 | `end-repair-fill-in` | The 3′ end of the strand each template was copied from | A decay with a learned scale | A 15 bp window from either end |
@@ -252,7 +252,7 @@ Where chaff differs from fgbio on purpose is listed in the crate documentation, 
 | `--a-tailing-threshold` | The posterior at or below which A-tailing applies its FILTER (default none). |
 | `--copied-damage-classes` | The damage classes, damaged base `>` read base: `C>T` for deamination from heat, storage, or formalin, and `G>T` for oxidation from shearing or heat (default `C>T,G>T`). |
 | `--copied-damage-distance` | The decay scale in bases from the lesion strand's 5′ end, the mean length a polymerase copies a lesion strand over, or `learned` (default `learned`). |
-| `--end-repair-fill-in-distance` | The decay scale in bases from the 3′ end of the strand each template was copied from, or `learned`; under `--model fgbio`, the window in bases from either template end (default `learned`, or 15 under `--model fgbio`). |
+| `--end-repair-fill-in-distance` | The decay scale in bases from the 3′ end of the strand each template was copied from, or `learned`; under the fgbio model, the window in bases from either template end (default `learned`, or 15 under the fgbio model). |
 | `--a-tailing-distance` | The window from the template end, in bases (default 2). |
 | `--min-mapping-quality` | The mapping quality floor of a read (default 20). |
 | `--min-base-quality` | The base quality floor at the call (default 20). |
