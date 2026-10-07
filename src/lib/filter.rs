@@ -209,7 +209,7 @@ impl FilterOptions {
     pub fn add_header_lines(&self, header: &mut vcf::Header, scales: &Scales, chance: bool) {
         let prior = self.prior_text();
         let copied_prior = if chance {
-            "an artifact prior from the share of the library's positions with as many duplex changes that chance explains, per sample and stratum"
+            "an artifact prior learned per sample and stratum, or, for a call with two or more alternate molecules, the share of the library's positions with as many duplex changes that chance explains, shrunk toward it"
         } else {
             prior
         };
