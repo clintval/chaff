@@ -31,8 +31,9 @@
 //!   base for a lesion on the forward strand (a `C>T` or `G>T`), the rightmost
 //!   for one on the reverse strand (a `G>A` or `C>A`). End repair fill-in
 //!   measures it from the 3' end of the strand each template was copied from:
-//!   read 1's strand, the rightmost base of an F1R2 template and the leftmost
-//!   of an F2R1 one, or the nearer end of a duplex consensus whose reads carry
+//!   the first of pair's strand, the rightmost base of an F1R2 template and
+//!   the leftmost of an F2R1 one, or the nearer end of a duplex consensus whose
+//!   records carry
 //!   fgbio's `aD` and `bD` depths of both strands.
 //! - **Windows**, for A-tailing under either model and end repair fill-in
 //!   under the `fgbio` model, are fgbio's. A molecule is congruent when the
@@ -100,12 +101,12 @@
 //!
 //! The `chaff` crate ports the filters, likelihoods, and tests of fgbio's
 //! `FilterSomaticVcf`, and with `--model fgbio` it writes fgbio 4.1.1's values
-//! and FILTERs wherever overlapping mates agree in base and quality, no read
+//! and FILTERs wherever overlapping mates agree in base and quality, no mate
 //! has an indel or soft clip between the call and its mate's 5' end, and every
 //! base is Q2 or better. It matches fgbio where fgbio's choices are arbitrary:
 //! a deletion at the site counts in the depth of its prior, a spanning
 //! deletion `*` is no called allele, and an A-tailing site equally far from
-//! both template ends is nearer the kept read's own end.
+//! both template ends is nearer the kept mate's own end.
 //!
 //! It differs on purpose here:
 //!
@@ -120,7 +121,7 @@
 //! - **End repair.** A polymerase extends a recessed 3' end across a 5'
 //!   overhang; fgbio's docs describe filling in a 3' overhang.
 //! - **Template ends.** Distances from both template ends count template
-//!   bases: the `chaff` crate walks both reads' CIGARs, the mate's from its
+//!   bases: the `chaff` crate walks both mates' CIGARs, the mate's from its
 //!   `MC` tag, as
 //!   [fgbio #1172](https://github.com/fulcrumgenomics/fgbio/pull/1172) does
 //!   for clipping, so an indel counts by its length. Soft clips count and hard
@@ -128,7 +129,7 @@
 //!   `chaff` crate never reads `TLEN`.
 //! - **Overlapping mates.** They are called into one base: mates that agree
 //!   keep the higher quality, and mates that disagree count as neither allele.
-//!   fgbio keeps the first read of each name, so values differ where
+//!   fgbio keeps the first record of each name, so values differ where
 //!   overlapping mates differ in base or quality.
 //! - **Base errors.** A base's error probability is capped at 0.75, a random
 //!   base's, so a Q0 or Q1 base cannot zero a likelihood.

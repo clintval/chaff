@@ -1,7 +1,7 @@
 //! Score each somatic call against library-preparation artifacts, learn the
 //! artifact priors, and write the annotated calls.
 //!
-//! The VCF and the reads are merge-joined in coordinate order: each call asks
+//! The VCF and the BAM are merge-joined in coordinate order: each call asks
 //! the [`Evidence`] for the molecules at its position, so neither file needs an
 //! index. Learning a prior needs every call's likelihood ratio before any
 //! posterior is known, so the VCF is read twice: once to score the calls and
@@ -140,7 +140,7 @@ impl fmt::Display for FilterKind {
 /// How calls are scored and filtered.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FilterOptions {
-    /// The sample whose reads are in the BAM; required with several samples.
+    /// The sample the BAM holds; required with several samples.
     pub sample: Option<String>,
     /// The filters to run.
     pub filters: Vec<FilterKind>,
@@ -328,7 +328,7 @@ pub struct FilterArgs {
     /// The PDF of the sample's trinucleotide spectrum before and after
     /// filtering, which needs the reference FASTA.
     pub spectrum: Option<PathBuf>,
-    /// The read and base floors.
+    /// The mapping and base quality floors.
     pub pileup: PileupOptions,
     /// The scoring and filtering options.
     pub options: FilterOptions,
@@ -1040,7 +1040,7 @@ pub fn run_filter_with(args: &FilterArgs, evidence: &mut dyn Evidence) -> Result
 }
 
 /// Filter the calls with molecules piled up by `builder` from the BAM's
-/// records, under the read and base floors of `args`.
+/// records, under the mapping and base quality floors of `args`.
 pub fn run_filter_on<S: RecordSource>(
     args: &FilterArgs,
     builder: StreamingPileupBuilder<'_, S>,

@@ -52,7 +52,7 @@ The sections below explain how damage becomes a call, what each filter scores, h
 
 ## How DNA Damage Becomes a Variant Call
 
-A *template* is one DNA fragment as its read pair sequences it, counted as one *molecule*, and its *template ends* are its outermost bases, the 5′ ends of its two strands.
+A *template* is one DNA fragment as its pair of reads, or of consensus, holds it, counted as one *molecule*, and its *template ends* are its outermost bases, the 5′ ends of its two strands.
 A *lesion* is a damaged base on one strand that a polymerase copies as another base:
 
 - **5-methylcytosine deaminates to thymine**, so a methylated CpG reads C>T.
@@ -105,10 +105,10 @@ End repair's polymerase can misincorporate a base as it fills in a recessed 3′
 Copying a lesion from the overhang instead puts the change on both strands, which is copied damage.
 A call near an end can be flagged by both filters, as the call at position 100 is below; for a Duplex Sequencing library, trust copied damage, since the duplex consensus has already removed end repair's errors on one strand.
 
-- **Measured from:** the 3′ end of the strand each template was copied from, the strand its read 1 copies: forward for an F1R2 pair and reverse for an F2R1 pair.
+- **Measured from:** the 3′ end of the strand each template was copied from, the strand its first of pair copies: forward for an F1R2 pair and reverse for an F2R1 pair.
 - **Scored with:** a decay whose scale is learned per sample, from a default of 15 bp.
 - **Writes:** the posterior `ERFAP` and the FILTER `EndRepairFillInArtifact`.
-- **Use it when:** a polymerase end-repaired the library before adapter ligation, as in most ligation preps after mechanical or enzymatic fragmentation, and its reads are not a duplex consensus.
+- **Use it when:** a polymerase end-repaired the library before adapter ligation, as in most ligation preps after mechanical or enzymatic fragmentation, and its BAM is not a duplex consensus.
 
 ### A-Tailing
 
@@ -121,7 +121,7 @@ Only one strand carries it, so a duplex consensus mostly removes it.
 - **Measured from:** the template end where the added A reads, the left end for a T and the right end for an A.
 - **Scored with:** a 2 bp window, since the artifact changes only the last base or two of a 3′ end.
 - **Writes:** the posterior `ATAP` and the FILTER `ATailingArtifact`.
-- **Use it when:** the library was A-tailed for T-overhang adapters, unlike blunt-end ligation or transposase (tagmentation) preps, and its reads are not a duplex consensus.
+- **Use it when:** the library was A-tailed for T-overhang adapters, unlike blunt-end ligation or transposase (tagmentation) preps, and its BAM is not a duplex consensus.
 
 ### Choosing Filters for Your Library
 
@@ -227,7 +227,7 @@ The call at position 100 is filtered as copied damage and end repair fill-in.
 The calls at positions 400 and 500 pass: their alternate molecules sit at the 5′ end of the strand each template was copied from, where end repair adds no bases, and 2 of the A>T's 5 alternate molecules sit where A-tailing cannot put them.
 The deletion at position 300 is not scored.
 
-To check a threshold, append germline heterozygous calls from the same reads, down-sampled to the 2 to 10 alternate molecules of your somatic calls and marked by their record ID, to the somatic VCF and run once: they share the somatic calls' prior and are real, so the share of them filtered estimates how often real somatic calls are.
+To check a threshold, append germline heterozygous calls from the same BAM, down-sampled to the 2 to 10 alternate molecules of your somatic calls and marked by their record ID, to the somatic VCF and run once: they share the somatic calls' prior and are real, so the share of them filtered estimates how often real somatic calls are.
 Where a matched normal or a replicate library exists, the somatic calls it shares are a second check.
 
 On the simulated sample of the copied damage section, a threshold of 0.05 filters 821 of the 2,000 copied-damage calls and 9 of the 1,065 real C>T at CpG, and none of the 4,935 calls in other channels: 73% of the copied damage with 10 alternate molecules, 50% with 5, 34% with 3, and only 6% with 2.
@@ -271,9 +271,9 @@ The tool learns per sample how common each artifact is and how far it reaches, s
 | --- | --- |
 | `--input` | The coordinate-sorted VCF or BCF of somatic calls (short `-i`; required). |
 | `--output` | The output VCF or BCF, its format set by its extension: `.vcf`, `.vcf.gz`, `.bcf`, or `-` for standard output (short `-o`; required). |
-| `--bam` | The coordinate-sorted BAM of the sample's reads (short `-b`; required). |
+| `--bam` | The coordinate-sorted BAM of the sample, reads or consensus (short `-b`; required). |
 | `--ref` | The reference FASTA, with its `.fai`, which copied damage and `--spectrum` need (short `-r`). |
-| `--sample` | The sample whose reads are in the BAM, required when the VCF has more than one (short `-s`). |
+| `--sample` | The sample the BAM holds, required when the VCF has more than one (short `-s`). |
 | `--metrics` | The per-sample metrics TSV, one row per filter and stratum (default none). |
 | `--spectrum` | A PDF of the sample's heterozygous SNVs, whatever their FILTER, by trinucleotide context on one scale: every SNV, the expected real SNVs, each weighted by the product of the posteriors of the filters `--filters` enables, and, with a threshold, the passing SNVs (default none). |
 | `--filters` | The filters to run (default all three). |
@@ -285,13 +285,13 @@ The tool learns per sample how common each artifact is and how far it reaches, s
 | `--copied-damage-distance` | The decay scale in bases from the lesion strand's 5′ end, the mean length over which a polymerase copies a lesion strand onto its partner, or `learned` (default `learned`). |
 | `--end-repair-fill-in-distance` | The decay scale in bases from the 3′ end of the strand each template was copied from, or `learned` (default `learned`); under `--model fgbio`, the window from the nearest template end (default 15). |
 | `--a-tailing-distance` | The window from the template end, in bases (default 2). |
-| `--min-mapping-quality` | The mapping quality floor of a read (short `-m`; default 20). |
+| `--min-mapping-quality` | The mapping quality floor of a read or consensus (short `-m`; default 20). |
 | `--min-base-quality` | The base quality floor at the call (short `-q`; default 20). |
-| `--paired-reads-only` | Keep only reads whose mate is mapped (short `-p`; default off). |
+| `--paired-reads-only` | Keep only reads or consensus whose mate is mapped (short `-p`; default off). |
 
 The VCF/BCF and the BAM must be coordinate sorted, with their contigs in the same order, and need no index; the FASTA needs a `.fai`.
-Each template counts once, and a read whose mate maps to the same contig needs the mate's CIGAR in its `MC` tag.
-Both ends of a template are measured for an FR pair, whose forward read starts at or before its reverse read's 5′ end; a read of any other pair knows only its own end.
+Each template counts once, and a read or consensus whose mate maps to the same contig needs the mate's CIGAR in its `MC` tag.
+Both ends of a template are measured for an FR pair, whose forward mate starts at or before its reverse mate's 5′ end; a mate of any other pair knows only its own end.
 An option of a filter that `--filters` leaves out is a usage error, and so is `--ref` without `copied-damage` or `--spectrum`.
 A VCF that already declares an enabled filter's INFO or FILTER, from an earlier run, is refused, so a FILTER never outlives the run that applied it; remove them first, as with `bcftools annotate -x`.
 
