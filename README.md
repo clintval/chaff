@@ -52,7 +52,7 @@ The sections below explain how damage becomes a call, what each filter scores, h
 
 ## How DNA Damage Becomes a Variant Call
 
-A *template* is one DNA fragment as its pair of reads, or of consensus, holds it, counted as one *molecule*, and its *template ends* are its outermost bases, the 5′ ends of its two strands.
+A *template* is one DNA fragment as its two mates, reads or consensus, hold it, counted as one *molecule*, and its *template ends* are its outermost bases, the 5′ ends of its two strands.
 A *lesion* is a damaged base on one strand that a polymerase copies as another base:
 
 - **5-methylcytosine deaminates to thymine**, so a methylated CpG reads C>T.
