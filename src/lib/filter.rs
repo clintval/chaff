@@ -37,7 +37,7 @@ use crate::prior::{
 use crate::read_end::{is_filtered, ATailing, Distances, EndRepairFillIn, ReferencePool, Score};
 use crate::reference::Reference;
 use crate::simplex::{profile_library, Chance, LibraryProfile};
-use crate::spectrum::{channel, After, Spectrum};
+use crate::spectrum::{channel, Spectrum};
 
 /// One of the artifact filters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ValueEnum)]
@@ -985,8 +985,9 @@ pub(crate) fn plural(count: usize, noun: &str) -> String {
 }
 
 /// The trinucleotide spectrum of the calls with a channel: every one before
-/// filtering, and after it the ones no filter flagged when any enabled filter
-/// has a threshold, or else each weighed by the product of its posteriors.
+/// filtering, each weighed by the product of its posteriors, a call without
+/// one weighing one, and, when any enabled filter has a threshold, the ones no
+/// filter flagged.
 fn tally_spectrum(
     calls: &[Vec<Annotation>],
     channels: &[Option<usize>],
@@ -996,11 +997,7 @@ fn tally_spectrum(
         .filters
         .iter()
         .any(|k| k.threshold(options).is_some());
-    let mut spectrum = Spectrum::new(if thresholded {
-        After::Passing
-    } else {
-        After::Weighted
-    });
+    let mut spectrum = Spectrum::new(thresholded);
     for (annotations, channel) in calls.iter().zip(channels) {
         let Some(channel) = *channel else {
             continue;
@@ -1932,8 +1929,8 @@ mod tests {
     }
 
     /// The spectrum counts each heterozygous SNV in its channel, read from the
-    /// pyrimidine, whatever its FILTER, and after filtering keeps the calls no
-    /// threshold flags or, without a threshold, weighs each by its posterior.
+    /// pyrimidine, whatever its FILTER, weighs each by its posterior, and, with
+    /// a threshold, keeps the calls no threshold flags.
     #[test]
     fn test_the_spectrum_counts_scored_snvs_before_and_after_filtering() {
         let dir = tempfile::tempdir().unwrap();
@@ -1983,19 +1980,18 @@ mod tests {
             let spectrum = report.spectrum.unwrap();
             assert_eq!(spectrum.before.iter().sum::<f64>(), 2.0);
             assert_eq!((spectrum.before[acg], spectrum.before[tca]), (1.0, 1.0));
-            let others: f64 =
-                spectrum.after.iter().sum::<f64>() - spectrum.after[acg] - spectrum.after[tca];
+            let weighted = &spectrum.weighted;
+            let others: f64 = weighted.iter().sum::<f64>() - weighted[acg] - weighted[tca];
             assert_eq!(others, 0.0);
             let (_, records) = read_records(&output);
             let cdap =
                 |i: usize| f64::from(float(&records[i], CopiedDamage::INFO_POSTERIOR).unwrap());
-            if threshold.is_some() {
-                assert_eq!(spectrum.after_kind, After::Passing);
-                assert_eq!((spectrum.after[acg], spectrum.after[tca]), (0.0, 1.0));
-            } else {
-                assert_eq!(spectrum.after_kind, After::Weighted);
-                assert!((spectrum.after[acg] - cdap(0)).abs() < 1e-3, "{spectrum:?}");
-                assert!((spectrum.after[tca] - cdap(1)).abs() < 1e-3, "{spectrum:?}");
+            assert!((weighted[acg] - cdap(0)).abs() < 1e-3, "{spectrum:?}");
+            assert!((weighted[tca] - cdap(1)).abs() < 1e-3, "{spectrum:?}");
+            match (threshold, spectrum.passing) {
+                (Some(_), Some(passing)) => assert_eq!((passing[acg], passing[tca]), (0.0, 1.0)),
+                (None, None) => {}
+                (_, passing) => panic!("{threshold:?} {passing:?}"),
             }
         }
     }

@@ -281,7 +281,7 @@ The tool learns per sample how common each artifact is and how far it reaches, s
 | `--ref` | The reference FASTA, with its `.fai`, which copied damage and `--spectrum` need (short `-r`). |
 | `--sample` | The sample whose reads are in the BAM, required when the VCF has more than one (short `-s`). |
 | `--metrics` | The per-sample metrics TSV, one row per filter and stratum (default none). |
-| `--spectrum` | A PDF of the sample's heterozygous SNVs, whatever their FILTER, by trinucleotide context before and after filtering, where after counts the calls passing every threshold or, without a threshold, weighs each call by the product of the posteriors of the filters `--filters` enables (default none). |
+| `--spectrum` | A PDF of the sample's heterozygous SNVs, whatever their FILTER, by trinucleotide context on one scale: every SNV, the expected real SNVs, each weighted by the product of the posteriors of the filters `--filters` enables, and, with a threshold, the passing SNVs (default none). |
 | `--filters` | The filters to run (default all three). |
 | `--model` | The model, either `chaff`, which learns each sample's artifact fractions and decay scales, or `fgbio`, which uses fgbio's per-call prior and windows to reproduce its values (default `chaff`). |
 | `--copied-damage-threshold` | The posterior at or below which copied damage applies its FILTER (default none). |
