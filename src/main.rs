@@ -146,8 +146,8 @@ struct Cli {
 
     /// Indexed reference FASTA (`.fai` alongside) for CpG context.
     ///
-    /// Required by the `copied-damage` filter and by `--spectrum`, and an
-    /// error without either.
+    /// Required by the `copied-damage` filter and by `--spectrum`; giving it
+    /// with neither is an error.
     #[arg(short = 'r', long = "ref", value_name = "FASTA", verbatim_doc_comment)]
     reference: Option<PathBuf>,
 
@@ -158,7 +158,7 @@ struct Cli {
     sample: Option<String>,
 
     /// Per-sample metrics TSV: one row per filter and stratum.
-    #[arg(long, value_name = "TSV", verbatim_doc_comment)]
+    #[arg(long, value_name = "TSV", value_parser = report_file, verbatim_doc_comment)]
     metrics: Option<PathBuf>,
 
     /// PDF of the sample's SNVs by trinucleotide context, before and after
@@ -168,7 +168,7 @@ struct Cli {
     /// FILTER. After filtering, it counts the calls no filter flagged when a
     /// filter has a threshold, or else weighs each call by the product of the
     /// posteriors of the filters `--filters` enables.
-    #[arg(long, value_name = "PDF", verbatim_doc_comment)]
+    #[arg(long, value_name = "PDF", value_parser = report_file, verbatim_doc_comment)]
     spectrum: Option<PathBuf>,
 
     /// Minimum mapping quality of a read.
@@ -311,6 +311,15 @@ struct Cli {
 fn file(text: &str) -> Result<PathBuf, String> {
     match text {
         "-" => Err("the input is read twice, so it must be a file, not standard input".into()),
+        _ => Ok(PathBuf::from(text)),
+    }
+}
+
+/// Parse a path to a report file, refusing `-`, since standard output carries
+/// the VCF.
+fn report_file(text: &str) -> Result<PathBuf, String> {
+    match text {
+        "-" => Err("standard output carries the VCF, so name a file".into()),
         _ => Ok(PathBuf::from(text)),
     }
 }
@@ -732,6 +741,20 @@ mod tests {
         assert_eq!(error.exit_code(), 2);
         let message = "invalid value '-' for '--input <VCF>': the input is read twice";
         assert!(error.to_string().contains(message), "{error}");
+    }
+
+    #[rstest]
+    #[case("--metrics", "<TSV>")]
+    #[case("--spectrum", "<PDF>")]
+    fn test_a_report_to_standard_output_is_a_usage_error(
+        #[case] option: &str,
+        #[case] value: &str,
+    ) {
+        let error = args(&["--ref", "ref.fa", option, "-"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+        let message =
+            format!("invalid value '-' for '{option} {value}': standard output carries the VCF");
+        assert!(error.to_string().contains(&message), "{error}");
     }
 
     #[test]
