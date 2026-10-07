@@ -400,6 +400,20 @@ impl Cli {
                 }
             }
         }
+        let reads = [
+            ("--bam", Some(&self.bam)),
+            ("--ref", self.reference.as_ref()),
+        ];
+        for (a, written) in &files[1..] {
+            for (b, read) in &reads {
+                if let (Some(written), Some(read)) = (written, read) {
+                    if resolve(written).is_some_and(|path| Some(path) == resolve(read)) {
+                        let message = format!("'{a}' and '{b}' name the same file: {written:?}");
+                        return Err(cmd.error(ErrorKind::ArgumentConflict, message));
+                    }
+                }
+            }
+        }
         validate_classes(&self.copied_damage_classes)
             .map_err(|error| cmd.error(ErrorKind::ValueValidation, error))
     }
@@ -843,5 +857,29 @@ mod tests {
         assert_eq!(error.exit_code(), 2);
         let message = "invalid value '0' for '--a-tailing-distance <BP>'";
         assert!(error.to_string().contains(message), "{error}");
+    }
+
+    #[test]
+    fn test_outputs_that_name_the_bam_or_the_reference_are_a_usage_error() {
+        let filters = ["--filters", "a-tailing"];
+        for (extra, message) in [
+            (
+                [&filters[..], &["-o", "in.bam"]].concat(),
+                "'--output' and '--bam' name the same file",
+            ),
+            (
+                [&filters[..], &["--metrics", "./in.bam"]].concat(),
+                "'--metrics' and '--bam' name the same file",
+            ),
+            (
+                vec!["--ref", "ref.fa", "--metrics", "ref.fa"],
+                "'--metrics' and '--ref' name the same file",
+            ),
+        ] {
+            let error = args(&extra).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+            assert_eq!(error.exit_code(), 2);
+            assert!(error.to_string().contains(message), "{error}");
+        }
     }
 }
