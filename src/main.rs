@@ -284,7 +284,13 @@ struct Cli {
     end_repair_fill_in_threshold: Option<f64>,
 
     /// Window in bases from the template end, under either model.
-    #[arg(long, value_name = "BP", default_value_t = 2, verbatim_doc_comment)]
+    #[arg(
+        long,
+        value_name = "BP",
+        default_value_t = 2,
+        value_parser = clap::value_parser!(u32).range(1..),
+        verbatim_doc_comment
+    )]
     a_tailing_distance: u32,
 
     /// Apply `ATailingArtifact` at or below this posterior.
@@ -828,5 +834,14 @@ mod tests {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("[default: copied-damage,a-tailing,end-repair-fill-in]"));
         assert!(help.contains("[default: C>T,G>T]"));
+    }
+
+    #[test]
+    fn test_an_a_tailing_window_of_zero_bases_is_a_usage_error() {
+        let error = args(&["--filters", "a-tailing", "--a-tailing-distance", "0"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+        assert_eq!(error.exit_code(), 2);
+        let message = "invalid value '0' for '--a-tailing-distance <BP>'";
+        assert!(error.to_string().contains(message), "{error}");
     }
 }
