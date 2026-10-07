@@ -61,6 +61,20 @@
 //! at least 2 and 20% of their molecules are germline and count toward
 //! neither model, nor do positions so shallow that 2 changes would make them
 //! germline, where a germline variant shows as one change, as damage would.
+//!
+//! Three things the chance model cannot tell apart:
+//!
+//! - A real mutation on one molecule and a copied lesion both make a
+//!   position with one change, so real mutations raise the rate, and where
+//!   they come at a tenth of the damage rate or more, chance takes over the
+//!   positions with two changes that two of them make, and the real ones.
+//! - A position damaged far beyond the rest of its class, past the gamma's
+//!   tail, holds more changes than chance puts anywhere, so it looks real,
+//!   and only the decay evidence can call it.
+//! - A call's changes count every alternate molecule at the quality floor,
+//!   whether or not both strands carry the base, where the profile's
+//!   duplex changes need both, so a call may look up a count one above its
+//!   position's; the error leans toward real.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::File;
