@@ -21,13 +21,6 @@ pixi exec \
     chaff --help
 ```
 
-Until the bioconda recipe is published, build it from a clone:
-
-```bash
-git clone https://github.com/clintval/chaff
-cargo install --path chaff
-```
-
 ## Quick Start
 
 For a hybrid-capture Duplex Sequencing library, made with enzymatic fragmentation, a combined end repair and A-tailing step, and UMI-bearing adapters, score somatic calls for copied damage against the duplex consensus BAM:
