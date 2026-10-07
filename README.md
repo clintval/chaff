@@ -112,15 +112,15 @@ grep -v '^#' annotated.vcf | awk '$2 == 100' | cut -f 7,8 | tr '\t;' '\n\n'
 ```text
 CopiedDamageArtifact
 CDAP=0.022
-CDLR=1.591
+CDLR=1.577
 CDAC=3,3
-CDRC=69,240
+CDRC=72,240
 ATAP=0.963
-ERFAP=0.007738
+ERFAP=0.007842
 ```
 
-Its `CDAP` of 0.022, at or below the threshold of 0.05, puts the copied damage FILTER on the call, and its `CDLR` of 1.591 favors copied damage.
-Its `CDAC` of 3,3 and `CDRC` of 69,240 say that all 3 alternate molecules sit within the learned scale of the lesion strand's 5′ end, against 69 of the 240 reference molecules.
+Its `CDAP` of 0.022, at or below the threshold of 0.05, puts the copied damage FILTER on the call, and its `CDLR` of 1.577 favors copied damage.
+Its `CDAC` of 3,3 and `CDRC` of 72,240 say that all 3 alternate molecules sit within the learned scale of the lesion strand's 5′ end, against 72 of the 240 reference molecules.
 Without thresholds of their own, the `ATAP` and `ERFAP` posteriors of A-tailing and end repair fill-in annotate the call without filtering it.
 
 Each posterior is the probability that the call is a real mutation, so a lower value means a call more likely to be an artifact.
@@ -161,19 +161,19 @@ cut -f 2,3,6,8,17 tumor.chaff.tsv | column -t
 
 ```text
 filter              stratum      artifact_fraction  distance  asymmetry_p_value
-copied-damage       C>T:non-CpG  0.448724           22.7678   0.72908
-copied-damage       G>T:CpG      0.53767            22.7678   0.0242018
+copied-damage       C>T:non-CpG  0.44854            23.0591   0.589947
+copied-damage       G>T:CpG      0.537421           23.0591   0.0274487
 a-tailing           C>A          0.19272            2.0       0.00246167
 a-tailing           C>T          0.189318           2.0       1.0
 a-tailing           T>A          0.189332           2.0       0.000231639
-end-repair-fill-in  C>A          0.391718           12.1245   0.00451579
-end-repair-fill-in  C>G          0.301512           12.1245   1.0
-end-repair-fill-in  C>T          0.301512           12.1245   0.665409
-end-repair-fill-in  T>A          0.301512           12.1245   1.0
+end-repair-fill-in  C>A          0.391688           12.1865   0.00451579
+end-repair-fill-in  C>G          0.301492           12.1865   1.0
+end-repair-fill-in  C>T          0.301492           12.1865   0.665409
+end-repair-fill-in  T>A          0.301492           12.1865   1.0
 ```
 
 Every filter learns a fraction well above zero on these calls, which were built with alternate molecules near template ends, so all three stay on; across many calls, a fraction near zero says a library lacks that artifact.
-The decays learn scales of 22.8 and 12.1 bp: the alternate molecules here sit within 3 bp of an end, but 2 and 4 calls move a scale only part of the way from its default.
+The decays learn scales of 23.1 and 12.2 bp: the alternate molecules here sit within 3 bp of an end, but 2 and 4 calls move a scale only part of the way from its default.
 A small p-value says that a library has the artifact, while a posterior says whether one call is it.
 
 ### 3. Set and Check

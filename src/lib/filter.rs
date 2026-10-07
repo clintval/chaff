@@ -592,7 +592,6 @@ fn score_decays(calls: &mut [Vec<Annotation>], options: &FilterOptions) -> Scale
                         .filter_map(|d| d.log_likelihood_ratio(scale))
                         .collect()
                 },
-                FILTER_PRIOR,
                 fallback,
             ),
         };
