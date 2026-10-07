@@ -96,6 +96,11 @@ On a simulated duplex sample of 6,000 real mutations and 2,000 copied-damage cal
 Copied damage has one blind spot.
 A lesion copied from an internal nick, by nick translation or strand displacement, or across the gap an abasic site leaves, can sit anywhere in the template, so its alternate molecules carry no signal of an end, and they show only as an excess of the damage class across a library.
 
+A duplex BAM whose reads carry each strand's single-strand consensus, `ac` and `bc` as fgbio and fgumi write them, covers it.
+The tool then reads every molecule once more, counting its duplex changes and its *single-strand* changes, lesions on one strand that no polymerase copied, per damage class and context.
+Copied lesions land on a position one molecule at a time, while a real mutation in a clone puts several molecules on one position, so each call's prior becomes the share of the library's positions with as many changes that chance explains, letting the damage rate vary from position to position at least as much as the single-strand changes, free of real mutations, show.
+Without those tags, the prior is learned from the calls.
+
 ### End Repair Fill-In
 
 ![End repair fill-in makes an error: a polymerase fills in a recessed 3′ end and misincorporates a C opposite a T, the UMI-bearing adapters are ligated, and only the filled-in strand carries the error, so the two strands disagree and a duplex consensus masks it.](.github/img/end-repair-fill-in.svg)
@@ -161,6 +166,7 @@ Its columns are:
 - **Distance:** `distance`, the decay scale or window in bases.
 - **Molecules:** `alt_molecules` and `ref_molecules`, the molecules measured, and their `_congruent` counts and fractions, those within the distance of the artifact's end.
 - **Asymmetry:** `expected_alt_congruent`, the alternate molecules each call's own reference molecules predict within the distance, and `asymmetry_p_value`, a one-sided test of whether more sit there; a small value says the library has the artifact.
+- **Single strand:** for copied damage on a BAM with single-strand consensus, `change_rate` and `single_strand_rate`, the duplex and single-strand changes of the class per molecule, their `conversion_ratio`, and `chance_fraction`, the stratum's mean prior from chance.
 
 ```console
 cut -f 2,3,6,8,18 tumor.chaff.tsv | column -t
