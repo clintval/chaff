@@ -31,8 +31,7 @@ CPG_CT = [ch for ch in CHANNELS if ch[2:5] == "C>T" and ch[-1] == "G"]
 ALT_COLOR, REF_COLOR, REAL_COLOR, GRAY, GREEN = "#e34948", "#8c8b86", "#2a78d6", "0.45", "#12875c"
 RAMP = ["#b7aee8", "#8a7cd3", "#5f4fbb", "#33267f"]
 COMPLEMENT = str.maketrans("ACGTN", "TGCAN")
-LEARNING_TITLE = "Where Copied Damage Is Heavy, the Learned Prior Understates It"
-BURDEN_TITLE = "Weighting Calls by CDAP Removes Most of the Burden Inflation; a Threshold Removes Little"
+LEARNING_TITLE = "The Learned Artifact Fraction Understates Heavy Damage but Ranks Libraries Correctly"
 
 
 def spectrum(rng):
@@ -180,7 +179,7 @@ def finish(fig, name, title):
 
 def ends_figure(truth, called):
     scale = metrics(WORK, "distance")
-    groups = [("artifact", "Copied damage", ALT_COLOR, "cdac"), ("real", "Real mutations", REAL_COLOR, "cdac"),
+    groups = [("artifact", "Copied damage", ALT_COLOR, "cdac"), ("real", "Real mutations, from the strand a lesion would be on", REAL_COLOR, "cdac"),
               ("reference", "Reference molecules", REF_COLOR, "cdrc")]
     measured, bins = distances(truth), np.arange(0, 401, 10)
     fig, axes = plt.subplots(1, 2, figsize=(8.6, 3.2), sharey=True)
@@ -194,18 +193,21 @@ def ends_figure(truth, called):
         ax.set_xlim(0, 400)
         ax.set_xlabel(f"Distance from the lesion strand's {end_label} end (bp)")
         bold = {"fontweight": "bold"}
-        label(ax, 0, 1.04, [("From the Lesion Strand's ", bold), (f"{end_label} End", {**bold, "color": GREEN})], fontsize=10, va="bottom")
+        trend = "Enriched" if end_label == "5′" else "Depleted"
+        label(ax, 0, 1.04, [(f"Copied Damage Is {trend} Near the ", bold), (f"{end_label} End", {**bold, "color": GREEN})], fontsize=10, va="bottom")
     axes[0].set_ylabel("Molecules per 10 bp bin (%)")
     axes[0].set_ylim(0, None)
     axes[0].axvline(scale, color=GRAY, lw=0.9, ls="--", zorder=1)
     axes[0].text(scale + 8, axes[0].get_ylim()[1] * 0.92, f"Learned scale, {scale:.1f} bp", fontsize=8, color=GRAY, va="top")
-    handles = []
+    handles, shares = [], {}
     for kind, name, color, field in groups:
-        text = f"{name}: {share(called, truth, None if kind == 'reference' else kind, field):.0f}%" + (f" within {scale:.0f} bp" if kind == "artifact" else "")
+        shares[kind] = share(called, truth, None if kind == "reference" else kind, field)
+        text = f"{name}: {shares[kind]:.0f}%" + (f" within {scale:.0f} bp" if kind == "artifact" else "")
         handles.append(Patch(facecolor=color, alpha=0.3, edgecolor=color, label=text) if kind == "reference" else Line2D([], [], color=color, lw=1.8, label=text))
     fig.tight_layout(w_pad=2.0)
     fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 0.99), ncol=3, fontsize=8.5, handlelength=1.6, columnspacing=1.6)
-    finish(fig, "copied-damage-ends.png", "Copied Damage Crowds the Lesion Strand's 5′ End; Real Mutations Follow the Reference")
+    title = f"{shares['artifact']:.0f}% of Copied Damage Sits Within {scale:.0f} bp of the 5′ End, Against {shares['real']:.0f}% of Real Mutations"
+    finish(fig, "copied-damage-ends.png", title)
 
 
 def spectrum_row(ax, truth, keep, title, detail):
@@ -248,22 +250,26 @@ def outcome_figure(truth, chaff, fgbio):
     grid = fig.add_gridspec(2, 2, width_ratios=[2.4, 1], hspace=0.12, wspace=0.16)
     before = fig.add_subplot(grid[0, 0])
     after = fig.add_subplot(grid[1, 0], sharey=before)
-    top = spectrum_row(before, truth, lambda p: True, "Before chaff", ": All Calls").max()
-    heights = spectrum_row(after, truth, lambda p: not chaff[p]["filtered"], "After chaff", f": Calls Passing a Threshold of {THRESHOLD}")
+    cpg = [p for p, t in truth.items() if t["channel"] in CPG_CT]
+    tripled = len(cpg) / sum(truth[p]["kind"] == "real" for p in cpg)
+    artifacts = [p for p, t in truth.items() if t["kind"] == "artifact"]
+    remaining = 100 * np.mean([not chaff[p]["filtered"] for p in artifacts])
+    multiple = "Nearly Triples" if 2.5 <= tripled < 3 else f"Multiplies by {tripled:.1f}"
+    top = spectrum_row(before, truth, lambda p: True, "Before chaff", f": Copied Damage {multiple} the CpG C>T Peaks").max()
+    heights = spectrum_row(after, truth, lambda p: not chaff[p]["filtered"], f"After chaff at {THRESHOLD}", f": {remaining:.0f}% of Copied Damage Remains")
     for ch in CPG_CT:
         i = CHANNELS.index(ch)
         after.text(i, heights[i] + top * 0.05, ch[0] + "CG", rotation=90, ha="center", va="bottom", fontsize=7.5, color="#12875c",
                    fontfamily=["Menlo", "DejaVu Sans Mono"], bbox={"boxstyle": "round,pad=0.25,rounding_size=0.4", "facecolor": "#1baf7a", "alpha": 0.18, "edgecolor": "none"})
-    before.set_ylim(0, top * 1.02)
+    before.set_ylim(0, top * 1.18)
     for i, cls in enumerate(CLASSES):
-        before.add_patch(plt.Rectangle((i * 16 - 0.45, top * 1.04), 15.9, top * 0.05, color=CLASS_COLOR[cls], clip_on=False, lw=0))
-        before.text(i * 16 + 7.5, top * 1.12, cls, ha="center", va="bottom", fontsize=8.5)
+        before.add_patch(plt.Rectangle((i * 16 - 0.45, top * 1.2), 15.9, top * 0.05, color=CLASS_COLOR[cls], clip_on=False, lw=0))
+        before.text(i * 16 + 7.5, top * 1.28, cls, ha="center", va="bottom", fontsize=8.5)
     after.set_xticks(range(len(CHANNELS)), [ch[0] + ch[2] + ch[6] for ch in CHANNELS], rotation=90, fontsize=5, fontfamily=["Menlo", "DejaVu Sans Mono"])
     after.tick_params(axis="x", length=0, pad=2)
     for tick, ch in zip(after.get_xticklabels(), CHANNELS):
         tick.set_fontweight("bold" if ch in CPG_CT else "normal")
     handles = [Patch(facecolor=GRAY, edgecolor=GRAY, label="Real mutations"), Patch(facecolor="white", edgecolor=GRAY, hatch="//////", label="Copied damage")]
-    after.legend(handles=handles, loc="upper right", fontsize=8.5, ncol=2, handlelength=1.4, bbox_to_anchor=(1.0, 1.0))
     ax = fig.add_subplot(grid[:, 1])
     for n, color in zip(ALT_MOLECULES, RAMP):
         ax.plot(*roc(chaff, truth, n), color=color, lw=1.6, drawstyle="steps-post", zorder=2)
@@ -273,14 +279,17 @@ def outcome_figure(truth, chaff, fgbio):
     ax.set_xlim(0, 100)
     ax.set_ylim(0, 102)
     ax.set_xticks([0, 1, 10, 100], ["0", "1", "10", "100"])
-    ax.set_xlabel("Real C>T at CpG filtered (%)")
+    ax.set_xlabel("Real C>T at CpG filtered (%, log scale)")
     ax.set_ylabel("Copied damage filtered (%)")
-    handles = [Line2D([], [], color=c, lw=1.6, label=f"{n} molecules, AUC {auc(chaff, truth, n):.2f}") for n, c in zip(ALT_MOLECULES, RAMP)]
+    ax.set_title("chaff Filters Far Fewer Real Calls Than fgbio", fontsize=9.5, fontweight="bold", loc="left")
+    handles += [Line2D([], [], color=c, lw=1.6, label=f"{n} molecules, AUC {auc(chaff, truth, n):.2f}") for n, c in zip(ALT_MOLECULES, RAMP)]
     handles += [Line2D([], [], ls="", marker="o", ms=6, mfc=face, mec="black", mew=1.4 if face == "white" else 1.0, label=f"--model {m} at {THRESHOLD}")
                 for m, face in (("chaff", "black"), ("fgbio", "white"))]
-    ax.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=2, fontsize=8, handlelength=1.4, columnspacing=1.0)
-    fig.subplots_adjust(left=0.07, right=0.99, bottom=0.12, top=0.9)
-    finish(fig, "copied-damage-filtering.png", "A Threshold Spares Real Mutations but Misses Most Copied Damage at 2 or 3 Molecules")
+    fig.subplots_adjust(left=0.07, right=0.99, bottom=0.12, top=0.86)
+    fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 0.93), ncol=len(handles), fontsize=7.5, handlelength=1.3, columnspacing=0.9, handletextpad=0.4)
+    real_cpg = [p for p in cpg if truth[p]["kind"] == "real"]
+    kept = 100 * np.mean([not chaff[p]["filtered"] for p in real_cpg])
+    finish(fig, "copied-damage-filtering.png", f"At {THRESHOLD}, chaff Keeps {kept:.0f}% of Real CpG C>T Calls but Misses Most Copied Damage at 2–3 Molecules")
 
 
 LIBRARIES = [(f, 30) for f in (0, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6)] + [(0.4, 15), (0.4, 60)]
@@ -321,7 +330,7 @@ def learning_figure(libs):
     left.set_ylim(0, 70)
     left.set_xlabel("True copied damage (% of calls)")
     left.set_ylabel("Learned artifact fraction (%)")
-    left.set_title("Learned Against True Damage", fontsize=10, fontweight="bold", loc="left")
+    left.set_title("The Learned Fraction Falls Below the True Share Above 5%", fontsize=9.5, fontweight="bold", loc="left")
     inset = left.inset_axes([0.66, 0.13, 0.31, 0.29])
     inset.plot([0, 80], [0, 80], color=GRAY, lw=0.8, ls="--", zorder=1)
     for lib in libs:
@@ -330,11 +339,10 @@ def learning_figure(libs):
             inset.scatter(lib["scale"], lib["learned_scale"], s=size / 2.5, marker=marker, facecolors=face, edgecolors=ALT_COLOR, linewidths=1.0, zorder=3)
     inset.set_xlim(0, 80)
     inset.set_ylim(0, 80)
-    inset.set_xticks([0, 30, 60])
-    inset.set_yticks([0, 30, 60])
-    inset.tick_params(labelsize=7)
+    inset.set_xticks([0, 30, 60], ["0", "30", "60"], fontsize=7.5)
+    inset.set_yticks([0, 30, 60], ["0", "30", "60"], fontsize=7.5)
     inset.set_xlabel("True scale (bp)", fontsize=7.5)
-    inset.set_ylabel("Learned (bp)", fontsize=7.5)
+    inset.set_ylabel("Learned scale (bp)", fontsize=7.5)
     right.plot([0, 1], [0, 1], color=GRAY, lw=0.9, ls="--", zorder=1)
     for model, face, style in (("chaff", REAL_COLOR, "-"), ("fgbio", "white", "--")):
         x, y, _ = zip(*calibration(libs, model))
@@ -345,11 +353,12 @@ def learning_figure(libs):
     right.set_yticks([0, 0.2, 0.4, 0.6, 0.8, 1.0])
     right.set_xlabel("CDAP, the posterior that a call is real")
     right.set_ylabel("Calls that are real")
-    right.set_title("Its Posteriors Lean Toward Real", fontsize=10, fontweight="bold", loc="left")
-    right.legend(loc="lower right", fontsize=8.5, handlelength=1.4)
+    right.set_title("chaff's Posteriors Are More Often Right Than fgbio's", fontsize=9.5, fontweight="bold", loc="left")
     shapes = [Line2D([], [], ls="", marker=m, ms=6, mfc=face, mec=ALT_COLOR, mew=1.3, label=f"{scale} bp fill-in") for scale, (m, face, _) in SHAPES.items()]
-    left.legend(handles=shapes, loc="upper left", fontsize=8.5, handlelength=1.0)
+    models, labels = right.get_legend_handles_labels()
     fig.tight_layout(w_pad=3.0)
+    fig.legend(handles=shapes + models, labels=[h.get_label() for h in shapes] + labels, loc="lower center", bbox_to_anchor=(0.5, 0.98), ncol=5, fontsize=8.5,
+               handlelength=1.0, columnspacing=1.6)
     finish(fig, "copied-damage-learning.png", LEARNING_TITLE)
 
 
@@ -371,17 +380,21 @@ def burden_figure(libs):
     fig, ax = plt.subplots(figsize=(7.0, 4.2))
     ax.axhline(1, color=GRAY, lw=0.9, ls="--", zorder=1)
     x = [100 * lib["fraction"] for lib in libs]
+    heaviest = {}
     for estimator, name, color in (("raw", "Every call", REF_COLOR), ("threshold", f"Calls passing a CDAP threshold of {THRESHOLD}", ALT_COLOR),
                                    ("weighted", "Calls weighted by CDAP", REAL_COLOR)):
         y = [burden(lib, estimator) for lib in libs]
+        heaviest[estimator] = y[-1]
         ax.plot(x, y, color=color, lw=1.6, marker="o", ms=5, label=name, zorder=3)
     ax.set_xlim(0, 62)
     ax.set_ylim(0.8, None)
     ax.set_xlabel("True copied damage (% of calls)")
     ax.set_ylabel("Estimated real calls / true real calls")
-    ax.legend(loc="upper left", fontsize=8.5, handlelength=1.6)
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=3, fontsize=8.5, handlelength=1.6, columnspacing=1.6)
     fig.tight_layout()
-    finish(fig, "copied-damage-burden.png", BURDEN_TITLE)
+    title = (f"Weighting by CDAP Cuts a {heaviest['raw']:.1f}-Fold Overcount to {heaviest['weighted']:.1f}-Fold; "
+             f"a Threshold Leaves {heaviest['threshold']:.1f}-Fold")
+    finish(fig, "copied-damage-burden.png", title)
 
 
 if __name__ == "__main__":
