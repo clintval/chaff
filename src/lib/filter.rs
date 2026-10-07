@@ -10,6 +10,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use clap::ValueEnum;
@@ -899,9 +900,16 @@ pub fn filter_vcf_report(
     log_scored(&sample, &calls, &skipped);
 
     let scales = score_decays(&mut calls, options);
-    let library = evidence.library()?;
-    let chance = library.is_some() && options.takes_chance();
-    let library = library.filter(|_| chance);
+    let damaged = calls
+        .iter()
+        .flatten()
+        .any(|a| a.kind == FilterKind::CopiedDamage);
+    let library = if options.takes_chance() && damaged {
+        evidence.library()?
+    } else {
+        None
+    };
+    let chance = library.is_some();
     if let Some(library) = &library {
         log_chance(library);
     }
@@ -1166,6 +1174,7 @@ pub fn run_filter(args: &FilterArgs) -> Result<()> {
         Some(reference) if options.takes_chance() => reference,
         _ => return run_filter_on(args, builder),
     };
+    let stop = AtomicBool::new(false);
     std::thread::scope(|scope| {
         let profiling = scope.spawn(|| {
             profile_library(
@@ -1173,6 +1182,7 @@ pub fn run_filter(args: &FilterArgs) -> Result<()> {
                 reference,
                 &options.copied_damage.classes,
                 &args.pileup,
+                &stop,
             )
         });
         let pending: PendingLibrary<'_> = Box::new(move || {
@@ -1181,7 +1191,9 @@ pub fn run_filter(args: &FilterArgs) -> Result<()> {
                 .map_err(|_| anyhow!("profiling the BAM's single-strand consensus panicked"))?
         });
         let mut evidence = PileupEvidence::new(builder, &args.pileup).with_library(pending);
-        run_filter_with(args, &mut evidence)
+        let result = run_filter_with(args, &mut evidence);
+        stop.store(true, Ordering::Relaxed);
+        result
     })
 }
 

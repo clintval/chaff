@@ -53,6 +53,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{bail, Context as _, Result};
 use log::{info, warn};
@@ -802,13 +803,14 @@ fn reference_length(cigar: &[u8]) -> usize {
 }
 
 /// Profile the single-strand and duplex changes of a coordinate-sorted BAM,
-/// or `None` when its records carry no single-strand consensus, or carry it
-/// unaligned.
+/// or `None` when its records carry no single-strand consensus, carry it
+/// unaligned, or `stop` is set before the last is read.
 pub fn profile_library(
     bam: &Path,
     reference: &Path,
     classes: &[DamageClass],
     options: &PileupOptions,
+    stop: &AtomicBool,
 ) -> Result<Option<LibraryProfile>> {
     let mut reader = bam::io::reader::Builder
         .build_from_path(bam)
@@ -820,6 +822,9 @@ pub fn profile_library(
     let mut record = bam::Record::default();
     let mut reads = 0u64;
     while reader.read_record(&mut record)? != 0 {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
         reads += 1;
         scanner.add(&record, &header)?;
         if reads == TAG_PROBE && scanner.tagged == 0 {
@@ -918,7 +923,8 @@ mod tests {
         let bam = dir.path().join("reads.bam");
         reads.write_bam(&bam).unwrap();
         let classes = [DamageClass::DEAMINATION, DamageClass::OXIDATION];
-        profile_library(&bam, &fasta, &classes, &PileupOptions::default()).unwrap()
+        let stop = AtomicBool::new(false);
+        profile_library(&bam, &fasta, &classes, &PileupOptions::default(), &stop).unwrap()
     }
 
     /// Of ten consensus over positions 1 to 40, one holds a duplex C>T at the C of
@@ -960,6 +966,22 @@ mod tests {
             reads.add_frag(Frag::at(1).bases(&reference()[..40]));
         }
         assert_eq!(profile(&reads), None);
+    }
+
+    /// A profile told to stop reads no further and gives none.
+    #[test]
+    fn test_a_stopped_profile_has_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let fasta = write_fasta(dir.path(), "chr1", &reference());
+        let bam = dir.path().join("reads.bam");
+        let mut reads = SamBuilder::new().read_length(40);
+        reads.add_frag(frag(&[], Strand::Plus));
+        reads.write_bam(&bam).unwrap();
+        let classes = [DamageClass::DEAMINATION];
+        let options = PileupOptions::default();
+        let stop = AtomicBool::new(true);
+        let profile = profile_library(&bam, &fasta, &classes, &options, &stop).unwrap();
+        assert_eq!(profile, None);
     }
 
     /// Strand bases left in the sequencing orientation disagree with a reverse
