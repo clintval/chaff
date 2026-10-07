@@ -31,6 +31,8 @@ CPG_CT = [ch for ch in CHANNELS if ch[2:5] == "C>T" and ch[-1] == "G"]
 ALT_COLOR, REF_COLOR, REAL_COLOR, GRAY, GREEN = "#e34948", "#8c8b86", "#2a78d6", "0.45", "#12875c"
 RAMP = ["#b7aee8", "#8a7cd3", "#5f4fbb", "#33267f"]
 COMPLEMENT = str.maketrans("ACGTN", "TGCAN")
+LEARNING_TITLE = "Where Copied Damage Is Heavy, the Learned Prior Understates It"
+BURDEN_TITLE = "Weighting Calls by CDAP Removes Most of the Burden Inflation; a Threshold Removes Little"
 
 
 def spectrum(rng):
@@ -258,8 +260,8 @@ def outcome_figure(truth, chaff, fgbio):
         before.text(i * 16 + 7.5, top * 1.12, cls, ha="center", va="bottom", fontsize=8.5)
     after.set_xticks(range(len(CHANNELS)), [ch[0] + ch[2] + ch[6] for ch in CHANNELS], rotation=90, fontsize=5, fontfamily=["Menlo", "DejaVu Sans Mono"])
     after.tick_params(axis="x", length=0, pad=2)
-    for label, ch in zip(after.get_xticklabels(), CHANNELS):
-        label.set_fontweight("bold" if ch in CPG_CT else "normal")
+    for tick, ch in zip(after.get_xticklabels(), CHANNELS):
+        tick.set_fontweight("bold" if ch in CPG_CT else "normal")
     handles = [Patch(facecolor=GRAY, edgecolor=GRAY, label="Real mutations"), Patch(facecolor="white", edgecolor=GRAY, hatch="//////", label="Copied damage")]
     after.legend(handles=handles, loc="upper right", fontsize=8.5, ncol=2, handlelength=1.4, bbox_to_anchor=(1.0, 1.0))
     ax = fig.add_subplot(grid[:, 1])
@@ -349,7 +351,6 @@ def learning_figure(libs):
     finish(fig, "copied-damage-learning.png", LEARNING_TITLE)
 
 
-
 def burden(lib, estimator):
     """A library's estimate of its real calls, as a multiple of the true count."""
     called, truth = lib["chaff"], lib["truth"]
@@ -379,11 +380,6 @@ def burden_figure(libs):
     ax.legend(loc="upper left", fontsize=8.5, handlelength=1.6)
     fig.tight_layout()
     finish(fig, "copied-damage-burden.png", BURDEN_TITLE)
-
-
-BURDEN_TITLE = "Weighting Calls by CDAP Removes Most of the Burden Inflation; a Threshold Removes Little"
-
-LEARNING_TITLE = "Where Copied Damage Is Heavy, the Learned Prior Understates It"
 
 
 if __name__ == "__main__":
