@@ -209,7 +209,7 @@ impl FilterOptions {
     pub fn add_header_lines(&self, header: &mut vcf::Header, scales: &Scales, chance: bool) {
         let prior = self.prior_text();
         let copied_prior = if chance {
-            "an artifact prior learned per sample and stratum, or, for a call with two or more alternate molecules, the share of the library's positions with as many duplex changes that chance explains, shrunk toward it"
+            "an artifact prior learned per sample and stratum, or, for a call with two or more alternate molecules, the share of the library's positions as deep with as many duplex changes that chance explains, shrunk toward it"
         } else {
             prior
         };
@@ -368,6 +368,9 @@ pub struct Annotation {
     pub posterior: Option<f64>,
     /// The artifact prior the posterior used, once known.
     pub prior: Option<f64>,
+    /// The call's molecules with a base at the quality floor, as a library
+    /// profile counts a position's.
+    pub depth: u32,
 }
 
 /// The index of the sample under test, resolved as fgbio does: the named
@@ -512,6 +515,10 @@ fn score_call(
     }
     let molecules = &cache.as_ref().expect("filled above").1;
     let count = |base: u8| molecules.iter().filter(|m| m.base == base).count() as u32;
+    let depth = molecules
+        .iter()
+        .filter(|m| matches!(m.base, b'A' | b'C' | b'G' | b'T'))
+        .count() as u32;
     let fgbio_prior =
         fgbio_artifact_prior(count(alt_base), count(ref_base), molecules.len() as u32);
     let substitution = sbs6(ref_base, alt_base).unwrap_or_else(|| "other".to_string());
@@ -567,6 +574,7 @@ fn score_call(
                 fgbio_prior,
                 posterior: None,
                 prior: None,
+                depth,
             });
         }
     }
@@ -698,8 +706,9 @@ struct Fractions {
 /// Learn the priors and fill in every annotation's posterior, returning the
 /// learned artifact fractions. Under the `chaff` model, copied damage with
 /// at least [`MIN_CHANCE_CHANGES`] alternate molecules takes each call's
-/// prior from its stratum's chance model in `chances`, shrunk toward its
-/// stratum's learned fraction.
+/// prior from its stratum's chance model in `chances`: the share chance
+/// explains at the call's depth, shrunk toward the share over every depth,
+/// itself shrunk toward the stratum's learned fraction.
 fn assign_posteriors(
     calls: &mut [Vec<Annotation>],
     model: Model,
@@ -744,7 +753,9 @@ fn assign_posteriors(
         let artifact_prior = match (model, chance) {
             (Model::Chaff, Some(chance)) => {
                 let (expected, observed) = chance.at(changes);
-                chance_prior(expected, observed, learned)
+                let pooled = chance_prior(expected, observed, learned);
+                let (expected, observed) = chance.at_depth(annotation.depth, changes);
+                chance_prior(expected, observed, pooled)
             }
             (Model::Chaff, None) => learned,
             (Model::Fgbio, _) => annotation.fgbio_prior,
@@ -1966,6 +1977,37 @@ mod tests {
         let (unprofiled, unprofiled_real, _) = run(Some(other));
         assert_eq!(unprofiled.chance_fraction, None);
         assert!((unprofiled_real - learned_real).abs() < 1e-6);
+    }
+
+    /// A two-molecule call takes the share of positions chance explains at
+    /// its own depth: little where chance rarely puts two changes on one
+    /// position, much where it often does, and, at a depth the library has
+    /// no positions of, the share over every depth.
+    #[test]
+    fn test_a_call_takes_the_chance_share_at_its_depth() {
+        use crate::testing::poisson_stratum;
+        let stratum = poisson_stratum(&[200, 2000], 50_000.0, 1e-4, 100);
+        let chances = BTreeMap::from([("C>T:CpG".to_string(), stratum.chance())]);
+        let call = |depth| Annotation {
+            kind: FilterKind::CopiedDamage,
+            stratum: "C>T:CpG".to_string(),
+            score: Score {
+                log_likelihood_ratio: Some(0.0),
+                alt_molecules: 2,
+                ..Score::default()
+            },
+            distances: None,
+            fgbio_prior: 0.5,
+            posterior: None,
+            prior: None,
+            depth,
+        };
+        let mut calls = vec![vec![call(200)], vec![call(2000)], vec![call(8000)]];
+        assign_posteriors(&mut calls, Model::Chaff, &chances);
+        let priors: Vec<f64> = calls.iter().map(|c| c[0].prior.unwrap()).collect();
+        assert!(priors[0] < 0.2, "{priors:?}");
+        assert!(priors[1] > 0.85, "{priors:?}");
+        assert!(priors[2] > 0.75 && priors[2] < priors[1], "{priors:?}");
     }
 
     /// Chance explains every position with one change, since its rate is

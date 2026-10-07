@@ -70,11 +70,12 @@
 //! copied damage under the `chaff` model takes its prior from the library
 //! instead (see [`simplex`]): for a call with `k` of at least 2 alternate
 //! molecules, the share `E(k) / S(k)` of the library's positions with `k`
-//! duplex changes of its stratum that chance explains, as `π = (min(E(k),
-//! S(k)) + k' π_s) / (S(k) + k')` with `k' = 10` pseudo-positions at the
-//! stratum's learned fraction `π_s`. Chance explains every position with one
-//! change, since its rate is matched to them, so a one-molecule call keeps
-//! `π_s`.
+//! duplex changes of its stratum that chance explains. Over every depth it
+//! is `π_p = (min(E(k), S(k)) + k' π_s) / (S(k) + k')` with `k' = 10`
+//! pseudo-positions at the stratum's learned fraction `π_s`, and the call
+//! takes the same share within its own depth bin, shrunk toward `π_p`.
+//! Chance explains every position with one change, since its rate is
+//! matched to them, so a one-molecule call keeps `π_s`.
 //!
 //! Under the `fgbio` model the prior is fgbio's per call: an artifact prior of
 //! `1 - min((2 m)^2, 0.9999)`, where `m` is the call's alternate molecule
