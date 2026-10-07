@@ -78,12 +78,12 @@ def pair(header, name, reference, start, length, read_length, site, base, rng):
         yield read
 
 
-def simulate():
+def simulate(work=WORK, seed=SEED, real=REAL, artifacts=ARTIFACTS, fill_in=FILL_IN, cpg_only=False):
     """Write a reference, reads, and calls of real mutations and copied damage, and return the truth by 1-based position."""
-    rng = np.random.default_rng(SEED)
-    p = spectrum(rng)
-    sites = [{"kind": "real", "channel": str(rng.choice(CHANNELS, p=p)), "n": ALT_MOLECULES[i % 4]} for i in range(REAL)]
-    sites += [{"kind": "artifact", "channel": str(rng.choice(CPG_CT)), "n": ALT_MOLECULES[i % 4]} for i in range(ARTIFACTS)]
+    rng = np.random.default_rng(seed)
+    p = np.array([ch in CPG_CT for ch in CHANNELS], dtype=float) / 4 if cpg_only else spectrum(rng)
+    sites = [{"kind": "real", "channel": str(rng.choice(CHANNELS, p=p)), "n": ALT_MOLECULES[i % 4]} for i in range(real)]
+    sites += [{"kind": "artifact", "channel": str(rng.choice(CPG_CT)), "n": ALT_MOLECULES[i % 4]} for i in range(artifacts)]
     rng.shuffle(sites)
     reference = np.array(list("ACGT"))[rng.choice(4, size=SPACING * len(sites), p=[0.295, 0.205, 0.205, 0.295])]
     for i, s in enumerate(sites):
@@ -93,43 +93,47 @@ def simulate():
             context, s["ref"], s["alt"] = (x.translate(COMPLEMENT) for x in (context[::-1], s["ref"], s["alt"]))
         reference[s["site"] - 1:s["site"] + 2] = list(context)
     reference = "".join(reference)
-    WORK.mkdir(parents=True, exist_ok=True)
-    (WORK / "ref.fa").write_text(">chr1\n" + "".join(reference[i:i + 80] + "\n" for i in range(0, len(reference), 80)))
-    pysam.faidx(str(WORK / "ref.fa"))
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "ref.fa").write_text(">chr1\n" + "".join(reference[i:i + 80] + "\n" for i in range(0, len(reference), 80)))
+    pysam.faidx(str(work / "ref.fa"))
     header = pysam.AlignmentHeader.from_dict({"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"SN": "chr1", "LN": len(reference)}], "RG": [{"ID": "tumor", "SM": "tumor"}]})
-    with pysam.AlignmentFile(str(WORK / "reads.bam"), "wb", header=header) as bam:
+    with pysam.AlignmentFile(str(work / "reads.bam"), "wb", header=header) as bam:
         for i, s in enumerate(sites):
             depth, molecules, alt = int(rng.negative_binomial(DISPERSION, DISPERSION / (DISPERSION + DEPTH))), [], 0
             while alt < s["n"]:
                 start, length, read_length = fragment(rng, s["site"])
                 five_prime = s["site"] - start if s["forward"] else start + length - 1 - s["site"]
-                copied = s["kind"] == "real" or rng.random() < np.exp(-five_prime / FILL_IN)
+                copied = s["kind"] == "real" or rng.random() < np.exp(-five_prime / fill_in)
                 molecules.append((start, length, read_length, s["alt"] if copied else "N"))
                 alt += copied
             molecules += [(*fragment(rng, s["site"]), s["ref"]) for _ in range(max(depth, len(molecules)) - len(molecules))]
             reads = [r for j, m in enumerate(molecules) for r in pair(header, f"s{i}m{j}", reference, *m[:3], s["site"], m[3], rng)]
             for read in sorted(reads, key=lambda r: r.reference_start):
                 bam.write(read)
-    pysam.index(str(WORK / "reads.bam"))
+    pysam.index(str(work / "reads.bam"))
     lines = ["##fileformat=VCFv4.2", f"##contig=<ID=chr1,length={len(reference)}>", '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">',
              "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ttumor"]
     lines += [f"chr1\t{s['site'] + 1}\t.\t{s['ref']}\t{s['alt']}\t.\t.\t.\tGT\t0/1" for s in sites]
-    (WORK / "calls.vcf").write_text("\n".join(lines) + "\n")
+    (work / "calls.vcf").write_text("\n".join(lines) + "\n")
     return {s["site"] + 1: s for s in sites}
 
 
-def run_chaff():
-    subprocess.run(["cargo", "build", "--release", "--manifest-path", str(REPO / "Cargo.toml")], check=True)
+def run_chaff(work=WORK):
     for model in ("chaff", "fgbio"):
-        subprocess.run([str(REPO / "target" / "release" / "chaff"), "--input", WORK / "calls.vcf", "--bam", WORK / "reads.bam", "--ref", WORK / "ref.fa",
+        subprocess.run([str(REPO / "target" / "release" / "chaff"), "--input", work / "calls.vcf", "--bam", work / "reads.bam", "--ref", work / "ref.fa",
                         "--sample", "tumor", "--filters", "copied-damage", "--copied-damage-threshold", str(THRESHOLD), "--model", model,
-                        "--output", WORK / f"{model}.vcf", "--metrics", WORK / f"{model}.tsv"], check=True)
+                        "--output", work / f"{model}.vcf", "--metrics", work / f"{model}.tsv"], check=True, stderr=subprocess.DEVNULL)
 
 
-def calls(model):
-    with pysam.VariantFile(str(WORK / f"{model}.vcf")) as vcf:
-        return {r.pos: {"filtered": "CopiedDamageArtifact" in r.filter.keys(), "cdlr": r.info.get("CDLR"),
+def calls(model, work=WORK):
+    with pysam.VariantFile(str(work / f"{model}.vcf")) as vcf:
+        return {r.pos: {"filtered": "CopiedDamageArtifact" in r.filter.keys(), "cdlr": r.info.get("CDLR"), "cdap": r.info.get("CDAP"),
                         "cdac": r.info.get("CDAC"), "cdrc": r.info.get("CDRC")} for r in vcf}
+
+
+def metrics(work, column):
+    lines = [line.split("\t") for line in (work / "chaff.tsv").read_text().splitlines()]
+    return float(dict(zip(lines[0], lines[1]))[column])
 
 
 def distances(truth):
@@ -179,7 +183,7 @@ def finish(fig, name, title, note):
 
 
 def ends_figure(truth, called):
-    scale = float(next(line.split("\t")[7] for line in (WORK / "chaff.tsv").read_text().splitlines()[1:]))
+    scale = metrics(WORK, "distance")
     groups = [("artifact", "Copied damage, alternate molecules", ALT_COLOR, "cdac"), ("real", "Real mutations, alternate molecules", REAL_COLOR, "cdac"),
               ("reference", "Reference molecules", REF_COLOR, "cdrc")]
     measured, bins = distances(truth), np.arange(0, 401, 10)
@@ -203,7 +207,7 @@ def ends_figure(truth, called):
     for kind, name, color, field in groups:
         text = f"{name}: {share(called, truth, None if kind == 'reference' else kind, field):.0f}%" + (f" within {scale:.0f} bp" if kind == "artifact" else "")
         handles.append(Patch(facecolor=color, alpha=0.3, edgecolor=color, label=text) if kind == "reference" else Line2D([], [], color=color, lw=1.8, label=text))
-    axes[1].legend(handles=handles, loc="upper right", fontsize=8.5, handlelength=1.6, bbox_to_anchor=(1.0, 1.0))
+    axes[0].legend(handles=handles, loc="upper right", fontsize=8.5, handlelength=1.6, bbox_to_anchor=(1.0, 0.8))
     fig.tight_layout(w_pad=2.0)
     finish(fig, "copied-damage-ends.png", "Copied Damage Crowds the Lesion Strand's 5′ End; Real Mutations Follow the Reference",
            NOTE + "\nThe dashed line is the decay scale chaff learned; the legend's shares are its CDAC and CDRC counts.")
@@ -215,8 +219,8 @@ def spectrum_row(ax, truth, keep, title, detail):
         if keep(pos):
             (real if t["kind"] == "real" else artifact)[CHANNELS.index(t["channel"])] += 1
     colors = [CLASS_COLOR[ch[2:5]] for ch in CHANNELS]
-    ax.bar(range(len(CHANNELS)), real, width=0.78, color=colors, linewidth=0)
-    ax.bar(range(len(CHANNELS)), artifact, bottom=real, width=0.78, color="white", edgecolor=colors, hatch="//////", linewidth=0.5)
+    ax.bar(range(len(CHANNELS)), real, width=0.68, color=colors, edgecolor=colors, linewidth=0.5)
+    ax.bar(range(len(CHANNELS)), artifact, bottom=real, width=0.68, color="white", edgecolor=colors, hatch="//////", linewidth=0.5)
     ax.set_xlim(-0.7, len(CHANNELS) - 0.3)
     ax.set_xticks([])
     ax.set_ylabel("Calls")
@@ -231,6 +235,11 @@ def roc(called, truth, n):
     art, real = scores("artifact"), scores("real")
     cuts = np.unique(np.concatenate([art, real]))[::-1]
     return [0.0] + [100 * np.mean(real >= c) for c in cuts], [0.0] + [100 * np.mean(art >= c) for c in cuts]
+
+
+def auc(called, truth, n):
+    xs, ys = (np.array(v) / 100 for v in roc(called, truth, n))
+    return float(np.sum(np.diff(xs) * (ys[1:] + ys[:-1]) / 2) + (1 - xs[-1]) * ys[-1])
 
 
 def operating_point(called, truth, n):
@@ -258,7 +267,7 @@ def outcome_figure(truth, chaff, fgbio):
     after.tick_params(axis="x", length=0, pad=2)
     for label, ch in zip(after.get_xticklabels(), CHANNELS):
         label.set_fontweight("bold" if ch in CPG_CT else "normal")
-    handles = [Patch(facecolor=CLASS_COLOR["C>T"], label="Real mutations"), Patch(facecolor="white", edgecolor=CLASS_COLOR["C>T"], hatch="//////", label="Copied damage")]
+    handles = [Patch(facecolor=GRAY, edgecolor=GRAY, label="Real mutations"), Patch(facecolor="white", edgecolor=GRAY, hatch="//////", label="Copied damage")]
     after.legend(handles=handles, loc="upper right", fontsize=8.5, ncol=2, handlelength=1.4, bbox_to_anchor=(1.0, 1.0))
     ax = fig.add_subplot(grid[:, 1])
     for n, color in zip(ALT_MOLECULES, RAMP):
@@ -271,13 +280,87 @@ def outcome_figure(truth, chaff, fgbio):
     ax.set_xticks([0, 1, 10, 100], ["0", "1", "10", "100"])
     ax.set_xlabel("Real C>T at CpG filtered (%)")
     ax.set_ylabel("Copied damage filtered (%)")
-    handles = [Line2D([], [], color=c, lw=1.6, label=f"{n} alternate molecules") for n, c in zip(ALT_MOLECULES, RAMP)]
+    handles = [Line2D([], [], color=c, lw=1.6, label=f"{n} alternate molecules (AUC {auc(chaff, truth, n):.2f})") for n, c in zip(ALT_MOLECULES, RAMP)]
     handles += [Line2D([], [], ls="", marker="o", ms=6, mfc=face, mec="black", mew=1.4 if face == "white" else 1.0, label=f"--model {m} at {THRESHOLD}")
                 for m, face in (("chaff", "black"), ("fgbio", "white"))]
     ax.legend(handles=handles, loc="lower right", fontsize=8.5, handlelength=1.4)
     fig.subplots_adjust(left=0.07, right=0.99, bottom=0.12, top=0.9)
-    finish(fig, "copied-damage-filtering.png", "Chaff Removes Most Copied Damage and Keeps Real Mutations; 2 Molecules Are Its Limit",
-           NOTE + "\nCurves sweep the threshold under the chaff model, and dots mark a threshold of 0.05. Costs count the real C>T at CpG, the stratum copied damage shares.")
+    finish(fig, "copied-damage-filtering.png", "Filtering Removes Most Copied Damage and Keeps Real Mutations; 2 Molecules Are Its Limit",
+           NOTE + "\nCurves sweep the threshold under the chaff model, and dots mark a threshold of 0.05. Real calls filtered are counted among the real C>T at CpG,"
+           "\nthe stratum copied damage shares, on an axis linear below 1% and logarithmic above.")
+
+
+LIBRARIES = [(f, 30) for f in (0, 0.05, 0.1, 0.2, 0.4, 0.6)] + [(0.4, 15), (0.4, 60)]
+LIBRARY_CALLS = 400
+BINS = [0, 0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99, 1.0001]
+
+
+def libraries():
+    """Simulate small libraries of C>T calls at CpG with known copied-damage fractions and scales, and run chaff on each."""
+    out = []
+    for i, (fraction, scale) in enumerate(LIBRARIES):
+        work = WORK / "libraries" / f"{fraction}-{scale}"
+        artifacts = round(LIBRARY_CALLS * fraction)
+        truth = simulate(work, SEED + i + 1, LIBRARY_CALLS - artifacts, artifacts, scale, cpg_only=True)
+        run_chaff(work)
+        out.append({"fraction": fraction, "scale": scale, "truth": truth, "learned": metrics(work, "artifact_fraction"),
+                    "learned_scale": metrics(work, "distance"), "chaff": calls("chaff", work), "fgbio": calls("fgbio", work)})
+    return out
+
+
+def calibration(libs, model):
+    pairs = [(lib[model][p]["cdap"], t["kind"] == "real") for lib in libs for p, t in lib["truth"].items() if lib[model][p]["cdap"] is not None]
+    posterior, real = (np.array(v, dtype=float) for v in zip(*pairs))
+    bins = np.digitize(posterior, BINS) - 1
+    return [(posterior[bins == b].mean(), real[bins == b].mean(), int(np.sum(bins == b))) for b in range(len(BINS) - 1) if np.sum(bins == b) >= 15]
+
+
+def learning_figure(libs):
+    fig, (left, right) = plt.subplots(1, 2, figsize=(8.6, 4.2))
+    for ax in (left, right):
+        ax.set_box_aspect(1)
+    left.plot([0, 70], [0, 70], color=GRAY, lw=0.9, ls="--", zorder=1)
+    for lib in libs:
+        marker = {15: "s", 30: "o", 60: "D"}[lib["scale"]]
+        left.scatter(100 * lib["fraction"], 100 * lib["learned"], s=36, marker=marker, color=ALT_COLOR, zorder=3)
+    left.set_xlim(0, 70)
+    left.set_ylim(0, 70)
+    left.set_xlabel("True copied damage (% of calls)")
+    left.set_ylabel("Learned artifact fraction (%)")
+    left.set_title("chaff learns each library's damage", fontsize=10, fontweight="bold", loc="left")
+    inset = left.inset_axes([0.6, 0.1, 0.36, 0.36])
+    inset.plot([0, 80], [0, 80], color=GRAY, lw=0.8, ls="--", zorder=1)
+    for lib in libs:
+        if lib["fraction"] > 0:
+            marker = {15: "s", 30: "o", 60: "D"}[lib["scale"]]
+            inset.scatter(lib["scale"], lib["learned_scale"], s=16, marker=marker, color=ALT_COLOR, zorder=3)
+    inset.set_xlim(0, 80)
+    inset.set_ylim(0, 80)
+    inset.set_xticks([0, 30, 60])
+    inset.set_yticks([0, 30, 60])
+    inset.tick_params(labelsize=7)
+    inset.set_xlabel("True scale (bp)", fontsize=7.5)
+    inset.set_ylabel("Learned (bp)", fontsize=7.5)
+    right.plot([0, 1], [0, 1], color=GRAY, lw=0.9, ls="--", zorder=1)
+    for model, face, style in (("chaff", REAL_COLOR, "-"), ("fgbio", "white", "--")):
+        x, y, _ = zip(*calibration(libs, model))
+        right.plot(x, y, color=REAL_COLOR, lw=1.2, ls=style, zorder=2)
+        right.scatter(x, y, s=30, facecolors=face, edgecolors=REAL_COLOR, linewidths=1.3, zorder=3, label=f"--model {model}")
+    right.set_xlim(0, 1)
+    right.set_ylim(0, 1)
+    right.set_xlabel("CDAP, the posterior that a call is real")
+    right.set_ylabel("Calls that are real")
+    right.set_title("Its posteriors mean what they say", fontsize=10, fontweight="bold", loc="left")
+    right.legend(loc="lower right", fontsize=8.5, handlelength=1.4)
+    shapes = [Line2D([], [], ls="", marker=m, ms=6, color=ALT_COLOR, label=f"{scale} bp fill-in") for m, scale in (("s", 15), ("o", 30), ("D", 60))]
+    left.legend(handles=shapes, loc="upper left", fontsize=8.5, handlelength=1.0)
+    fig.tight_layout(w_pad=3.0)
+    finish(fig, "copied-damage-learning.png", LEARNING_TITLE,
+           f"{len(libs)} simulated duplex libraries of {LIBRARY_CALLS} C>T calls at CpG, each with a known share of copied damage and fill-in scale and with\n"
+           f"{', '.join(map(str, ALT_MOLECULES[:-1]))}, or {ALT_MOLECULES[-1]} alternate molecules per call; calls are pooled across libraries into bins of CDAP, with bins of fewer than 15 calls left out.")
+
+
+LEARNING_TITLE = "The Learned Prior Tracks Each Library's Damage and Calibrates Its Posteriors"
 
 
 if __name__ == "__main__":
@@ -285,8 +368,10 @@ if __name__ == "__main__":
         "font.family": "sans-serif", "font.sans-serif": ["Helvetica", "Arial", "DejaVu Sans"], "font.size": 9,
         "axes.spines.top": False, "axes.spines.right": False, "axes.linewidth": 0.8, "legend.frameon": False,
     })
+    subprocess.run(["cargo", "build", "--release", "--manifest-path", str(REPO / "Cargo.toml")], check=True)
     truth = simulate()
     run_chaff()
     chaff = calls("chaff")
     ends_figure(truth, chaff)
     outcome_figure(truth, chaff, calls("fgbio"))
+    learning_figure(libraries())

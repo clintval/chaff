@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="870" height="172" viewBox="0 0 870 172" role="img" aria-labelledby="title">
-  <title id="title">How copied damage becomes a call: a lesion, a C deaminated to uracil that reads as T, sits near one strand's 5′ end; end repair fill-in copies it onto the partner strand as an A; UMI-bearing adapters are ligated after the copy; and the duplex consensus of both strands agrees on a C&gt;T.</title>
+  <title id="title">How copied damage becomes a call: a lesion, a methylated C at a CpG deaminated to T, sits near one strand's 5′ end; end repair fill-in copies it onto the partner strand as an A; UMI-bearing adapters are ligated after the copy; and the duplex consensus of both strands agrees on a C&gt;T.</title>
   <style>
     text { font-family: Helvetica, Arial, sans-serif; }
     .head { fill: #57606a; font-size: 13px; font-weight: 700; }
@@ -23,14 +23,14 @@
   </style>
 
   <text class="head" x="28" y="24">1. A lesion on one strand</text>
-  <text class="ink" x="28" y="42">a C damaged to read as T</text>
+  <text class="ink" x="28" y="42">a methylated C deaminated to T</text>
   <text class="ink" x="28" y="160">the partner's 3′ end is recessed</text>
   <rect class="read" x="36" y="81" width="151" height="23" rx="4"/>
   <rect class="read" x="111" y="107" width="76" height="23" rx="4"/>
   <text class="end" x="28" y="98" text-anchor="middle">5′</text>
   <path class="lesion-stem" d="M89 86 V73"/>
   <circle class="lesion" cx="89" cy="69.5" r="3.5"/>
-  <text class="lesion-label" x="96" y="72.5">U</text>
+  <text class="lesion-label" x="96" y="72.5">5mC→T</text>
   <text class="base" y="98" text-anchor="middle"><tspan x="44 59 74">CTG</tspan><tspan class="alt" x="89">T</tspan><tspan x="104 119 134 149 164 179">GAGGAT</tspan></text>
   <text class="end" x="196" y="98" text-anchor="middle">3′</text>
   <text class="end" x="103" y="124" text-anchor="middle">3′</text>
@@ -46,7 +46,7 @@
   <text class="end" x="243" y="98" text-anchor="middle">5′</text>
   <path class="lesion-stem" d="M304 86 V73"/>
   <circle class="lesion" cx="304" cy="69.5" r="3.5"/>
-  <text class="lesion-label" x="311" y="72.5">U</text>
+  <text class="lesion-label" x="311" y="72.5">5mC→T</text>
   <text class="base" y="98" text-anchor="middle"><tspan x="259 274 289">CTG</tspan><tspan class="alt" x="304">T</tspan><tspan x="319 334 349 364 379 394">GAGGAT</tspan></text>
   <text class="end" x="411" y="98" text-anchor="middle">3′</text>
   <rect class="fill" x="251" y="107" width="75" height="23" rx="4"/>
@@ -66,16 +66,20 @@
   <rect class="umi" x="618" y="112" width="14" height="15" rx="3"/>
   <path class="lesion-stem" d="M519 86 V73"/>
   <circle class="lesion" cx="519" cy="69.5" r="3.5"/>
-  <text class="lesion-label" x="526" y="72.5">U</text>
+  <text class="lesion-label" x="526" y="72.5">5mC→T</text>
   <text class="base" y="98" text-anchor="middle"><tspan x="474 489 504">CTG</tspan><tspan class="alt" x="519">T</tspan><tspan x="534 549 564 579 594 609">GAGGAT</tspan></text>
   <text class="base" y="124" text-anchor="middle"><tspan x="474 489 504">GAC</tspan><tspan class="alt" x="519">A</tspan><tspan x="534 549 564 579 594 609">CTCCTA</tspan></text>
   <path class="arrow" d="M639 111 h16 m-5 -4 l5 4 l-5 4"/>
 
   <text class="head" x="673" y="24">4. The duplex agrees</text>
-  <text class="ink" x="673" y="42">both strands read T</text>
+  <text class="ink" x="673" y="42">both strands read T, 5′ to 3′</text>
   <text class="ink" x="673" y="160">so the consensus calls C&gt;T</text>
   <rect class="read" x="681" y="81" width="151" height="23" rx="4"/>
   <rect class="read" x="681" y="107" width="151" height="23" rx="4"/>
+  <text class="end" x="673" y="98" text-anchor="middle">5′</text>
+  <text class="end" x="841" y="98" text-anchor="middle">3′</text>
+  <text class="end" x="673" y="124" text-anchor="middle">5′</text>
+  <text class="end" x="841" y="124" text-anchor="middle">3′</text>
   <text class="base" y="98" text-anchor="middle"><tspan x="689 704 719">CTG</tspan><tspan class="alt" x="734">T</tspan><tspan x="749 764 779 794 809 824">GAGGAT</tspan></text>
   <text class="base" y="124" text-anchor="middle"><tspan x="689 704 719">CTG</tspan><tspan class="alt" x="734">T</tspan><tspan x="749 764 779 794 809 824">GAGGAT</tspan></text>
 </svg>
