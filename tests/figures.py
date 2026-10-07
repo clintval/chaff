@@ -22,7 +22,7 @@ from matplotlib.patches import Patch
 REPO = Path(__file__).resolve().parents[1]
 WORK, OUT = REPO / "target" / "figures", REPO / ".github" / "img"
 SEED, REAL, ARTIFACTS, ALT_MOLECULES = 11, 6000, 2000, (2, 3, 5, 10)
-DEPTH, DISPERSION, MEDIAN, SIGMA, FILL_IN, CLOCK = 400, 20, 200, 0.35, 30, 0.12
+DEPTH, DISPERSION, MEDIAN, SIGMA, FILL_IN, NICK, CLOCK = 400, 20, 200, 0.35, 30, 0.2, 0.12
 SPACING, READ_LENGTH, THRESHOLD = 1200, 150, 0.05
 CLASSES = ["C>A", "C>G", "C>T", "T>A", "T>C", "T>G"]
 CLASS_COLOR = {"C>A": "#1ebff0", "C>G": "#050708", "C>T": "#e62725", "T>A": "#cbcacb", "T>C": "#a1cf64", "T>G": "#edc8c5"}
@@ -72,12 +72,12 @@ def pair(header, name, reference, start, length, read_length, site, base, rng):
         yield read
 
 
-def simulate(work=WORK, seed=SEED, real=REAL, artifacts=ARTIFACTS, fill_in=FILL_IN, cpg_only=False):
+def simulate(work=WORK, seed=SEED, real=REAL, artifacts=ARTIFACTS, fill_in=FILL_IN, cpg_only=False, counts=ALT_MOLECULES, nick=NICK):
     """Write a reference, reads, and calls of real mutations and copied damage, and return the truth by 1-based position."""
     rng = np.random.default_rng(seed)
     p = np.array([ch in CPG_CT for ch in CHANNELS], dtype=float) / 4 if cpg_only else spectrum(rng)
-    sites = [{"kind": "real", "channel": str(rng.choice(CHANNELS, p=p)), "n": ALT_MOLECULES[i % 4]} for i in range(real)]
-    sites += [{"kind": "artifact", "channel": str(rng.choice(CPG_CT)), "n": ALT_MOLECULES[i % 4]} for i in range(artifacts)]
+    sites = [{"kind": "real", "channel": str(rng.choice(CHANNELS, p=p)), "n": counts[i % len(counts)]} for i in range(real)]
+    sites += [{"kind": "artifact", "channel": str(rng.choice(CPG_CT)), "n": counts[i % len(counts)]} for i in range(artifacts)]
     rng.shuffle(sites)
     reference = np.array(list("ACGT"))[rng.choice(4, size=SPACING * len(sites), p=[0.295, 0.205, 0.205, 0.295])]
     for i, s in enumerate(sites):
@@ -96,10 +96,12 @@ def simulate(work=WORK, seed=SEED, real=REAL, artifacts=ARTIFACTS, fill_in=FILL_
             depth, molecules, alt = int(rng.negative_binomial(DISPERSION, DISPERSION / (DISPERSION + DEPTH))), [], 0
             while alt < s["n"]:
                 start, length, read_length = fragment(rng, s["site"])
-                five_prime = s["site"] - start if s["forward"] else start + length - 1 - s["site"]
-                copied = s["kind"] == "real" or rng.random() < np.exp(-five_prime / fill_in)
-                molecules.append((start, length, read_length, s["alt"] if copied else "N"))
-                alt += copied
+                if s["kind"] == "artifact" and rng.random() >= nick:
+                    while rng.random() >= np.exp(-(s["site"] - start if s["forward"] else start + length - 1 - s["site"]) / fill_in):
+                        molecules.append((start, length, read_length, "N"))
+                        start, length, read_length = fragment(rng, s["site"])
+                molecules.append((start, length, read_length, s["alt"]))
+                alt += 1
             molecules += [(*fragment(rng, s["site"]), s["ref"]) for _ in range(max(depth, len(molecules)) - len(molecules))]
             reads = [r for j, m in enumerate(molecules) for r in pair(header, f"s{i}m{j}", reference, *m[:3], s["site"], m[3], rng)]
             for read in sorted(reads, key=lambda r: r.reference_start):
@@ -276,11 +278,11 @@ def outcome_figure(truth, chaff, fgbio):
                 for m, face in (("chaff", "black"), ("fgbio", "white"))]
     ax.legend(handles=handles, loc="lower right", fontsize=8.5, handlelength=1.4)
     fig.subplots_adjust(left=0.07, right=0.99, bottom=0.12, top=0.9)
-    finish(fig, "copied-damage-filtering.png", "Filtering Removes Most Copied Damage and Keeps Real Mutations; 2 Molecules Are Its Limit")
+    finish(fig, "copied-damage-filtering.png", "A Threshold Spares Real Mutations but Misses Most Copied Damage at 2 or 3 Molecules")
 
 
-LIBRARIES = [(f, 30) for f in (0, 0.05, 0.1, 0.2, 0.4, 0.6)] + [(0.4, 15), (0.4, 60)]
-LIBRARY_CALLS = 400
+LIBRARIES = [(f, 30) for f in (0, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6)] + [(0.4, 15), (0.4, 60)]
+LIBRARY_CALLS, LIBRARY_COUNTS = 400, (2, 2, 2, 2, 3, 3, 3, 4, 4, 5)
 BINS = [0, 0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99, 1.0001]
 
 
@@ -290,7 +292,7 @@ def libraries():
     for i, (fraction, scale) in enumerate(LIBRARIES):
         work = WORK / "libraries" / f"{fraction}-{scale}"
         artifacts = round(LIBRARY_CALLS * fraction)
-        truth = simulate(work, SEED + i + 1, LIBRARY_CALLS - artifacts, artifacts, scale, cpg_only=True)
+        truth = simulate(work, SEED + i + 1, LIBRARY_CALLS - artifacts, artifacts, scale, cpg_only=True, counts=LIBRARY_COUNTS)
         run_chaff(work)
         out.append({"fraction": fraction, "scale": scale, "truth": truth, "learned": metrics(work, "artifact_fraction"),
                     "learned_scale": metrics(work, "distance"), "chaff": calls("chaff", work), "fgbio": calls("fgbio", work)})
@@ -316,7 +318,7 @@ def learning_figure(libs):
     left.set_ylim(0, 70)
     left.set_xlabel("True copied damage (% of calls)")
     left.set_ylabel("Learned artifact fraction (%)")
-    left.set_title("chaff Learns Each Library's Damage", fontsize=10, fontweight="bold", loc="left")
+    left.set_title("chaff Understates Heavy Damage", fontsize=10, fontweight="bold", loc="left")
     inset = left.inset_axes([0.6, 0.1, 0.36, 0.36])
     inset.plot([0, 80], [0, 80], color=GRAY, lw=0.8, ls="--", zorder=1)
     for lib in libs:
@@ -339,7 +341,7 @@ def learning_figure(libs):
     right.set_ylim(0, 1)
     right.set_xlabel("CDAP, the posterior that a call is real")
     right.set_ylabel("Calls that are real")
-    right.set_title("Its Posteriors Mean What They Say", fontsize=10, fontweight="bold", loc="left")
+    right.set_title("Its Posteriors Lean Toward Real", fontsize=10, fontweight="bold", loc="left")
     right.legend(loc="lower right", fontsize=8.5, handlelength=1.4)
     shapes = [Line2D([], [], ls="", marker=m, ms=6, color=ALT_COLOR, label=f"{scale} bp fill-in") for m, scale in (("s", 15), ("o", 30), ("D", 60))]
     left.legend(handles=shapes, loc="upper left", fontsize=8.5, handlelength=1.0)
@@ -347,7 +349,41 @@ def learning_figure(libs):
     finish(fig, "copied-damage-learning.png", LEARNING_TITLE)
 
 
-LEARNING_TITLE = "The Learned Prior Tracks Each Library's Damage and Calibrates Its Posteriors"
+
+def burden(lib, estimator):
+    """A library's estimate of its real calls, as a multiple of the true count."""
+    called, truth = lib["chaff"], lib["truth"]
+    real = sum(t["kind"] == "real" for t in truth.values())
+    if estimator == "raw":
+        estimate = len(truth)
+    elif estimator == "threshold":
+        estimate = sum(not called[p]["filtered"] for p in truth)
+    else:
+        estimate = sum(1.0 if called[p]["cdap"] is None else called[p]["cdap"] for p in truth)
+    return estimate / real
+
+
+def burden_figure(libs):
+    libs = [lib for lib in libs if lib["scale"] == FILL_IN]
+    fig, ax = plt.subplots(figsize=(7.0, 4.2))
+    ax.axhline(1, color=GRAY, lw=0.9, ls="--", zorder=1)
+    x = [100 * lib["fraction"] for lib in libs]
+    for estimator, name, color in (("raw", "Every call", REF_COLOR), ("threshold", f"Calls passing a CDAP threshold of {THRESHOLD}", ALT_COLOR),
+                                   ("weighted", "Calls weighted by CDAP", REAL_COLOR)):
+        y = [burden(lib, estimator) for lib in libs]
+        ax.plot(x, y, color=color, lw=1.6, marker="o", ms=5, label=name, zorder=3)
+    ax.set_xlim(0, 62)
+    ax.set_ylim(0.8, None)
+    ax.set_xlabel("True copied damage (% of calls)")
+    ax.set_ylabel("Estimated real calls / true real calls")
+    ax.legend(loc="upper left", fontsize=8.5, handlelength=1.6)
+    fig.tight_layout()
+    finish(fig, "copied-damage-burden.png", BURDEN_TITLE)
+
+
+BURDEN_TITLE = "Weighting Calls by CDAP Removes Most of the Burden Inflation; a Threshold Removes Little"
+
+LEARNING_TITLE = "Where Copied Damage Is Heavy, the Learned Prior Understates It"
 
 
 if __name__ == "__main__":
@@ -361,4 +397,6 @@ if __name__ == "__main__":
     chaff = calls("chaff")
     ends_figure(truth, chaff)
     outcome_figure(truth, chaff, calls("fgbio"))
-    learning_figure(libraries())
+    libs = libraries()
+    learning_figure(libs)
+    burden_figure(libs)
