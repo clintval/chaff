@@ -84,10 +84,13 @@ pub struct StratumMetrics {
     #[serde(serialize_with = "six_digits_or_empty")]
     pub asymmetry_p_value: Option<f64>,
     /// Copied damage only, from the single-strand consensus of a duplex BAM:
-    /// duplex changes of the stratum's class per molecule over the library.
+    /// duplex changes of the stratum's class per molecule over the library,
+    /// leaving out positions with at least 3 changes in 1% of their
+    /// molecules as germline or clonal.
     #[serde(serialize_with = "six_digits_or_empty")]
     pub change_rate: Option<f64>,
-    /// Single-strand changes per molecule with both strands called.
+    /// Single-strand changes per molecule with both strands called, over the
+    /// same positions.
     #[serde(serialize_with = "six_digits_or_empty")]
     pub single_strand_rate: Option<f64>,
     /// `change_rate / single_strand_rate`.
