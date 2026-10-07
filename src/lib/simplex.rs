@@ -56,7 +56,9 @@
 //! until it no longer does, and reports what still exceeds `S(k)` as its
 //! misfit. Deep counts are sparse, so from [`MAX_CHANGES`] on a count takes
 //! the positions with it or more. Positions whose changes are at least 2 and
-//! 20% of their molecules are germline and count toward neither model.
+//! 20% of their molecules are germline and count toward neither model, nor
+//! do positions so shallow that 2 changes would make them germline, where a
+//! germline variant shows as one change, as damage would.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::File;
@@ -267,6 +269,15 @@ pub fn depth_bin(molecules: u32) -> u32 {
 /// germline: at least 2 and 20% of them.
 pub fn germline(changes: u32, molecules: u32) -> bool {
     changes >= 2 && f64::from(changes) / f64::from(molecules.max(1)) >= GERMLINE_FRACTION
+}
+
+/// Whether a position of `molecules` molecules counts toward the chance
+/// model: deep enough that [`MIN_CHANCE_CHANGES`] changes would not make it
+/// germline, so a call there could take its prior from the model. A
+/// shallower position shows a germline variant as one change, or none, as
+/// damage would, and off-target consensus leaves many of them.
+fn priced(molecules: u32) -> bool {
+    !germline(MIN_CHANCE_CHANGES, molecules)
 }
 
 /// The probabilities of 0, 1, 2, and more changes at a position whose
@@ -791,14 +802,14 @@ impl<'a> Scanner<'a> {
                 stratum.strand_molecules += u64::from(site.strand_molecules);
                 stratum.single_strand_changes += u64::from(site.single_strand[a]);
             }
-            if site.molecules > 0 && !germline(changes, site.molecules) {
+            if priced(site.molecules) && !germline(changes, site.molecules) {
                 *stratum
                     .positions
                     .entry((site.molecules, changes))
                     .or_default() += 1;
             }
             let single = site.single_strand[a];
-            if site.strand_molecules > 0 && !germline(single, site.strand_molecules) {
+            if priced(site.strand_molecules) && !germline(single, site.strand_molecules) {
                 *stratum
                     .strand_positions
                     .entry((site.strand_molecules, single))
@@ -1167,36 +1178,47 @@ mod tests {
         profile_library(&bam, &fasta, &classes, &PileupOptions::default(), &stop).unwrap()
     }
 
-    /// Of ten consensus over positions 1 to 40, one holds a duplex C>T at the C of
-    /// a CpG, one a C>T on one strand at a C outside CpG, and one the same
-    /// change read by a single raw read, which does not count.
+    /// Of eleven consensus over positions 1 to 40, one holds a duplex C>T at
+    /// the C of a CpG, one a C>T on one strand at a C outside CpG, and one
+    /// the same change read by a single raw read, which does not count. The
+    /// chance model holds the positions, deep enough for two changes not to
+    /// be germline, which ten consensus would not be.
     #[test]
     fn test_a_profile_counts_duplex_and_single_strand_changes_per_stratum() {
         let mut reads = SamBuilder::new().read_length(40);
         reads.add_frag(frag(&[(2, b'T', 30, b'T', b'T', 3)], Strand::Plus));
         reads.add_frag(frag(&[(6, b'N', 2, b'T', b'C', 3)], Strand::Plus));
         reads.add_frag(frag(&[(6, b'N', 2, b'T', b'C', 1)], Strand::Plus));
-        for _ in 0..7 {
+        for _ in 0..8 {
             reads.add_frag(frag(&[], Strand::Plus));
         }
         let profile = profile(&reads).unwrap();
         let cpg = profile.stratum("C>T:CpG").unwrap();
         let other = profile.stratum("C>T:non-CpG").unwrap();
         // Positions 1 to 40 hold five units: a CpG C and G and one other C each.
-        assert_eq!(cpg.molecules, 100);
+        assert_eq!(cpg.molecules, 110);
         assert_eq!(cpg.changes, 1);
-        assert_eq!(cpg.strand_molecules, 100);
+        assert_eq!(cpg.strand_molecules, 110);
         assert_eq!(cpg.single_strand_changes, 0);
-        assert_eq!(cpg.positions.get(&(10, 1)), Some(&1));
-        assert_eq!(cpg.positions.get(&(10, 0)), Some(&9));
-        assert_eq!(other.molecules, 48);
+        assert_eq!(cpg.positions.get(&(11, 1)), Some(&1));
+        assert_eq!(cpg.positions.get(&(11, 0)), Some(&9));
+        assert_eq!(other.molecules, 53);
         assert_eq!(other.changes, 0);
-        assert_eq!(other.strand_molecules, 49);
+        assert_eq!(other.strand_molecules, 54);
         assert_eq!(other.single_strand_changes, 1);
-        assert_eq!(other.single_strand_rate(), Some(1.0 / 49.0));
+        assert_eq!(other.single_strand_rate(), Some(1.0 / 54.0));
         assert_eq!(cpg.conversion_ratio(), None);
         let oxidation = profile.stratum("G>T:CpG").unwrap();
-        assert_eq!((oxidation.molecules, oxidation.changes), (100, 0));
+        assert_eq!((oxidation.molecules, oxidation.changes), (110, 0));
+
+        let mut reads = SamBuilder::new().read_length(40);
+        for _ in 0..10 {
+            reads.add_frag(frag(&[], Strand::Plus));
+        }
+        let shallow = super::tests::profile(&reads).unwrap();
+        let cpg = shallow.stratum("C>T:CpG").unwrap();
+        assert_eq!((cpg.molecules, cpg.positions.len()), (100, 0));
+        assert!(cpg.strand_positions.is_empty());
     }
 
     /// A consensus base that only one strand carries is no duplex change,
