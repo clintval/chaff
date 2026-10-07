@@ -145,11 +145,11 @@ impl Spectrum {
         }
         let (mut plots, mut layouts) = (Vec::new(), Vec::new());
         for (values, title, y_label, named) in views {
-            let (panel_plots, mut layout) = panel(values, title, y_label, top);
+            let (panel_plots, mut layout) = panel(values, title, y_label, top * NAME_ROOM);
             if named {
                 for i in (0..CHANNELS).filter(|&i| is_cpg_c_to_t(i)) {
                     let label =
-                        TextAnnotation::new(context(i), i as f64 + 1.0, values[i] + top * 0.03)
+                        TextAnnotation::new(context(i), i as f64 + 1.0, name_y(values, i, top))
                             .with_color(CPG_COLOR)
                             .with_font_size(10);
                     layout = layout.with_annotation(label);
@@ -197,6 +197,18 @@ fn title(sample: &str) -> String {
 /// strip and names.
 const STRIP_SHARE: f64 = 0.24;
 
+/// The panels' axes fit the tallest bar times this, leaving room above it
+/// for the name of a CpG C>T context.
+const NAME_ROOM: f64 = 1.1;
+
+/// The height of the name of `channel` in a panel whose tallest bar before
+/// filtering is `top`: above its own bar and the bars beside it, which the
+/// name is wider than.
+fn name_y(values: &[f64; CHANNELS], channel: usize, top: f64) -> f64 {
+    let beside = channel.saturating_sub(1)..=(channel + 1).min(CHANNELS - 1);
+    values[beside].iter().copied().fold(0.0, f64::max) + top * 0.03
+}
+
 /// A panel's y axis for bars up to `top`: the tick step, the last tick at or
 /// above `top`, and the axis maximum. The step is the smallest round one,
 /// from a fifth of `top` up, whose next tick lies past the maximum, so the
@@ -216,9 +228,10 @@ fn axis(top: f64) -> (f64, f64, f64) {
 
 /// One panel: a bar per channel in its class's colour, under the class names
 /// and a strip of their colours. The axis ticks stop at the first tick at or
-/// above `top`, the tallest bar before filtering, and the strip and names sit
-/// between it and the next tick, which the axis never reaches, with room above
-/// the names. The strip is a stacked bar per channel on an unpainted base.
+/// above `top`, the tallest bar before filtering with room for a context's
+/// name above it, and the strip and names sit between it and the next tick,
+/// which the axis never reaches, with room above the names. The strip is a
+/// stacked bar per channel on an unpainted base.
 fn panel(values: &[f64; CHANNELS], title: &str, y_label: &str, top: f64) -> (Vec<Plot>, Layout) {
     let (step, ceiling, max) = axis(top);
     let band = max - ceiling;
@@ -361,6 +374,35 @@ mod tests {
             format!("{error}").contains("tumor.spectrum.pdf/tumor.spectrum.pdf"),
             "{error}"
         );
+    }
+
+    /// A CpG C>T context's name clears its own bar and the taller bars beside
+    /// it, and, by more than its height, the class strip above the tallest
+    /// bar.
+    #[test]
+    fn test_a_context_name_clears_the_bars_and_the_strip() {
+        let acg = 16 * 2 + 2;
+        let mut values = [0.0; CHANNELS];
+        values[acg] = 40.0;
+        values[acg + 1] = 300.0;
+        assert!(name_y(&values, acg, 300.0) > 300.0);
+        for top in [
+            1.0,
+            2.0,
+            7.0,
+            47.0,
+            300.0,
+            810.0,
+            1000.0 / NAME_ROOM,
+            12345.0,
+        ] {
+            let mut values = [0.0; CHANNELS];
+            values[acg] = top;
+            let (_, ceiling, max) = axis(top * NAME_ROOM);
+            let strip = ceiling + (max - ceiling) * 0.12;
+            let gap = strip - name_y(&values, acg, top);
+            assert!(gap > 0.07 * max, "{top}: {gap} of {max}");
+        }
     }
 
     /// The axis steps round, ends on a tick at or above the tallest bar, and
