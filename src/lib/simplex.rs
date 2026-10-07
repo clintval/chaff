@@ -6,9 +6,8 @@
 //! behind them. Once aligned, as by `ZipperBams`, the bases are reverse
 //! complemented with the consensus, so they sit in the reference's
 //! orientation. A consensus counts only with all four tags, read past any
-//! hard clip they still hold. A consensus whose mate overlaps it counts only
-//! outside its mate's span, from the mate's `MC` tag, so each molecule counts
-//! once.
+//! hard clip they still hold. Where mates overlap, only the one that sorts
+//! first counts, so each molecule counts once.
 //!
 //! A library profile reads every consensus once and counts, at each reference base
 //! a damage class can change, two kinds of molecule:
@@ -56,7 +55,7 @@
 //! misfit. Positions whose changes are at least 2 and 20% of their molecules
 //! are germline and count toward neither model.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -592,6 +591,68 @@ struct Scanner<'a> {
     profile: LibraryProfile,
     tagged: u64,
     agreement: [(u64, u64); 2],
+    mates: Mates,
+}
+
+/// The spans counted by consensus whose mates sort after them, by name, so
+/// each mate leaves its mate's span to it.
+#[derive(Default)]
+struct Mates {
+    spans: HashMap<Vec<u8>, Span>,
+    prune_at: usize,
+}
+
+/// A counted consensus's 0-based, half-open reference span and where its
+/// mate starts.
+#[derive(Clone, Copy)]
+struct Span {
+    start: usize,
+    end: usize,
+    mate_start: usize,
+}
+
+impl Mates {
+    /// The span a consensus leaves to its mate, after recording its own for
+    /// a mate yet to come: its mate's span when its mate was counted before
+    /// it, or `None`.
+    fn overlap(
+        &mut self,
+        record: &bam::Record,
+        contig_id: usize,
+        start: usize,
+        end: usize,
+    ) -> Option<(usize, usize)> {
+        let flags = record.flags();
+        if !flags.is_segmented() || flags.is_mate_unmapped() {
+            return None;
+        }
+        let (Some(Ok(mate_contig)), Some(Ok(mate_start))) = (
+            record.mate_reference_sequence_id(),
+            record.mate_alignment_start(),
+        ) else {
+            return None;
+        };
+        let (name, mate_start) = (record.name()?, usize::from(mate_start) - 1);
+        if mate_contig != contig_id || mate_start >= end {
+            return None;
+        }
+        if let Some(span) = self.spans.remove(name.as_ref() as &[u8]) {
+            return Some((span.start, span.end));
+        }
+        if mate_start >= start {
+            if self.spans.len() >= self.prune_at {
+                self.spans.retain(|_, span| span.mate_start >= start);
+                self.prune_at = (2 * self.spans.len()).max(1 << 10);
+            }
+            let span = Span {
+                start,
+                end,
+                mate_start,
+            };
+            self.spans.insert(name.to_vec(), span);
+        }
+        None
+    }
 }
 
 impl<'a> Scanner<'a> {
@@ -607,6 +668,7 @@ impl<'a> Scanner<'a> {
             profile: LibraryProfile::default(),
             tagged: 0,
             agreement: [(0, 0); 2],
+            mates: Mates::default(),
         }
     }
 
@@ -756,6 +818,7 @@ impl<'a> Scanner<'a> {
         if self.contig.as_ref().map(|(id, _)| *id) != Some(contig_id) {
             self.flush_before(usize::MAX);
             self.sites.clear();
+            self.mates.spans.clear();
             let name = header
                 .reference_sequences()
                 .get_index(contig_id)
@@ -783,7 +846,7 @@ impl<'a> Scanner<'a> {
             .as_ref()
             .map(|(_, name)| name.clone())
             .unwrap_or_default();
-        let mate_span = mate_span(record, contig_id)?;
+        let mate_span = self.mates.overlap(record, contig_id, start, start + span);
         let sequence = record.sequence();
         let qualities = record.quality_scores();
         let qualities = qualities.as_ref();
@@ -917,47 +980,6 @@ fn integers(value: Value<'_>) -> Option<Vec<i64>> {
     values.ok()
 }
 
-/// The 0-based, half-open reference span of a second of pair's mate, from
-/// its position and `MC` tag, which the consensus leaves to its mate so a
-/// molecule counts once where its mates overlap.
-fn mate_span(record: &bam::Record, contig_id: usize) -> Result<Option<(usize, usize)>> {
-    let flags = record.flags();
-    if !flags.is_segmented() || flags.is_mate_unmapped() || !flags.is_last_segment() {
-        return Ok(None);
-    }
-    let (Some(Ok(mate_contig)), Some(Ok(mate_start))) = (
-        record.mate_reference_sequence_id(),
-        record.mate_alignment_start(),
-    ) else {
-        return Ok(None);
-    };
-    if mate_contig != contig_id {
-        return Ok(None);
-    }
-    let Some(Ok(Value::String(cigar))) = record.data().get(b"MC") else {
-        return Ok(None);
-    };
-    let start = usize::from(mate_start) - 1;
-    Ok(Some((start, start + reference_length(cigar))))
-}
-
-/// The reference bases a CIGAR string spans.
-fn reference_length(cigar: &[u8]) -> usize {
-    let mut length = 0;
-    let mut number = 0;
-    for &c in cigar {
-        if c.is_ascii_digit() {
-            number = number * 10 + usize::from(c - b'0');
-        } else {
-            if matches!(c, b'M' | b'D' | b'N' | b'=' | b'X') {
-                length += number;
-            }
-            number = 0;
-        }
-    }
-    length
-}
-
 /// Profile the single-strand and duplex changes of a coordinate-sorted BAM,
 /// or `None` when its records carry no single-strand consensus, carry it
 /// unaligned, or `stop` is set before the last is read.
@@ -1064,6 +1086,17 @@ mod tests {
             (Tag::new(b'a', b'd'), depths(bases.len())),
             (Tag::new(b'b', b'd'), depths(bases.len())),
         ]
+    }
+
+    /// A record with the four tags of strands that both read `bases`.
+    fn tagged_record(
+        mut record: noodles::sam::alignment::RecordBuf,
+        bases: &str,
+    ) -> noodles::sam::alignment::RecordBuf {
+        for (tag, value) in tags(bases, None) {
+            record.data_mut().insert(tag, value);
+        }
+        record
     }
 
     fn tagged(mut frag: Frag, tags: [(Tag, BufValue); 4]) -> Frag {
@@ -1174,20 +1207,35 @@ mod tests {
         assert_eq!(profile(&reads), None);
     }
 
-    /// Mates over the same positions are one molecule there: the second of pair
-    /// leaves its mate's span to it.
+    /// Mates over the same positions are one molecule there: the mate that
+    /// sorts second leaves its mate's span to it, with or without the mates'
+    /// CIGARs, and counts alone where its mate is left out. Of positions 1 to
+    /// 50, mates over 1 to 40 and 11 to 50 cover all 12 CpG positions.
     #[test]
     fn test_overlapping_mates_count_once() {
-        let mut reads = SamBuilder::new().read_length(40);
-        let mut pair = Pair::at(1, 1)
-            .bases1(&reference()[..40])
-            .bases2(&reference()[..40]);
-        for (tag, value) in tags(&reference()[..40], None) {
-            pair = pair.attr(tag, value);
-        }
-        reads.add_pair(pair);
-        let profile = profile(&reads).unwrap();
-        assert_eq!(profile.stratum("C>T:CpG").unwrap().molecules, 10);
+        let molecules = |mate_cigars: bool, first_mapq: u8| {
+            let (mut scratch, mut reads) = (
+                SamBuilder::new().read_length(40),
+                SamBuilder::new().read_length(40),
+            );
+            let pair = Pair::at(1, 11)
+                .bases1(&reference()[..40])
+                .bases2(&reference()[10..50])
+                .mapq1(first_mapq);
+            for record in scratch.add_pair(pair) {
+                let bases = String::from_utf8(record.sequence().as_ref().to_vec()).unwrap();
+                let mut record = tagged_record(record, &bases);
+                if !mate_cigars {
+                    record = SamBuilder::without_mate_cigar(record);
+                }
+                reads.extend([record]);
+            }
+            let profile = profile(&reads).unwrap();
+            profile.stratum("C>T:CpG").unwrap().molecules
+        };
+        assert_eq!(molecules(true, 60), 12);
+        assert_eq!(molecules(false, 60), 12);
+        assert_eq!(molecules(true, 5), 10);
     }
 
     /// A strand change on a reverse consensus, its tags reverse complemented
