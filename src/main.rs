@@ -98,13 +98,12 @@ pub(crate) const CARGO_STYLING: Styles = Styles::styled()
 ///   chaff -i calls.vcf.gz -b tumor.bam -r ref.fa -o out.vcf.gz \
 ///       --metrics tumor.chaff.tsv
 ///
-///  2. Filter an end-repaired, A-tailed duplex library with suspected deamination:
+///  2. Filter copied deamination in a Duplex Sequencing library:
 ///
 ///   chaff -i calls.vcf.gz -b tumor.bam -r ref.fa -s tumor \
 ///       -o calls.chaff.vcf.gz --metrics tumor.chaff.tsv \
-///       --filters copied-damage,end-repair-fill-in,a-tailing \
-///       --copied-damage-classes C>T --copied-damage-threshold 0.05 \
-///       --end-repair-fill-in-threshold 0.001 --a-tailing-threshold 0.001
+///       --filters copied-damage --copied-damage-classes 'C>T' \
+///       --copied-damage-threshold 0.05
 ///
 ///  3. Reproduce fgbio FilterSomaticVcf:
 ///
@@ -244,8 +243,8 @@ struct Cli {
     /// Decay scale in bases from the lesion strand's 5' end, or `learned`.
     ///
     /// The mean length over which a polymerase copies a lesion strand onto its
-    /// partner, learned per library under either model unless a number fixes it. Molecules within it
-    /// count as congruent in the metrics.
+    /// partner, learned per library under either model unless a number fixes
+    /// it. Molecules within it count as congruent in the metrics.
     #[arg(
         long,
         value_name = "BP",
