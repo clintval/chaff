@@ -1228,7 +1228,9 @@ fn rereadable(path: &Path) -> bool {
 
 /// Filter the calls with the BAM named by `args`, streamed through
 /// streampile, and, when it is a regular file and copied damage runs under
-/// the `chaff` model, read again beside it for its single-strand profile.
+/// the `chaff` model, read again beside it for its single-strand profile; a
+/// profile that fails leaves the priors to the calls, with a warning, as
+/// the pileup reports the BAM's faults itself.
 pub fn run_filter(args: &FilterArgs) -> Result<()> {
     let mut reader = noodles::bam::io::reader::Builder
         .build_from_path(&args.bam)
@@ -1264,9 +1266,13 @@ pub fn run_filter(args: &FilterArgs) -> Result<()> {
             )
         });
         let pending: PendingLibrary<'_> = Box::new(move || {
-            profiling
+            let profile = profiling
                 .join()
-                .map_err(|_| anyhow!("profiling the BAM's single-strand consensus panicked"))?
+                .map_err(|_| anyhow!("profiling the BAM's single-strand consensus panicked"))?;
+            Ok(profile.unwrap_or_else(|error| {
+                log::warn!("the BAM's single-strand consensus could not be profiled, so chaff learns its copied-damage priors from the calls alone: {error:#}");
+                None
+            }))
         });
         let mut evidence = PileupEvidence::new(builder, &args.pileup).with_library(pending);
         let result = run_filter_with(args, &mut evidence);
