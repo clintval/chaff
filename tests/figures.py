@@ -28,7 +28,7 @@ CLASSES = ["C>A", "C>G", "C>T", "T>A", "T>C", "T>G"]
 CLASS_COLOR = {"C>A": "#1ebff0", "C>G": "#050708", "C>T": "#e62725", "T>A": "#cbcacb", "T>C": "#a1cf64", "T>G": "#edc8c5"}
 CHANNELS = [f"{a}[{c}]{b}" for c in CLASSES for a in "ACGT" for b in "ACGT"]
 CPG_CT = [ch for ch in CHANNELS if ch[2:5] == "C>T" and ch[-1] == "G"]
-ALT_COLOR, REF_COLOR, REAL_COLOR, GRAY = "#e34948", "#8c8b86", "#2a78d6", "0.45"
+ALT_COLOR, REF_COLOR, REAL_COLOR, GRAY, GREEN = "#e34948", "#8c8b86", "#2a78d6", "0.45", "#12875c"
 RAMP = ["#b7aee8", "#8a7cd3", "#5f4fbb", "#33267f"]
 COMPLEMENT = str.maketrans("ACGTN", "TGCAN")
 NOTE = (
@@ -156,6 +156,13 @@ def distances(truth):
     return out
 
 
+def label(ax, x, y, parts, **kwargs):
+    """Text in parts of their own styles, each after the last, from axes coordinates `x` and `y`."""
+    text = ax.text(x, y, parts[0][0], transform=ax.transAxes, **parts[0][1], **kwargs)
+    for words, style in parts[1:]:
+        text = ax.annotate(words, xy=(1, 0), xycoords=text, **style, **kwargs)
+
+
 def share(called, truth, kind, field):
     pairs = [called[p][field] for p, t in truth.items() if called[p][field] is not None and kind in (None, t["kind"])]
     return 100 * sum(a for a, _ in pairs) / sum(n for _, n in pairs)
@@ -177,7 +184,7 @@ def ends_figure(truth, called):
               ("reference", "Reference molecules", REF_COLOR, "cdrc")]
     measured, bins = distances(truth), np.arange(0, 401, 10)
     fig, axes = plt.subplots(1, 2, figsize=(8.6, 3.2), sharey=True)
-    for ax, end, label in zip(axes, (0, 1), ("5′", "3′")):
+    for ax, end, end_label in zip(axes, (0, 1), ("5′", "3′")):
         for kind, _, color, _ in groups:
             counts, _ = np.histogram(measured[kind][end], bins=bins)
             counts = 100 * counts / len(measured[kind][end])
@@ -185,22 +192,24 @@ def ends_figure(truth, called):
                 ax.fill_between(bins[:-1], counts, step="post", color=color, alpha=0.3, lw=0)
             ax.step(bins[:-1], counts, where="post", color=color, lw=1.2 if kind == "reference" else 1.8)
         ax.set_xlim(0, 400)
-        ax.set_xlabel(f"Distance from the lesion strand's {label} end (bp)")
+        ax.set_xlabel(f"Distance from the lesion strand's {end_label} end (bp)")
+        bold = {"fontweight": "bold"}
+        label(ax, 0, 1.04, [("From the lesion strand's ", bold), (f"{end_label} end", {**bold, "color": GREEN})], fontsize=10, va="bottom")
     axes[0].set_ylabel("Molecules per 10 bp bin (%)")
     axes[0].set_ylim(0, None)
     axes[0].axvline(scale, color=GRAY, lw=0.9, ls="--", zorder=1)
     axes[0].text(scale + 8, axes[0].get_ylim()[1] * 0.92, f"Learned scale, {scale:.1f} bp", fontsize=8, color=GRAY, va="top")
     handles = []
     for kind, name, color, field in groups:
-        label = f"{name}: {share(called, truth, None if kind == 'reference' else kind, field):.0f}%" + (f" within {scale:.0f} bp" if kind == "artifact" else "")
-        handles.append(Patch(facecolor=color, alpha=0.3, edgecolor=color, label=label) if kind == "reference" else Line2D([], [], color=color, lw=1.8, label=label))
+        text = f"{name}: {share(called, truth, None if kind == 'reference' else kind, field):.0f}%" + (f" within {scale:.0f} bp" if kind == "artifact" else "")
+        handles.append(Patch(facecolor=color, alpha=0.3, edgecolor=color, label=text) if kind == "reference" else Line2D([], [], color=color, lw=1.8, label=text))
     axes[1].legend(handles=handles, loc="upper right", fontsize=8.5, handlelength=1.6, bbox_to_anchor=(1.0, 1.0))
     fig.tight_layout(w_pad=2.0)
     finish(fig, "copied-damage-ends.png", "Copied Damage Crowds the Lesion Strand's 5′ End; Real Mutations Follow the Reference",
            NOTE + "\nThe dashed line is the decay scale chaff learned; the legend's shares are its CDAC and CDRC counts.")
 
 
-def spectrum_row(ax, truth, keep, label):
+def spectrum_row(ax, truth, keep, title, detail):
     real, artifact = np.zeros(len(CHANNELS)), np.zeros(len(CHANNELS))
     for pos, t in truth.items():
         if keep(pos):
@@ -211,7 +220,7 @@ def spectrum_row(ax, truth, keep, label):
     ax.set_xlim(-0.7, len(CHANNELS) - 0.3)
     ax.set_xticks([])
     ax.set_ylabel("Calls")
-    ax.text(0.01, 0.96, label, transform=ax.transAxes, fontsize=9, va="top")
+    label(ax, 0.01, 0.9, [(title, {"fontweight": "bold"}), (detail, {})], fontsize=9.5, va="bottom")
     return (real + artifact).max()
 
 
@@ -235,8 +244,8 @@ def outcome_figure(truth, chaff, fgbio):
     grid = fig.add_gridspec(2, 2, width_ratios=[2.4, 1], hspace=0.12, wspace=0.16)
     before = fig.add_subplot(grid[0, 0])
     after = fig.add_subplot(grid[1, 0], sharey=before)
-    top = spectrum_row(before, truth, lambda p: True, "All calls")
-    spectrum_row(after, truth, lambda p: not chaff[p]["filtered"], f"Calls chaff passes at a threshold of {THRESHOLD}")
+    top = spectrum_row(before, truth, lambda p: True, "Before chaff", ": all calls")
+    spectrum_row(after, truth, lambda p: not chaff[p]["filtered"], "After chaff", f": the calls it passes at a threshold of {THRESHOLD}")
     before.set_ylim(0, top * 1.02)
     for i, cls in enumerate(CLASSES):
         before.add_patch(plt.Rectangle((i * 16 - 0.45, top * 1.04), 15.9, top * 0.05, color=CLASS_COLOR[cls], clip_on=False, lw=0))
