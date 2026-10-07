@@ -24,6 +24,9 @@
 //!   them untilted. With `W` the mean of `w(d)` over the call's reference
 //!   molecules, `l_i = sum ln((1 - e) w(d) / W + e)` over its alternate
 //!   molecules, since a base error lands wherever a reference molecule could.
+//!   A call with few reference molecules measures `W` poorly, so `W` is
+//!   shrunk toward its stratum's pooled reference molecules,
+//!   `(n W + k W_p) / (n + k)` with `k = 10`.
 //!   Copied damage measures `d` from the lesion strand's 5' end: the leftmost
 //!   base for a lesion on the forward strand (a `C>T` or `G>T`), the rightmost
 //!   for one on the reverse strand (a `G>A` or `C>A`). End repair fill-in
@@ -41,7 +44,9 @@
 //!   and an incongruent one `ln(e) - ln((1 - e)(1 - f) + e f)`.
 //!
 //! A call with alternate but no reference molecules, or for a decay without a
-//! measured alternate molecule, gets no ratio and no posterior.
+//! measured alternate molecule, gets no ratio and no posterior, and so does an
+//! A-tailing call without one under the `chaff` model, which would otherwise
+//! take its prior alone.
 //!
 //! ## Priors and posteriors
 //!
@@ -136,7 +141,12 @@
 //! - **Base errors.** A base's error probability is capped at 0.75, a random
 //!   base's, so a Q0 or Q1 base cannot zero a likelihood.
 //! - **Missing evidence.** A call with alternate but no reference molecules
-//!   gets no INFO value; fgbio writes `NaN`.
+//!   gets no INFO value; fgbio writes `NaN`. Under the `chaff` model, an
+//!   A-tailing call without alternate molecules gets none either, where fgbio
+//!   writes its prior's posterior.
+//! - **Missing genotypes.** An SNV whose genotype is `.` or absent, as many
+//!   somatic callers write it, is scored as heterozygous for its first
+//!   alternate allele; fgbio scores only called heterozygous genotypes.
 //! - **Streaming.** The BAM is always streamed, never queried by index.
 //! - **Number format.** Values keep htsjdk's rounding but are written in
 //!   decimal: `0.00003218` for fgbio's `3.218e-05`.

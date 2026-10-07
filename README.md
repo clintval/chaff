@@ -75,6 +75,7 @@ Each filter models one library-preparation step that leaves an artifact near a k
 
 The length a polymerase fills in varies from fragment to fragment, so the evidence for copied damage and end repair fill-in fades with distance from the end, by a *decay* whose *scale* the tool learns per sample, while A-tailing changes only the last base or two of a 3′ end and is scored within a 2 bp window.
 All three filters run by default, but they apply no FILTER until given a threshold.
+The filters score SNVs whose genotype is heterozygous, or missing as many somatic callers write it; homozygous, haploid, and indel calls pass unscored, since the filters weigh alternate molecules against the sample's reference molecules at the site.
 Copied damage scores the SNVs in its damage classes on either strand: C>T covers C>T and G>A calls, and G>T covers G>T and C>A calls.
 A-tailing scores those whose alternate base is A or T, and end repair fill-in all of them.
 
@@ -89,7 +90,7 @@ Fragmenting with a restriction enzyme that leaves blunt ends, as NanoSeq does [[
 - **Use it when:** UMI-bearing adapters are ligated after any polymerase fills in ends, nicks, or gaps, as in Duplex Sequencing; it needs the reference, `--ref`.
 
 As the copied damage diagram shows, the copy runs from the partner's recessed end toward the lesion strand's 5′ end, so copied lesions sit near that end, while a real mutation's molecules sit wherever the reference molecules do.
-On a simulated duplex sample of 6,000 real mutations and 2,000 copied-damage calls at CpG C>T, a quarter of each with 2, 3, 5, or 10 alternate molecules, about 400 duplex molecules per site, fragments of median length 200 bp, and fill-in that copies 80% of lesions from the lesion strand's 5′ end over an exponential length with a mean of 30 bp and the rest from internal nicks anywhere in the template, the tool learns a scale of 42.0 bp, and 65% of the copied damage's alternate molecules sit within it, against 23% of the real mutations' and of the reference molecules:
+On a simulated duplex sample of 6,000 real mutations and 2,000 copied-damage calls at CpG C>T, a quarter of each with 2, 3, 5, or 10 alternate molecules, about 400 duplex molecules per site, fragments of median length 200 bp, and fill-in that copies 80% of lesions from the lesion strand's 5′ end over an exponential length with a mean of 30 bp and the rest from internal nicks anywhere in the template, the tool learns a scale of 42.0 bp, and 66% of the copied damage's alternate molecules sit within it, against 23% of the real mutations' and of the reference molecules:
 
 ![Distances of alternate and reference molecules from the lesion strand's 5′ and 3′ ends: copied damage piles up near the 5′ end and avoids the 3′ end, while real mutations follow the reference molecules.](.github/img/copied-damage-ends.png)
 
@@ -146,7 +147,7 @@ Damage copied onto both strands before the adapters were ligated looks the same 
 
 ### 2. Measure
 
-Run the filters without thresholds, so they annotate the calls without filtering them, and write the metrics:
+Run the filters without thresholds, so they annotate the calls without filtering them, and write the metrics; each prior is learned from every scored call, whatever its FILTER, so remove heavily rejected caller output first:
 
 ```console
 chaff \
@@ -162,7 +163,7 @@ Each row of the metrics describes one filter and *stratum*, a group of calls tha
 Its columns are:
 
 - **Calls:** `calls`, the calls scored, and `filtered`, the calls given the FILTER.
-- **Fractions:** `artifact_fraction`, the stratum's learned share of artifacts, and `filter_artifact_fraction`, the filter's over all its strata, which each stratum's is drawn toward, and `expected_artifacts` and `expected_mutations`, the sums of each call's chance of being an artifact and a real mutation.
+- **Fractions:** `artifact_fraction`, the stratum's learned share of artifacts, and `filter_artifact_fraction`, the filter's over all its strata, which each stratum's is drawn toward, and `expected_artifacts` and `expected_mutations`, the sums of each call's chance of being an artifact and a real mutation, a call without a posterior counting as real.
 - **Distance:** `distance`, the decay scale or window in bases.
 - **Molecules:** `alt_molecules` and `ref_molecules`, the molecules measured, and their `_congruent` counts and fractions, those within the distance of the artifact's end.
 - **Asymmetry:** `expected_alt_congruent`, the alternate molecules each call's own reference molecules predict within the distance, and `asymmetry_p_value`, a one-sided test of whether more sit there; a small value says the library has the artifact.
@@ -232,7 +233,7 @@ The call at position 100 is filtered as copied damage and end repair fill-in.
 The calls at positions 400 and 500 pass: their alternate molecules sit at the 5′ end of the strand each template was copied from, where end repair adds no bases, and 2 of the A>T's 5 alternate molecules sit where A-tailing cannot put them.
 The deletion at position 300 is not scored.
 
-To check a threshold, run the tool on germline heterozygous calls from the same reads, down-sampled to the 2 to 10 alternate molecules of your somatic calls: they are real, so the share it filters estimates how often it filters real somatic calls.
+To check a threshold, append germline heterozygous calls from the same reads, down-sampled to the 2 to 10 alternate molecules of your somatic calls and marked by their record ID, to the somatic VCF and run once: they share the somatic calls' prior and are real, so the share of them filtered estimates how often real somatic calls are.
 Where a matched normal or a replicate library exists, the somatic calls it shares are a second check.
 
 On the simulated sample of the copied damage section, a threshold of 0.05 filters 821 of the 2,000 copied-damage calls and 9 of the 1,065 real C>T at CpG, and none of the 4,935 calls in other channels: 73% of the copied damage with 10 alternate molecules, 50% with 5, 34% with 3, and only 6% with 2.
@@ -280,7 +281,7 @@ The tool learns per sample how common each artifact is and how far it reaches, s
 | `--ref` | The reference FASTA, with its `.fai`, which copied damage and `--spectrum` need (short `-r`). |
 | `--sample` | The sample whose reads are in the BAM, required when the VCF has more than one (short `-s`). |
 | `--metrics` | The per-sample metrics TSV, one row per filter and stratum (default none). |
-| `--spectrum` | A PDF of the sample's SNVs by trinucleotide context before and after filtering, where after counts the calls passing every threshold or, without a threshold, weighs each call by its posteriors (default none). |
+| `--spectrum` | A PDF of the sample's heterozygous SNVs, whatever their FILTER, by trinucleotide context before and after filtering, where after counts the calls passing every threshold or, without a threshold, weighs each call by the product of the posteriors of the filters `--filters` enables (default none). |
 | `--filters` | The filters to run (default all three). |
 | `--model` | The model, either `chaff`, which learns each sample's artifact fractions and decay scales, or `fgbio`, which uses fgbio's per-call prior and windows to reproduce its values (default `chaff`). |
 | `--copied-damage-threshold` | The posterior at or below which copied damage applies its FILTER (default none). |

@@ -180,7 +180,7 @@ def finish(fig, name, title):
 
 def ends_figure(truth, called):
     scale = metrics(WORK, "distance")
-    groups = [("artifact", "Copied damage, alternate molecules", ALT_COLOR, "cdac"), ("real", "Real mutations, alternate molecules", REAL_COLOR, "cdac"),
+    groups = [("artifact", "Copied damage", ALT_COLOR, "cdac"), ("real", "Real mutations", REAL_COLOR, "cdac"),
               ("reference", "Reference molecules", REF_COLOR, "cdrc")]
     measured, bins = distances(truth), np.arange(0, 401, 10)
     fig, axes = plt.subplots(1, 2, figsize=(8.6, 3.2), sharey=True)
@@ -203,8 +203,8 @@ def ends_figure(truth, called):
     for kind, name, color, field in groups:
         text = f"{name}: {share(called, truth, None if kind == 'reference' else kind, field):.0f}%" + (f" within {scale:.0f} bp" if kind == "artifact" else "")
         handles.append(Patch(facecolor=color, alpha=0.3, edgecolor=color, label=text) if kind == "reference" else Line2D([], [], color=color, lw=1.8, label=text))
-    axes[0].legend(handles=handles, loc="upper right", fontsize=8.5, handlelength=1.6, bbox_to_anchor=(1.0, 0.8))
     fig.tight_layout(w_pad=2.0)
+    fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 0.99), ncol=3, fontsize=8.5, handlelength=1.6, columnspacing=1.6)
     finish(fig, "copied-damage-ends.png", "Copied Damage Crowds the Lesion Strand's 5′ End; Real Mutations Follow the Reference")
 
 
@@ -268,17 +268,17 @@ def outcome_figure(truth, chaff, fgbio):
     for n, color in zip(ALT_MOLECULES, RAMP):
         ax.plot(*roc(chaff, truth, n), color=color, lw=1.6, drawstyle="steps-post", zorder=2)
         for called, face in ((chaff, color), (fgbio, "white")):
-            ax.scatter(*operating_point(called, truth, n), s=34, facecolors=face, edgecolors=color, linewidths=1.4, zorder=4)
+            ax.scatter(*operating_point(called, truth, n), s=34, facecolors=face, edgecolors=color, linewidths=1.4, zorder=4, clip_on=False)
     ax.set_xscale("symlog", linthresh=1, linscale=0.6)
     ax.set_xlim(0, 100)
     ax.set_ylim(0, 102)
     ax.set_xticks([0, 1, 10, 100], ["0", "1", "10", "100"])
     ax.set_xlabel("Real C>T at CpG filtered (%)")
     ax.set_ylabel("Copied damage filtered (%)")
-    handles = [Line2D([], [], color=c, lw=1.6, label=f"{n} alternate molecules (AUC {auc(chaff, truth, n):.2f})") for n, c in zip(ALT_MOLECULES, RAMP)]
+    handles = [Line2D([], [], color=c, lw=1.6, label=f"{n} molecules, AUC {auc(chaff, truth, n):.2f}") for n, c in zip(ALT_MOLECULES, RAMP)]
     handles += [Line2D([], [], ls="", marker="o", ms=6, mfc=face, mec="black", mew=1.4 if face == "white" else 1.0, label=f"--model {m} at {THRESHOLD}")
                 for m, face in (("chaff", "black"), ("fgbio", "white"))]
-    ax.legend(handles=handles, loc="lower right", fontsize=8.5, handlelength=1.4)
+    ax.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=2, fontsize=8, handlelength=1.4, columnspacing=1.0)
     fig.subplots_adjust(left=0.07, right=0.99, bottom=0.12, top=0.9)
     finish(fig, "copied-damage-filtering.png", "A Threshold Spares Real Mutations but Misses Most Copied Damage at 2 or 3 Molecules")
 
@@ -314,14 +314,14 @@ def learning_figure(libs):
         ax.set_box_aspect(1)
     left.plot([0, 70], [0, 70], color=GRAY, lw=0.9, ls="--", zorder=1)
     for lib in libs:
-        marker = {15: "s", 30: "o", 60: "D"}[lib["scale"]]
-        left.scatter(100 * lib["fraction"], 100 * lib["learned"], s=36, marker=marker, color=ALT_COLOR, zorder=3)
+        marker, nudge = {15: ("s", -2.4), 30: ("o", 0.0), 60: ("D", 2.4)}[lib["scale"]]
+        left.scatter(100 * lib["fraction"] + nudge, 100 * lib["learned"], s=36, marker=marker, color=ALT_COLOR, zorder=3, clip_on=False)
     left.set_xlim(0, 70)
     left.set_ylim(0, 70)
     left.set_xlabel("True copied damage (% of calls)")
     left.set_ylabel("Learned artifact fraction (%)")
-    left.set_title("chaff Understates Heavy Damage", fontsize=10, fontweight="bold", loc="left")
-    inset = left.inset_axes([0.6, 0.1, 0.36, 0.36])
+    left.set_title("Learned Against True Damage", fontsize=10, fontweight="bold", loc="left")
+    inset = left.inset_axes([0.66, 0.13, 0.31, 0.29])
     inset.plot([0, 80], [0, 80], color=GRAY, lw=0.8, ls="--", zorder=1)
     for lib in libs:
         if lib["fraction"] > 0:
@@ -338,9 +338,10 @@ def learning_figure(libs):
     for model, face, style in (("chaff", REAL_COLOR, "-"), ("fgbio", "white", "--")):
         x, y, _ = zip(*calibration(libs, model))
         right.plot(x, y, color=REAL_COLOR, lw=1.2, ls=style, zorder=2)
-        right.scatter(x, y, s=30, facecolors=face, edgecolors=REAL_COLOR, linewidths=1.3, zorder=3, label=f"--model {model}")
+        right.scatter(x, y, s=30, facecolors=face, edgecolors=REAL_COLOR, linewidths=1.3, zorder=3, label=f"--model {model}", clip_on=False)
     right.set_xlim(0, 1)
-    right.set_ylim(0, 1)
+    right.set_ylim(0, 1.06)
+    right.set_yticks([0, 0.2, 0.4, 0.6, 0.8, 1.0])
     right.set_xlabel("CDAP, the posterior that a call is real")
     right.set_ylabel("Calls that are real")
     right.set_title("Its Posteriors Lean Toward Real", fontsize=10, fontweight="bold", loc="left")

@@ -11,8 +11,39 @@ use noodles::vcf;
 use noodles::vcf::header::record::value::map::info::{Number, Type};
 use noodles::vcf::header::record::value::map::{Filter, Info, Map};
 use noodles::vcf::variant::io::Write as _;
+use noodles::vcf::variant::record_buf::samples::sample::Value as SampleValue;
+use noodles::vcf::variant::record_buf::samples::Keys;
+use noodles::vcf::variant::record_buf::Samples;
 use noodles::vcf::variant::RecordBuf;
 use tempfile::NamedTempFile;
+
+/// A copy of a record with a sample that holds no field, or `None` without
+/// one: a sample written `.`, as a VCF writes a genotype it does not know, is
+/// read back holding no field, which would be written empty or not at all, so
+/// the copy fills it with missing fields, its `GT` a missing allele.
+fn fill_empty_samples(record: &RecordBuf) -> Option<RecordBuf> {
+    let samples = record.samples();
+    if samples.keys().as_ref().is_empty() || samples.values().all(|s| !s.values().is_empty()) {
+        return None;
+    }
+    let mut record = record.clone();
+    let (keys, mut values): (Keys, Vec<Vec<Option<SampleValue>>>) =
+        std::mem::take(record.samples_mut()).into();
+    let filled: Vec<Option<SampleValue>> = keys
+        .as_ref()
+        .iter()
+        .map(|key| {
+            (key == "GT")
+                .then(|| ".".parse().ok().map(SampleValue::Genotype))
+                .flatten()
+        })
+        .collect();
+    for sample in values.iter_mut().filter(|sample| sample.is_empty()) {
+        sample.clone_from(&filled);
+    }
+    *record.samples_mut() = Samples::new(keys, values);
+    Some(record)
+}
 
 /// A reader over VCF (plain or BGZF) or BCF records.
 pub enum VariantReader {
@@ -182,8 +213,10 @@ impl VariantWriter {
         }
     }
 
-    /// Write one record.
+    /// Write one record, a sample whose every field is missing as `.`.
     pub fn write_record(&mut self, header: &vcf::Header, record: &RecordBuf) -> io::Result<()> {
+        let filled = fill_empty_samples(record);
+        let record = filled.as_ref().unwrap_or(record);
         match &mut self.stream {
             Stream::Vcf(w) => w.write_variant_record(header, record),
             Stream::VcfGz(w) => w.write_variant_record(header, record),
@@ -370,6 +403,46 @@ mod tests {
             std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
             1
         );
+    }
+
+    /// A sample written `.` reads back with no field and is written `.`
+    /// again, in every format.
+    #[test]
+    fn test_a_missing_sample_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.vcf");
+        std::fs::write(
+            &input,
+            "##fileformat=VCFv4.2\n##contig=<ID=chr1,length=100>\n\
+             ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+             #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ta\tb\n\
+             chr1\t10\t.\tG\tT\t.\t.\t.\tGT\t.\t0/1\n",
+        )
+        .unwrap();
+        for name in ["out.vcf", "out.vcf.gz", "out.bcf"] {
+            let mut reader = VariantReader::open(&input).unwrap();
+            let header = reader.read_header().unwrap();
+            let mut record = RecordBuf::default();
+            reader.read_record(&header, &mut record).unwrap();
+            let output = dir.path().join(name);
+            let mut writer = VariantWriter::create(&output).unwrap();
+            writer.write_header(&header).unwrap();
+            writer.write_record(&header, &record).expect(name);
+            writer.finish().unwrap();
+            let mut reader = VariantReader::open(&output).unwrap();
+            let header = reader.read_header().unwrap();
+            let mut back = RecordBuf::default();
+            reader.read_record(&header, &mut back).unwrap();
+            let called = |r: &RecordBuf, i: usize| {
+                crate::call::Genotype::from_record(r, i)
+                    .map(|gt| gt.called().map(String::from).collect::<Vec<_>>())
+                    .unwrap_or_default()
+            };
+            assert!(called(&back, 0).is_empty(), "{name}");
+            assert_eq!(called(&back, 1), ["G", "T"], "{name}");
+        }
+        let text = std::fs::read_to_string(dir.path().join("out.vcf")).unwrap();
+        assert!(text.ends_with("\tGT\t.\t0/1\n"), "{text}");
     }
 
     #[test]

@@ -54,7 +54,7 @@ Feature: CLI contract
     When I run `chaff -i calls.vcf -o - -b sorted.bam --sample tumor --filters a-tailing`
     Then the exit code is 0
     And stdout contains "##INFO=<ID=ATAP,"
-    And stdout contains "chr1\t100\t.\tC\tA\t.\tPASS\tATAP=0.5\tGT\t0/1\t0/0"
+    And stdout contains "chr1\t100\t.\tC\tA\t.\tPASS\t.\tGT\t0/1\t0/0"
 
   Scenario: a multi-sample VCF needs --sample
     When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --filters a-tailing`
