@@ -87,7 +87,7 @@ const REFERENCE_CHUNK: usize = 1 << 20;
 
 /// The longest reference span of a consensus the profile counts, beyond which it
 /// is skipped rather than held.
-const MAX_READ_SPAN: usize = 100_000;
+const MAX_SPAN: usize = 100_000;
 
 /// The largest gamma shape the chance model takes: copying a lesion varies
 /// across positions at least as much as an exponential does, more than the
@@ -626,7 +626,7 @@ impl<'a> Scanner<'a> {
             .filter(|op| op.kind().consumes_reference())
             .map(|op| op.len())
             .sum();
-        if span > MAX_READ_SPAN {
+        if span > MAX_SPAN {
             return Ok(());
         }
         let contig = self
@@ -824,21 +824,21 @@ pub fn profile_library(
         .context("failed to read the BAM header")?;
     let mut scanner = Scanner::new(classes, *options, Reference::open(reference)?);
     let mut record = bam::Record::default();
-    let mut reads = 0u64;
+    let mut records = 0u64;
     while reader.read_record(&mut record)? != 0 {
         if stop.load(Ordering::Relaxed) {
             return Ok(None);
         }
-        reads += 1;
+        records += 1;
         scanner.add(&record, &header)?;
-        if reads == TAG_PROBE && scanner.tagged == 0 {
+        if records == TAG_PROBE && scanner.tagged == 0 {
             break;
         }
     }
     let profile = scanner.finish();
     match &profile {
         Some(profile) => info!(
-            "profiled the single-strand consensus of {reads} records in {} strata",
+            "profiled the single-strand consensus of {records} records in {} strata",
             profile.strata.len()
         ),
         None => info!("the BAM's records carry no single-strand consensus (ac, bc, ad and bd), so chaff learns its priors from the calls alone"),
@@ -991,7 +991,7 @@ mod tests {
     /// Strand bases left in the sequencing orientation disagree with a reverse
     /// strand consensus's base, so the profile leaves them out.
     #[test]
-    fn test_unaligned_strand_bases_of_reverse_reads_have_no_profile() {
+    fn test_unaligned_strand_bases_of_reverse_consensus_have_no_profile() {
         let mut reads = SamBuilder::new().read_length(40);
         reads.add_frag(frag(&[], Strand::Minus));
         assert!(profile(&reads).is_some());
