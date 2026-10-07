@@ -1585,15 +1585,18 @@ mod tests {
     }
 
     /// The spectrum counts each heterozygous SNV in its channel, read from the
-    /// pyrimidine, and after filtering keeps the calls no threshold flags or,
-    /// without a threshold, weighs each by its posterior.
+    /// pyrimidine, whatever its FILTER, and after filtering keeps the calls no
+    /// threshold flags or, without a threshold, weighs each by its posterior.
     #[test]
     fn test_the_spectrum_counts_scored_snvs_before_and_after_filtering() {
         let dir = tempfile::tempdir().unwrap();
         let reference = write_fasta(dir.path(), "chr1", &"ACGTTCAA".repeat(250));
         let mut vcf = VcfBuilder::new(&["tumor"]);
         vcf.add(Variant::new(1002, &["C", "T"], vec![gt("tumor", "0/1")]));
-        vcf.add(Variant::new(1006, &["C", "T"], vec![gt("tumor", "0/1")]));
+        vcf.add(Variant {
+            filters: vec!["LowQD".to_string()],
+            ..Variant::new(1006, &["C", "T"], vec![gt("tumor", "0/1")])
+        });
         vcf.add(Variant::new(1010, &["C", "T"], vec![gt("tumor", "1/1")]));
         vcf.add(Variant::new(1014, &["C", "CA"], vec![gt("tumor", "0/1")]));
         let input = vcf.write(&dir.path().join("in.vcf"));

@@ -4,20 +4,22 @@
 //! Each SNV falls in one of 96 channels: its substitution read from the
 //! pyrimidine of the base pair (C>A, C>G, C>T, T>A, T>C, or T>G) and the
 //! bases 5' and 3' of it on that strand. The spectrum counts every
-//! heterozygous SNV of the sample, the calls the filters score, before
-//! filtering. After filtering it counts the SNVs that no filter
-//! flagged when any filter has a threshold, and otherwise weighs each SNV by
-//! the product of its posteriors, its expected count as a real mutation.
+//! heterozygous SNV of the sample, whatever its FILTER, an SNV without a
+//! genotype counting as heterozygous, before filtering. After filtering it
+//! counts the SNVs that no filter flagged when any filter has a threshold,
+//! and otherwise weighs each SNV by the product of the posteriors of the
+//! enabled filters, its expected count as a real mutation.
 
 use std::io::Write;
 use std::path::Path;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context as _, Result};
 use kuva::plot::BarPlot;
 use kuva::render::annotations::TextAnnotation;
 use kuva::render::figure::Figure;
 use kuva::render::layout::Layout;
 use kuva::render::plots::Plot;
+use kuva::render::render::Primitive;
 
 use crate::classes::complement;
 use crate::io::StagedFile;
@@ -123,7 +125,8 @@ impl Spectrum {
             After::Passing => "After chaff: Calls Passing Every Threshold",
             After::Weighted => "After chaff: Expected Real Calls, Each Weighted by Its Posteriors",
         };
-        let (before, before_layout) = panel(&self.before, "Before chaff: Every Scored SNV", top);
+        let (before, before_layout) =
+            panel(&self.before, "Before chaff: Every Heterozygous SNV", top);
         let (after, mut after_layout) = panel(&self.after, after_title, top);
         for i in (0..CHANNELS).filter(|&i| is_cpg_c_to_t(i)) {
             let label = TextAnnotation::new(context(i), i as f64 + 1.0, self.after[i] + top * 0.03)
@@ -132,45 +135,81 @@ impl Spectrum {
             after_layout = after_layout.with_annotation(label);
         }
         Figure::new(2, 1)
-            .with_title(format!("Trinucleotide Spectrum of {sample}"))
+            .with_title(title(sample))
             .with_plots(vec![before, after])
             .with_layouts(vec![before_layout, after_layout])
             .with_cell_size(1100.0, 360.0)
     }
 
-    /// Write the spectrum of `sample` as a PDF to `path`.
+    /// Write the spectrum of `sample` as a PDF to `path`, its title bold.
     pub fn write_pdf(&self, path: &Path, sample: &str) -> Result<()> {
-        let scene = self.figure(sample).render();
+        let title = title(sample);
+        let mut scene = self.figure(sample).render();
+        for element in &mut scene.elements {
+            if let Primitive::Text { content, bold, .. } = element {
+                if *content == title {
+                    *bold = true;
+                }
+            }
+        }
         let bytes = kuva::backend::pdf::PdfBackend
             .render_scene(&scene)
-            .map_err(|e| anyhow!("failed to render the spectrum: {e}"))?;
-        let staged = StagedFile::create(path)?;
-        staged.writer()?.write_all(&bytes)?;
-        staged.persist()
+            .map_err(|e| anyhow!("failed to render the spectrum for {path:?}: {e}"))?;
+        let write = || -> Result<()> {
+            let staged = StagedFile::create(path)?;
+            staged.writer()?.write_all(&bytes)?;
+            staged.persist()
+        };
+        write().with_context(|| format!("failed to write the spectrum: {path:?}"))
     }
 }
 
+/// The figure's title.
+fn title(sample: &str) -> String {
+    format!("Trinucleotide Spectrum of {sample}")
+}
+
+/// A round step that splits `top` into about four ticks.
+fn tick_step(top: f64) -> f64 {
+    let raw = top / 4.0;
+    let magnitude = 10f64.powf(raw.log10().floor());
+    [1.0, 2.0, 2.5, 5.0, 10.0]
+        .into_iter()
+        .map(|m| m * magnitude)
+        .find(|step| *step >= raw)
+        .unwrap_or(10.0 * magnitude)
+}
+
 /// One panel: a bar per channel in its class's colour, under the class names
-/// and a strip of their colours above `top`, the tallest bar before
-/// filtering. The strip is a stacked bar per channel on an unpainted base.
+/// and a strip of their colours. The axis ticks stop at the first tick at or
+/// above `top`, the tallest bar before filtering, and the strip and names sit
+/// between it and the next tick, which the axis never reaches. The strip is a
+/// stacked bar per channel on an unpainted base.
 fn panel(values: &[f64; CHANNELS], title: &str, top: f64) -> (Vec<Plot>, Layout) {
+    let step = tick_step(top);
+    let ceiling = (top / step).ceil() * step;
     let mut bars = BarPlot::new();
     let mut strip = BarPlot::new().with_width(1.0).with_stacked();
     for (i, value) in values.iter().enumerate() {
         let color = CLASS_COLORS[i / 16];
         bars = bars.with_colored_bar(context(i), *value, color);
-        strip = strip.with_group(context(i), [(top * 1.12, "none"), (top * 0.05, color)]);
+        strip = strip.with_group(
+            context(i),
+            [(ceiling + step * 0.25, "none"), (step * 0.15, color)],
+        );
     }
     let plots = vec![Plot::Bar(strip), Plot::Bar(bars)];
     let mut layout = Layout::auto_from_plots(&plots)
         .with_title(title)
         .with_y_label("SNVs")
         .with_y_axis_min(0.0)
-        .with_y_axis_max(top * 1.32)
+        .with_y_axis_max(ceiling + step * 0.95)
+        .with_y_tick_step(step)
+        .with_show_grid(false)
         .with_x_tick_rotate(90.0)
         .with_tick_size(8);
     for (class, name) in CLASSES.iter().enumerate() {
-        let label = TextAnnotation::new(*name, 16.0 * class as f64 + 8.5, top * 1.21)
+        let label = TextAnnotation::new(*name, 16.0 * class as f64 + 8.5, ceiling + step * 0.7)
             .with_color("black")
             .with_font_size(11);
         layout = layout.with_annotation(label);
@@ -255,5 +294,25 @@ mod tests {
         spectrum.write_pdf(&path, "tumor").unwrap();
         let bytes = std::fs::read(&path).unwrap();
         assert!(bytes.starts_with(b"%PDF-"), "{:?}", &bytes[..8]);
+        let blocked = path.join("tumor.spectrum.pdf");
+        let error = spectrum.write_pdf(&blocked, "tumor").unwrap_err();
+        assert!(
+            format!("{error}").contains("tumor.spectrum.pdf/tumor.spectrum.pdf"),
+            "{error}"
+        );
+    }
+
+    /// The axis steps split the tallest bar into about four round ticks.
+    #[test]
+    fn test_tick_steps_are_round() {
+        for (top, step) in [
+            (810.0, 250.0),
+            (1.0, 0.25),
+            (3.0, 1.0),
+            (47.0, 20.0),
+            (9.5, 2.5),
+        ] {
+            assert_eq!(tick_step(top), step, "{top}");
+        }
     }
 }

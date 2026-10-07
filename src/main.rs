@@ -164,8 +164,10 @@ struct Cli {
     /// PDF of the sample's SNVs by trinucleotide context, before and after
     /// filtering.
     ///
-    /// After filtering, it counts the calls no filter flagged when a filter
-    /// has a threshold, or else weighs each call by its posteriors.
+    /// Before filtering, it counts every heterozygous SNV, whatever its
+    /// FILTER. After filtering, it counts the calls no filter flagged when a
+    /// filter has a threshold, or else weighs each call by the product of the
+    /// posteriors of the filters `--filters` enables.
     #[arg(long, value_name = "PDF", verbatim_doc_comment)]
     spectrum: Option<PathBuf>,
 
