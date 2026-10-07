@@ -33,6 +33,9 @@ Fragmentation leaves single-stranded overhangs, and end repair's polymerase exte
 Both strands now read T at the lesion, so the duplex consensus agrees on a C>T that looks real.
 The polymerase copies from the partner's recessed end toward the lesion strand's 5′ end, so copied lesions sit near the 5′ end of the strand that carries them and rarely near its 3′ end, while a true mutation's molecules sit wherever the reference molecules at the site do.
 This is *copied damage*.
+On a simulated duplex sample of 6,000 real mutations and 2,000 copied-damage calls at CpG C>T, with about 400 duplex molecules per site, fragments of median length 200 bp, and fill-in that copies the lesion strand from its 5′ end over an exponential length with a mean of 30 bp, chaff learns a scale of 30.3 bp, and 65% of the copied damage's alternate molecules sit within it, against 17% of the real mutations' and of the reference molecules:
+
+![Distances of alternate and reference molecules from the lesion strand's 5′ and 3′ ends: copied damage piles up near the 5′ end and avoids the 3′ end, while real mutations follow the reference molecules.](docs/copied-damage-ends.png)
 
 Copied damage has one blind spot.
 A lesion copied from an internal nick, by nick translation or strand displacement, or across the gap an abasic site leaves, can sit anywhere in the template, so its alternate molecules carry no signal of an end: no per-call score can separate them from a real mutation's, and they show only as an excess of the damage class across a library.
@@ -228,6 +231,12 @@ paste fgbio.vcf chaff.vcf | grep -v '^#' | cut -f 2,7,8,18,19 | column -t
 
 The 3 to 5 alternate molecules of the calls at positions 100, 400, and 500 sit within 3 bp of a template end, so fgbio's window filters all three.
 These templates are F1R2, copied from the forward strand, whose 3′ end is the rightmost: the chaff model filters the call at position 100, whose alternate molecules sit there, and spares those at positions 400 and 500, whose alternate molecules sit at the leftmost end.
+
+On the simulated sample above, with a quarter of each kind of call at 2, 3, 5, or 10 alternate molecules, the chaff model at a threshold of 0.05 filters 1,427 of the 2,000 copied-damage calls and 23 of the 1,065 real C>T at CpG, and none of the 4,935 calls in other channels.
+It filters 95% of the copied damage with 10 alternate molecules and 86% with 5, but only 40% with 2, where it also filters 6 of 253 real C>T at CpG.
+The fgbio model filters all but 2 of the 2,000 copied-damage calls, and with them 82% of the real C>T at CpG with 2 alternate molecules and 5.4% with 10:
+
+![The SBS96 spectrum of the simulated sample before and after chaff, where the copied damage at CpG C>T mostly leaves and the other channels stay, and the share of copied damage filtered against the share of real C>T at CpG filtered, by alternate molecules per call and model.](docs/copied-damage-filtering.png)
 
 With `--model fgbio`, chaff writes fgbio 4.1.1's values and FILTERs wherever overlapping mates agree in base and quality, no read has an indel or soft clip between the call and its mate's 5′ end, and every base is Q2 or better, as on this data.
 Where chaff differs from fgbio on purpose is listed in the crate documentation, in [`src/lib/mod.rs`](src/lib/mod.rs).
