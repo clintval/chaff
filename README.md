@@ -52,21 +52,21 @@ A duplex consensus outvotes an error on one strand, so copied damage is the filt
 
 Each chaff filter models one of these steps and writes its posterior probability that a call is a true mutation, applying its FILTER at or below a threshold you set:
 
-| Filter | Models | INFO | FILTER |
+| Filter&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | Models | INFO | FILTER |
 | --- | --- | --- | --- |
-| `copied-damage` | lesions copied onto the partner strand | `CDAP`, `CDLR`, `CDAC`, `CDRC` | `CopiedDamageArtifact` |
-| `end-repair-fill-in` | errors on the strand end repair extends | `ERFAP` | `EndRepairFillInArtifact` |
-| `a-tailing` | an A added to an over-digested 3′ end | `ATAP` | `ATailingArtifact` |
+| `copied-damage` | Lesions copied onto the partner strand | `CDAP`, `CDLR`, `CDAC`, `CDRC` | `CopiedDamageArtifact` |
+| `end-repair-fill-in` | Errors on the strand end repair extends | `ERFAP` | `EndRepairFillInArtifact` |
+| `a-tailing` | An A added to an over-digested 3′ end | `ATAP` | `ATailingArtifact` |
 
 Each filter scores heterozygous SNVs: copied damage those in its damage classes, `C>T` and `G>T` by default, A-tailing those to A or T, and end repair fill-in all of them.
 
 Each filter also weighs how far a call's molecules sit from the end its artifact favors, out to its *distance*:
 
-| Filter | Distance from | Under `--model chaff` | Under `--model fgbio` |
+| Filter&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | Distance from | Under `--model chaff` | Under `--model fgbio` |
 | --- | --- | --- | --- |
-| `copied-damage` | the lesion strand's 5′ end | a decay with a learned scale | the same decay |
-| `end-repair-fill-in` | the 3′ end of the strand each template was copied from | a decay with a learned scale | a 15 bp window from either end |
-| `a-tailing` | the end where an added A reads | a 2 bp window | the same window |
+| `copied-damage` | The lesion strand's 5′ end | A decay with a learned scale | The same decay |
+| `end-repair-fill-in` | The 3′ end of the strand each template was copied from | A decay with a learned scale | A 15 bp window from either end |
+| `a-tailing` | The end where an added A reads | A 2 bp window | The same window |
 
 A polymerase fills an overhang or copies a lesion over a length that varies from fragment to fragment, so the evidence for copied damage and end repair fill-in fades with distance, as `w(d) = exp(-d / s)`, with no cliff at any one distance.
 chaff learns the scale `s` from each library's calls unless you fix it.
@@ -80,11 +80,11 @@ A duplex consensus, whose reads carry fgbio's `aD` and `bD` depths of both stran
 All three filters run by default, but their thresholds default to none, so a filter annotates calls and applies no FILTER until you give it a threshold.
 Keep the filters your library preparation has:
 
-| Filter | Keep it when the library |
+| Filter&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | Keep it when the library |
 | --- | --- |
-| `copied-damage` | carries UMIs or duplex tags added after any polymerase fills ends, nicks, or gaps, as Duplex Sequencing does; check your prep's order of steps |
-| `end-repair-fill-in` | was end-repaired by a polymerase before adapter ligation, as most ligation preps after mechanical or enzymatic fragmentation are, and is read without a duplex consensus |
-| `a-tailing` | was A-tailed for T-overhang adapters, unlike blunt-end ligation or transposase (tagmentation) preps, and is read without a duplex consensus |
+| `copied-damage` | Carries UMIs or duplex tags added after any polymerase fills ends, nicks, or gaps, as Duplex Sequencing does; check your prep's order of steps |
+| `end-repair-fill-in` | Was end-repaired by a polymerase before adapter ligation, as most ligation preps after mechanical or enzymatic fragmentation are, and is read without a duplex consensus |
+| `a-tailing` | Was A-tailed for T-overhang adapters, unlike blunt-end ligation or transposase (tagmentation) preps, and is read without a duplex consensus |
 
 The copied damage filter needs the reference FASTA, `--ref`, for CpG context, and paired reads, whose template ends it measures.
 
@@ -243,17 +243,20 @@ Where chaff differs from fgbio on purpose is listed in the crate documentation, 
 
 ## Options
 
-| Option | Default | Sets |
-| --- | --- | --- |
-| `--filters` | all three | the filters to run |
-| `--model` | `chaff` | the model, `chaff` or `fgbio` |
-| `--copied-damage-threshold`, `--end-repair-fill-in-threshold`, `--a-tailing-threshold` | none | the posterior at or below which a filter applies its FILTER |
-| `--copied-damage-classes` | `C>T,G>T` | the damage classes, damaged base `>` read base: `C>T` for deamination from heat, storage, or formalin; `G>T` for oxidation from shearing or heat |
-| `--copied-damage-distance` | `learned` | the decay scale in bases from the lesion strand's 5′ end, the mean length a polymerase copies a lesion strand over |
-| `--end-repair-fill-in-distance` | `learned`, or 15 under `--model fgbio` | the decay scale in bases from the 3′ end of the strand each template was copied from, or under `--model fgbio` the window from either template end |
-| `--a-tailing-distance` | 2 | the window from the template end, in bases |
-| `--min-mapping-quality`, `--min-base-quality` | 20 | the read and base floors |
-| `--paired-reads-only` | off | keep only reads whose mate is mapped |
+| Option&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | Sets |
+| --- | --- |
+| `--filters` | The filters to run (default all three). |
+| `--model` | The model, `chaff` or `fgbio` (default `chaff`). |
+| `--copied-damage-threshold` | The posterior at or below which copied damage applies its FILTER (default none). |
+| `--end-repair-fill-in-threshold` | The posterior at or below which end repair fill-in applies its FILTER (default none). |
+| `--a-tailing-threshold` | The posterior at or below which A-tailing applies its FILTER (default none). |
+| `--copied-damage-classes` | The damage classes, damaged base `>` read base: `C>T` for deamination from heat, storage, or formalin, and `G>T` for oxidation from shearing or heat (default `C>T,G>T`). |
+| `--copied-damage-distance` | The decay scale in bases from the lesion strand's 5′ end, the mean length a polymerase copies a lesion strand over, or `learned` (default `learned`). |
+| `--end-repair-fill-in-distance` | The decay scale in bases from the 3′ end of the strand each template was copied from, or `learned`; under `--model fgbio`, the window in bases from either template end (default `learned`, or 15 under `--model fgbio`). |
+| `--a-tailing-distance` | The window from the template end, in bases (default 2). |
+| `--min-mapping-quality` | The mapping quality floor of a read (default 20). |
+| `--min-base-quality` | The base quality floor at the call (default 20). |
+| `--paired-reads-only` | Keep only reads whose mate is mapped (default off). |
 
 The VCF/BCF and the BAM must be coordinate sorted, and neither needs an index.
 Each template counts once, and a read whose mate maps to the same contig needs the mate's CIGAR in its `MC` tag.
