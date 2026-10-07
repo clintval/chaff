@@ -147,8 +147,8 @@ impl StratumProfile {
 
     /// The duplex change rate over the single-strand change rate.
     pub fn conversion_ratio(&self) -> Option<f64> {
-        let single = self.single_strand_rate()?;
-        (single > 0.0).then(|| self.change_rate().unwrap_or(0.0) / single)
+        let single = self.single_strand_rate().filter(|&rate| rate > 0.0)?;
+        Some(self.change_rate()? / single)
     }
 
     /// The stratum's chance model: the dispersion fitted to its single-strand
