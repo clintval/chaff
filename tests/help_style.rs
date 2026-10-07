@@ -13,7 +13,7 @@ const FOOTER: Style = AnsiColor::Magenta.on_default();
 
 /// The tool's one-line description; the first line of the help text.
 const DESCRIPTION: &str =
-    "Separate somatic variant calls from library-preparation damage artifacts.";
+    "Flag somatic variant calls that are library-preparation artifacts.";
 
 /// Run the binary with `args` and return its captured stdout.
 fn help_stdout(args: &[&str], no_color: bool) -> String {

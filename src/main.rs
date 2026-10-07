@@ -1,4 +1,4 @@
-//! Separate somatic variant calls from library-preparation damage artifacts.
+//! Flag somatic variant calls that are library-preparation artifacts.
 use std::process;
 
 use std::path::{Path, PathBuf};
@@ -53,7 +53,7 @@ pub(crate) const CARGO_STYLING: Styles = Styles::styled()
     .valid(VALID)
     .invalid(INVALID);
 
-/// Separate somatic variant calls from library-preparation damage artifacts.
+/// Flag somatic variant calls that are library-preparation artifacts.
 ///
 /// Library preparation can turn DNA damage into a base change that both
 /// strands of a duplex agree on. chaff reads a coordinate-sorted VCF/BCF of
