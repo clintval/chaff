@@ -107,7 +107,9 @@ impl FilterKind {
         }
     }
 
-    /// The IDs of the command-line arguments that only this filter reads.
+    /// The IDs of the command-line arguments only this filter reads, so naming
+    /// one while `--filters` leaves the filter out is a usage error; the
+    /// reference is also read by `--spectrum`, which allows it.
     pub fn arguments(self) -> &'static [&'static str] {
         match self {
             FilterKind::CopiedDamage => &[
@@ -197,9 +199,10 @@ impl FilterOptions {
     /// the distances the filters scored with.
     pub fn add_header_lines(&self, header: &mut vcf::Header, scales: &Scales) {
         let prior = self.prior_text();
-        let decay = |distance: Distance, scale: f64, end: &str| {
+        let decay = |kind: FilterKind, distance: Distance, scale: f64, end: &str| {
             let learned = match distance {
-                Distance::Learned => ", learned from the calls,",
+                Distance::Learned if scales.learned(kind) => ", learned from the calls,",
+                Distance::Learned => ", the default without a call to learn it from,",
                 Distance::Bases(_) => "",
             };
             format!("a {} bp decay{learned} from {end}", significant(scale, 3))
@@ -216,6 +219,7 @@ impl FilterOptions {
                 "damage classes {} and {}",
                 classes.join(","),
                 decay(
+                    FilterKind::CopiedDamage,
                     self.copied_damage.distance,
                     scales.copied_damage,
                     "the lesion strand's 5' end"
@@ -279,6 +283,7 @@ impl FilterOptions {
         if self.enabled(FilterKind::EndRepairFillIn) {
             let model = match self.model {
                 Model::Chaff => decay(
+                    FilterKind::EndRepairFillIn,
                     self.end_repair_fill_in.distance,
                     scales.end_repair_fill_in,
                     "the 3' end of the strand each template was copied from",
@@ -562,9 +567,23 @@ pub struct Scales {
     pub end_repair_fill_in: f64,
     /// The A-tailing window.
     pub a_tailing: f64,
+    /// Whether the copied damage scale was learned from calls, rather than
+    /// fixed or left at the default for want of calls.
+    pub copied_damage_learned: bool,
+    /// Whether the end repair fill-in scale was learned from calls.
+    pub end_repair_fill_in_learned: bool,
 }
 
 impl Scales {
+    /// Whether `kind`'s scale was learned from calls.
+    pub fn learned(&self, kind: FilterKind) -> bool {
+        match kind {
+            FilterKind::CopiedDamage => self.copied_damage_learned,
+            FilterKind::EndRepairFillIn => self.end_repair_fill_in_learned,
+            FilterKind::ATailing => false,
+        }
+    }
+
     /// The distance `kind` scored with.
     pub fn of(&self, kind: FilterKind) -> f64 {
         match kind {
@@ -586,6 +605,8 @@ fn score_decays(calls: &mut [Vec<Annotation>], options: &FilterOptions) -> Scale
             .bases(CopiedDamage::FALLBACK_SCALE),
         end_repair_fill_in: options.end_repair_fill_in.window(),
         a_tailing: f64::from(options.a_tailing.distance),
+        copied_damage_learned: false,
+        end_repair_fill_in_learned: false,
     };
     let decays = [
         (
@@ -632,6 +653,10 @@ fn score_decays(calls: &mut [Vec<Annotation>], options: &FilterOptions) -> Scale
             _ => scales.end_repair_fill_in = scale,
         }
         if distance == Distance::Learned {
+            match kind {
+                FilterKind::CopiedDamage => scales.copied_damage_learned = true,
+                _ => scales.end_repair_fill_in_learned = true,
+            }
             info!(
                 "{kind}: learned a decay scale of {scale:.2} bp from {}",
                 plural(held.len(), "call")
@@ -1180,6 +1205,38 @@ mod tests {
             );
             let filtered = records[0].filters().as_ref().contains(ATailing::FILTER);
             assert_eq!(filtered, scored, "{model}");
+        }
+    }
+
+    /// A learned decay with no call to learn from keeps its default, and the
+    /// header says so rather than calling it learned.
+    #[test]
+    fn test_a_decay_without_calls_is_not_called_learned() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = write_fasta(dir.path(), "chr1", &"ACGTTCAA".repeat(250));
+        let input = VcfBuilder::new(&["tumor"]).write(&dir.path().join("in.vcf"));
+        let output = dir.path().join("out.vcf");
+        let mut reference = Reference::open(&reference).unwrap();
+        let options = FilterOptions::default();
+        filter_vcf(
+            &input,
+            &output,
+            &mut MoleculeTable::new(),
+            Some(&mut reference),
+            &options,
+        )
+        .unwrap();
+        let (header, _) = read_records(&output);
+        for id in [CopiedDamage::INFO_POSTERIOR, EndRepairFillIn::INFO] {
+            let description = header.infos()[id].description();
+            assert!(
+                description.contains("the default without a call to learn it from"),
+                "{description}"
+            );
+            assert!(
+                !description.contains("learned from the calls"),
+                "{description}"
+            );
         }
     }
 
