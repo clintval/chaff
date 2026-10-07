@@ -32,3 +32,7 @@ pixi run test
 pixi run fmt-check
 pixi run lint
 ```
+
+## Figures
+
+Run `tests/figures.py` to redraw the README figures: it builds `chaff`, simulates a seeded duplex sample, runs `chaff` under both models, and writes the PNGs into `.github/img/`, with [`uv`](https://docs.astral.sh/uv/) installing its Python dependencies.
