@@ -24,6 +24,9 @@
 //!   them untilted. With `W` the mean of `w(d)` over the call's reference
 //!   molecules, `l_i = sum ln((1 - e) w(d) / W + e)` over its alternate
 //!   molecules, since a base error lands wherever a reference molecule could.
+//!   A call with few reference molecules measures `W` poorly, so `W` is
+//!   shrunk toward its stratum's pooled reference molecules,
+//!   `(n W + k W_p) / (n + k)` with `k = 10`.
 //!   Copied damage measures `d` from the lesion strand's 5' end: the leftmost
 //!   base for a lesion on the forward strand (a `C>T` or `G>T`), the rightmost
 //!   for one on the reverse strand (a `G>A` or `C>A`). End repair fill-in

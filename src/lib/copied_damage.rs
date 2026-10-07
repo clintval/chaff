@@ -147,7 +147,7 @@ impl CopiedDamage {
         scale: f64,
     ) -> Score {
         self.distances(molecules, ref_base, alt_base, strand)
-            .score(scale)
+            .score(scale, None)
     }
 }
 

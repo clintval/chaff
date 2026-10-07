@@ -34,7 +34,7 @@ use crate::prior::{
     fgbio_artifact_prior, learn_artifact_fraction, learn_scale, posterior_mutation, BetaPrior,
     FILTER_PRIOR, STRATUM_PRIOR_STRENGTH,
 };
-use crate::read_end::{is_filtered, ATailing, Distances, EndRepairFillIn, Score};
+use crate::read_end::{is_filtered, ATailing, Distances, EndRepairFillIn, ReferencePool, Score};
 use crate::reference::Reference;
 use crate::spectrum::{channel, After, Spectrum};
 
@@ -576,7 +576,8 @@ impl Scales {
 }
 
 /// Learn or fix each decay's scale from all of its filter's calls, and score
-/// every call the decay holds distances for at that scale.
+/// every call the decay holds distances for at that scale, each call's
+/// reference distances shrunk toward its stratum's pooled ones.
 fn score_decays(calls: &mut [Vec<Annotation>], options: &FilterOptions) -> Scales {
     let mut scales = Scales {
         copied_damage: options
@@ -599,12 +600,17 @@ fn score_decays(calls: &mut [Vec<Annotation>], options: &FilterOptions) -> Scale
         ),
     ];
     for (kind, distance, fallback) in decays {
-        let held: Vec<&Distances> = calls
-            .iter()
-            .flatten()
-            .filter(|a| a.kind == kind)
-            .filter_map(|a| a.distances.as_ref())
-            .collect();
+        let mut pools: BTreeMap<String, ReferencePool> = BTreeMap::new();
+        let mut held: Vec<(&Distances, &str)> = Vec::new();
+        for annotation in calls.iter().flatten().filter(|a| a.kind == kind) {
+            if let Some(distances) = &annotation.distances {
+                pools
+                    .entry(annotation.stratum.clone())
+                    .or_default()
+                    .add(&distances.reference);
+                held.push((distances, &annotation.stratum));
+            }
+        }
         if held.is_empty() {
             continue;
         }
@@ -613,7 +619,9 @@ fn score_decays(calls: &mut [Vec<Annotation>], options: &FilterOptions) -> Scale
             Distance::Learned => learn_scale(
                 |scale| {
                     held.iter()
-                        .filter_map(|d| d.log_likelihood_ratio(scale))
+                        .filter_map(|(d, stratum)| {
+                            d.log_likelihood_ratio(scale, pools.get(*stratum))
+                        })
                         .collect()
                 },
                 fallback,
@@ -631,7 +639,7 @@ fn score_decays(calls: &mut [Vec<Annotation>], options: &FilterOptions) -> Scale
         }
         for annotation in calls.iter_mut().flatten().filter(|a| a.kind == kind) {
             if let Some(distances) = annotation.distances.take() {
-                annotation.score = distances.score(scale);
+                annotation.score = distances.score(scale, pools.get(&annotation.stratum));
             }
         }
     }

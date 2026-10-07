@@ -23,6 +23,8 @@
 //! its window. Either way a molecule is congruent when the site lies within
 //! the filter's distance of its end.
 
+use std::collections::BTreeMap;
+
 use crate::call::Genotype;
 use crate::classes::Strand;
 use crate::evidence::Molecule;
@@ -91,6 +93,49 @@ pub fn window_score(
     score
 }
 
+/// The reference molecules a decay's calls hold, pooled per stratum by
+/// distance, toward which each call's own reference molecules are shrunk.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ReferencePool {
+    distances: BTreeMap<usize, u64>,
+    molecules: u64,
+}
+
+impl ReferencePool {
+    /// Add one call's reference distances.
+    pub fn add(&mut self, distances: &[usize]) {
+        for &d in distances {
+            *self.distances.entry(d).or_default() += 1;
+        }
+        self.molecules += distances.len() as u64;
+    }
+
+    /// `ln` of the mean decay weight `exp(-d / scale)` over the pooled
+    /// molecules, or `None` without any.
+    fn ln_mean_weight(&self, scale: f64) -> Option<f64> {
+        let terms = self
+            .distances
+            .iter()
+            .map(|(&d, &n)| (n as f64).ln() - d as f64 / scale);
+        Some(ln_sum_exp(terms)? - (self.molecules as f64).ln())
+    }
+}
+
+/// The reference molecules of a stratum's pool that a call's own reference
+/// molecules are shrunk toward, as pseudo-molecules: ten, as a stratum's
+/// fraction is shrunk toward its filter's by ten pseudo-calls.
+pub const REFERENCE_PSEUDO_MOLECULES: f64 = 10.0;
+
+/// `ln(sum(exp(x)))` without overflow, or `None` for no terms.
+fn ln_sum_exp(terms: impl Iterator<Item = f64>) -> Option<f64> {
+    let terms: Vec<f64> = terms.collect();
+    let max = terms.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if !max.is_finite() {
+        return None;
+    }
+    Some(max + terms.iter().map(|t| (t - max).exp()).sum::<f64>().ln())
+}
+
 /// A continuous artifact model: the artifact's alternate molecules follow the
 /// reference molecules' distance distribution tilted by `w(d) = exp(-d /
 /// scale)`, the chance a copy reaches distance `d`. With `W` the mean of `w`
@@ -101,23 +146,34 @@ pub fn window_score(
 /// ln((1 - e) w(d) / W + e)
 /// ```
 ///
-/// since a base error lands anywhere a reference molecule could. The weights
-/// are taken relative to the nearest reference molecule's and the terms summed
-/// in log space, so the ratio is finite however far a molecule sits from the
-/// end. Returns `None` without both a reference and an alternate distance, as
-/// such a call carries no evidence either way.
+/// since a base error lands anywhere a reference molecule could. A site with
+/// few reference molecules measures `W` poorly, so with a `pool` of its
+/// stratum's reference molecules, `W` is shrunk toward the pool's mean weight
+/// `W_p` by [`REFERENCE_PSEUDO_MOLECULES`] `k`, `W = (n W_site + k W_p) / (n +
+/// k)` for `n` reference molecules at the site: one reference molecule far
+/// from the end no longer makes alternates near it look like a copy. The
+/// terms are summed in log space, so the ratio is finite however far a
+/// molecule sits from the end. Returns `None` without both a reference and an
+/// alternate distance, as such a call carries no evidence either way.
 pub fn tilt_log_likelihood_ratio(
     ref_distances: &[usize],
     alt: &[(usize, u8)],
     scale: f64,
+    pool: Option<&ReferencePool>,
 ) -> Option<f64> {
-    if alt.is_empty() {
+    if alt.is_empty() || ref_distances.is_empty() {
         return None;
     }
-    let nearest = *ref_distances.iter().min()? as f64;
-    let ln_w = |d: usize| -(d as f64 - nearest) / scale;
-    let sum: f64 = ref_distances.iter().map(|&d| ln_w(d).exp()).sum();
-    let ln_mean = (sum / ref_distances.len() as f64).ln();
+    let ln_w = |d: usize| -(d as f64) / scale;
+    let ln_site = ln_sum_exp(ref_distances.iter().map(|&d| ln_w(d)))?;
+    let n = ref_distances.len() as f64;
+    let ln_mean = match pool.and_then(|pool| pool.ln_mean_weight(scale)) {
+        Some(ln_pool) => {
+            ln_add_exp(ln_site, REFERENCE_PSEUDO_MOLECULES.ln() + ln_pool)
+                - (n + REFERENCE_PSEUDO_MOLECULES).ln()
+        }
+        None => ln_site - n.ln(),
+    };
     Some(
         alt.iter()
             .map(|&(d, q)| {
@@ -159,18 +215,18 @@ impl Distances {
         distances
     }
 
-    /// The [`tilt_log_likelihood_ratio`] at `scale`.
-    pub fn log_likelihood_ratio(&self, scale: f64) -> Option<f64> {
-        tilt_log_likelihood_ratio(&self.reference, &self.alternate, scale)
+    /// The [`tilt_log_likelihood_ratio`] at `scale`, shrunk toward `pool`.
+    pub fn log_likelihood_ratio(&self, scale: f64, pool: Option<&ReferencePool>) -> Option<f64> {
+        tilt_log_likelihood_ratio(&self.reference, &self.alternate, scale, pool)
     }
 
-    /// The score at `scale`: its ratio, and the molecules less than `scale`
-    /// bases from the end as congruent.
-    pub fn score(&self, scale: f64) -> Score {
+    /// The score at `scale`, shrunk toward `pool`: its ratio, and the
+    /// molecules less than `scale` bases from the end as congruent.
+    pub fn score(&self, scale: f64, pool: Option<&ReferencePool>) -> Score {
         let near = |d: usize| (d as f64) < scale;
         let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
         Score {
-            log_likelihood_ratio: self.log_likelihood_ratio(scale),
+            log_likelihood_ratio: self.log_likelihood_ratio(scale, pool),
             alt_molecules: count(self.alternate.len()),
             alt_congruent: count(self.alternate.iter().filter(|(d, _)| near(*d)).count()),
             ref_molecules: count(self.reference.len()),
@@ -783,12 +839,12 @@ mod tests {
     #[test]
     fn test_tilt_ratio_rewards_alternates_nearer_the_end_than_the_references() {
         let refs: Vec<usize> = (0..100).collect();
-        let near = tilt_log_likelihood_ratio(&refs, &[(1, 90), (3, 90)], 15.0).unwrap();
-        let far = tilt_log_likelihood_ratio(&refs, &[(80, 90), (95, 90)], 15.0).unwrap();
+        let near = tilt_log_likelihood_ratio(&refs, &[(1, 90), (3, 90)], 15.0, None).unwrap();
+        let far = tilt_log_likelihood_ratio(&refs, &[(80, 90), (95, 90)], 15.0, None).unwrap();
         assert!(near > 0.0, "{near}");
         assert!(far < 0.0, "{far}");
-        assert_eq!(tilt_log_likelihood_ratio(&refs, &[], 15.0), None);
-        assert_eq!(tilt_log_likelihood_ratio(&[], &[(1, 30)], 15.0), None);
+        assert_eq!(tilt_log_likelihood_ratio(&refs, &[], 15.0, None), None);
+        assert_eq!(tilt_log_likelihood_ratio(&[], &[(1, 30)], 15.0, None), None);
     }
 
     /// Weights of distances hundreds of scales from the end underflow in
@@ -796,20 +852,20 @@ mod tests {
     #[test]
     fn test_tilt_ratio_is_finite_far_from_the_end() {
         let refs = [800, 900];
-        let flat = tilt_log_likelihood_ratio(&refs, &[(850, 30)], 1.0).unwrap();
-        let near = tilt_log_likelihood_ratio(&refs, &[(0, 30)], 1.0).unwrap();
-        let far = tilt_log_likelihood_ratio(&refs, &[(5000, 30)], 1.0).unwrap();
+        let flat = tilt_log_likelihood_ratio(&refs, &[(850, 30)], 1.0, None).unwrap();
+        let near = tilt_log_likelihood_ratio(&refs, &[(0, 30)], 1.0, None).unwrap();
+        let far = tilt_log_likelihood_ratio(&refs, &[(5000, 30)], 1.0, None).unwrap();
         assert!(flat.is_finite() && near.is_finite() && far.is_finite());
         assert!(near > 700.0, "{near}");
         assert!(far < 0.0, "{far}");
-        let shifted = tilt_log_likelihood_ratio(&[0, 100], &[(50, 30)], 1.0).unwrap();
+        let shifted = tilt_log_likelihood_ratio(&[0, 100], &[(50, 30)], 1.0, None).unwrap();
         assert!((flat - shifted).abs() < 1e-9, "{flat} vs {shifted}");
     }
 
     #[test]
     fn test_tilt_ratio_is_flat_when_alternates_match_the_references() {
         let refs = vec![5, 5, 5];
-        let llr = tilt_log_likelihood_ratio(&refs, &[(5, 255)], 30.0).unwrap();
+        let llr = tilt_log_likelihood_ratio(&refs, &[(5, 255)], 30.0, None).unwrap();
         assert!(llr.abs() < 1e-12, "{llr}");
     }
 
@@ -832,12 +888,36 @@ mod tests {
     /// from: the rightmost end for the forward strand, the leftmost for the
     /// reverse, and either for a duplex consensus. fgbio's window counts
     /// either end for every template.
+    /// One reference molecule far from the end can't make three alternates
+    /// near it look like a copy: the site's reference weight is shrunk toward
+    /// its stratum's pool, while a site with hundreds of reference molecules
+    /// keeps nearly its own.
+    #[test]
+    fn test_a_site_with_few_reference_molecules_is_shrunk_toward_its_pool() {
+        let mut pool = ReferencePool::default();
+        pool.add(&(0..150).cycle().take(3000).collect::<Vec<_>>());
+        let alt = [(0, 40), (1, 40), (2, 40)];
+        let lone = tilt_log_likelihood_ratio(&[100], &alt, 30.0, None).unwrap();
+        let shrunk = tilt_log_likelihood_ratio(&[100], &alt, 30.0, Some(&pool)).unwrap();
+        assert!(lone > 9.5, "{lone}");
+        assert!(shrunk < 5.5 && shrunk > 0.0, "{shrunk}");
+        let many: Vec<usize> = (0..150).cycle().take(300).collect();
+        let own = tilt_log_likelihood_ratio(&many, &alt, 30.0, None).unwrap();
+        let pooled = tilt_log_likelihood_ratio(&many, &alt, 30.0, Some(&pool)).unwrap();
+        assert!((own - pooled).abs() < 0.01, "{own} {pooled}");
+        assert_eq!(
+            tilt_log_likelihood_ratio(&[], &alt, 30.0, Some(&pool)),
+            None
+        );
+        assert!(ReferencePool::default().ln_mean_weight(30.0).is_none());
+    }
+
     #[test]
     fn test_end_repair_fill_in_decays_from_the_copied_strand_s_three_prime_end() {
         let filter = EndRepairFillIn::new(15.0);
         let decay = |origin, alt_left| {
             let molecules = copied_from(origin, alt_left);
-            filter.distances(&molecules, G, T).score(15.0)
+            filter.distances(&molecules, G, T).score(15.0, None)
         };
         let window = |origin, alt_left| {
             let molecules = copied_from(origin, alt_left);
@@ -882,7 +962,7 @@ mod tests {
         };
         let decay = |d| {
             let distances = filter.distances(&molecules(d), G, T);
-            distances.log_likelihood_ratio(15.0).unwrap()
+            distances.log_likelihood_ratio(15.0, None).unwrap()
         };
         let window = |d| {
             let score = filter.score(&molecules(d), G, T);
