@@ -9,6 +9,7 @@ repository = "https://github.com/clintval/chaff"
 description = "Separate somatic variant calls from library-preparation damage artifacts."
 categories = ["command-line-utilities", "science"]
 keywords = ["bioinformatics", "somatic", "duplex", "artifact", "vcf"]
+exclude = [".github/"]
 
 [profile.release]
 codegen-units = 1

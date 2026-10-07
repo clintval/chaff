@@ -28,14 +28,14 @@ Duplex Sequencing tags both strands of a fragment with a UMI and keeps a base on
 End repair can defeat that.
 Fragmentation leaves single-stranded overhangs, and end repair's polymerase extends each recessed 3′ end across the 5′ overhang opposite it, and from any nick, copying a lesion into the partner before the UMIs and adapters go on:
 
-![A C damaged to read as T sits near one strand's 5′ end, end repair fill-in copies it onto the partner strand as an A, the UMI adapters go on after the copy, and the duplex consensus of both strands agrees on a C>T.](docs/copied-damage.svg)
+![A C damaged to read as T sits near one strand's 5′ end, end repair fill-in copies it onto the partner strand as an A, the UMI adapters go on after the copy, and the duplex consensus of both strands agrees on a C>T.](.github/img/copied-damage.svg)
 
 Both strands now read T at the lesion, so the duplex consensus agrees on a C>T that looks real.
 The polymerase copies from the partner's recessed end toward the lesion strand's 5′ end, so copied lesions sit near the 5′ end of the strand that carries them and rarely near its 3′ end, while a true mutation's molecules sit wherever the reference molecules at the site do.
 This is *copied damage*.
 On a simulated duplex sample of 6,000 real mutations and 2,000 copied-damage calls at CpG C>T, with about 400 duplex molecules per site, fragments of median length 200 bp, and fill-in that copies the lesion strand from its 5′ end over an exponential length with a mean of 30 bp, chaff learns a scale of 30.3 bp, and 65% of the copied damage's alternate molecules sit within it, against 17% of the real mutations' and of the reference molecules:
 
-![Distances of alternate and reference molecules from the lesion strand's 5′ and 3′ ends: copied damage piles up near the 5′ end and avoids the 3′ end, while real mutations follow the reference molecules.](docs/copied-damage-ends.png)
+![Distances of alternate and reference molecules from the lesion strand's 5′ and 3′ ends: copied damage piles up near the 5′ end and avoids the 3′ end, while real mutations follow the reference molecules.](.github/img/copied-damage-ends.png)
 
 Copied damage has one blind spot.
 A lesion copied from an internal nick, by nick translation or strand displacement, or across the gap an abasic site leaves, can sit anywhere in the template, so its alternate molecules carry no signal of an end: no per-call score can separate them from a real mutation's, and they show only as an excess of the damage class across a library.
@@ -46,7 +46,7 @@ A-tailing then adds a non-templated A to each 3′ end, for adapters with a T ov
 Where end repair over-digested a 3′ end, that A stands in for a lost base, so copies of the strand begin with a T where another base belongs: a T near the template's left end or, from the other strand, an A near its right end.
 One fragment shows where each artifact sits, with the lesion and its copy, a misincorporated base, and an added A in red, and the bases end repair filled in in blue:
 
-![One fragment with the end each artifact sits near: copied damage near the lesion strand's 5′ end, end repair fill-in errors in the new bases near the extended strand's 3′ end, and an added A at the last base of a 3′ end.](docs/reference-points.svg)
+![One fragment with the end each artifact sits near: copied damage near the lesion strand's 5′ end, end repair fill-in errors in the new bases near the extended strand's 3′ end, and an added A at the last base of a 3′ end.](.github/img/reference-points.svg)
 
 A duplex consensus outvotes an error on one strand, so copied damage is the filter for Duplex Sequencing, and end repair fill-in and A-tailing matter for single-strand consensus and for libraries without UMIs.
 
@@ -236,7 +236,7 @@ On the simulated sample above, with a quarter of each kind of call at 2, 3, 5, o
 It filters 95% of the copied damage with 10 alternate molecules and 86% with 5, but only 40% with 2, where it also filters 6 of 253 real C>T at CpG.
 The fgbio model filters all but 2 of the 2,000 copied-damage calls, and with them 82% of the real C>T at CpG with 2 alternate molecules and 5.4% with 10:
 
-![The SBS96 spectrum of the simulated sample before and after chaff, where the copied damage at CpG C>T mostly leaves and the other channels stay, and the share of copied damage filtered against the share of real C>T at CpG filtered, by alternate molecules per call and model.](docs/copied-damage-filtering.png)
+![The SBS96 spectrum of the simulated sample before and after chaff, where the copied damage at CpG C>T mostly leaves and the other channels stay, and the share of copied damage filtered against the share of real C>T at CpG filtered, by alternate molecules per call and model.](.github/img/copied-damage-filtering.png)
 
 With `--model fgbio`, chaff writes fgbio 4.1.1's values and FILTERs wherever overlapping mates agree in base and quality, no read has an indel or soft clip between the call and its mate's 5′ end, and every base is Q2 or better, as on this data.
 Where chaff differs from fgbio on purpose is listed in the crate documentation, in [`src/lib/mod.rs`](src/lib/mod.rs).
