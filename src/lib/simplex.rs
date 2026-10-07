@@ -203,13 +203,12 @@ impl StratumProfile {
         for (n, count) in depths(&self.positions) {
             let expected = &mut bins.entry(depth_bin(n)).or_default().expected;
             let mean = f64::from(n) * rate;
-            let mut below = 0.0;
-            for (k, e) in expected.iter_mut().enumerate().take(MAX_CHANGES as usize) {
-                let p = negative_binomial(k as u32, mean, dispersion);
-                below += p;
-                *e += count * p;
+            for (k, p) in (0..).zip(probabilities(mean, dispersion)) {
+                if germline(k, n) || (k >= MAX_CHANGES && f64::from(k) > mean && p < 1e-16) {
+                    break;
+                }
+                expected[k.min(MAX_CHANGES) as usize] += count * p;
             }
-            expected[MAX_CHANGES as usize] += count * (1.0 - below).max(0.0);
         }
         let mut pooled = Tally::default();
         let (mut beyond, mut seen) = (0.0, 0);
@@ -237,6 +236,28 @@ impl StratumProfile {
 /// doubling, within which the chance model compares positions.
 pub fn depth_bin(molecules: u32) -> u32 {
     molecules.max(1).ilog2()
+}
+
+/// Whether `changes` of a position's `molecules` make it germline: at least
+/// 2 and [`GERMLINE_FRACTION`] of them.
+fn germline(changes: u32, molecules: u32) -> bool {
+    changes >= 2 && f64::from(changes) / f64::from(molecules.max(1)) >= GERMLINE_FRACTION
+}
+
+/// The probabilities of 0, 1, 2, and more changes at a position whose
+/// molecules expect `mean` of them, as [`negative_binomial`] gives them, by
+/// the ratio of each to the last.
+fn probabilities(mean: f64, dispersion: f64) -> impl Iterator<Item = f64> {
+    let first = negative_binomial(0, mean, dispersion);
+    std::iter::successors(Some((0.0, first)), move |&(k, p): &(f64, f64)| {
+        let ratio = if dispersion.is_infinite() {
+            mean / (k + 1.0)
+        } else {
+            (dispersion + k) / (k + 1.0) * mean / (dispersion + mean)
+        };
+        Some((k + 1.0, p * ratio))
+    })
+    .map(|(_, p)| p)
 }
 
 /// Each depth's positions, whatever their changes.
@@ -653,15 +674,14 @@ impl<'a> Scanner<'a> {
                 stratum.strand_molecules += u64::from(site.strand_molecules);
                 stratum.single_strand_changes += u64::from(site.single_strand[a]);
             }
-            if site.molecules > 0 && (changes < 2 || share < GERMLINE_FRACTION) {
+            if site.molecules > 0 && !germline(changes, site.molecules) {
                 *stratum
                     .positions
                     .entry((site.molecules, changes))
                     .or_default() += 1;
             }
             let single = site.single_strand[a];
-            let single_share = f64::from(single) / f64::from(site.strand_molecules.max(1));
-            if site.strand_molecules > 0 && (single < 2 || single_share < GERMLINE_FRACTION) {
+            if site.strand_molecules > 0 && !germline(single, site.strand_molecules) {
                 *stratum
                     .strand_positions
                     .entry((site.strand_molecules, single))
@@ -1339,6 +1359,23 @@ mod tests {
         assert!((pooled - 0.805).abs() < 0.005, "{pooled} {chance:?}");
         assert_eq!(chance.at_depth(150, 2), chance.at_depth(200, 2));
         assert_eq!(chance.at_depth(5000, 2), (0.0, 0));
+    }
+
+    /// Chance puts changes on a position only where they would not make it
+    /// germline, as the observed positions are: two of ten molecules would,
+    /// as would four of twenty, but not two or three of twenty.
+    #[test]
+    fn test_chance_expects_no_position_it_would_make_germline() {
+        let mut stratum = StratumProfile::default();
+        for n in [10, 20] {
+            stratum.positions.insert((n, 0), 900);
+            stratum.positions.insert((n, 1), 90);
+        }
+        let chance = stratum.chance_at(f64::INFINITY);
+        assert_eq!(chance.at_depth(10, 2).0, 0.0);
+        assert!(chance.at_depth(20, 2).0 > 1.0, "{chance:?}");
+        assert!(chance.at_depth(20, 3).0 > 0.01, "{chance:?}");
+        assert_eq!(chance.at_depth(20, 4).0, 0.0);
     }
 
     /// Single-strand changes that vary more than the duplex changes allow
