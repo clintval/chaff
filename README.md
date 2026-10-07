@@ -229,8 +229,8 @@ paste fgbio.vcf chaff.vcf | grep -v '^#' | cut -f 2,7,8,18,19 | column -t
 500  EndRepairFillInArtifact  ERFAP=0.00001239  .                        ERFAP=1
 ```
 
-The 3 to 5 alternate molecules of the calls at positions 100, 400, and 500 sit within 3 bp of a template end, so fgbio's window filters all three.
-These templates are F1R2, copied from the forward strand, whose 3′ end is the rightmost: the chaff model filters the call at position 100, whose alternate molecules sit there, and spares those at positions 400 and 500, whose alternate molecules sit at the leftmost end.
+fgbio's window filters the calls at positions 100, 400, and 500, whose 3 to 5 alternate molecules sit within 3 bp of a template end.
+The calls at positions 400 and 500 are flagged only under `--model fgbio` because fgbio's test data puts their alternate molecules at the 5′ end of the strand each template was copied from, where end repair adds no bases.
 
 On the simulated sample above, with a quarter of each kind of call at 2, 3, 5, or 10 alternate molecules, the chaff model at a threshold of 0.05 filters 1,427 of the 2,000 copied-damage calls and 23 of the 1,065 real C>T at CpG, and none of the 4,935 calls in other channels.
 It filters 95% of the copied damage with 10 alternate molecules and 86% with 5, but only 40% with 2, where it also filters 6 of 253 real C>T at CpG.
@@ -269,7 +269,7 @@ A VCF that already declares an enabled filter's INFO or FILTER, from an earlier 
 - Copied damage, and end repair fill-in under the chaff model: a copy reaches distance `d` from its end with probability `w(d) = exp(-d / s)`, so `LLR = Σ ln((1 - e) w(d) / W + e)` over the alternate molecules, with `W` the mean `w(d)` of the reference molecules and `e` the base error. The scale `s` is one per filter, shared by its strata, and is the scale `s_mle` that maximizes the filter's marginal likelihood, with `π_f` solved exactly at each scale, shrunk toward the default `s_0`, 30 bp for copied damage and 15 bp for end repair fill-in, as `ln s = (Σ r_i ln s_mle + 10 ln s_0) / (Σ r_i + 10)`: only artifact calls carry a scale, so their expected count `Σ r_i` weighs the data against 10 pseudo-calls at the default. A call without both a measured reference and a measured alternate molecule gets no posterior.
 - A-tailing, and end repair fill-in under the fgbio model: fgbio's windowed likelihoods, which compare the alternate molecules inside the window with the share of reference molecules there.
 
-The examples run on fgbio's `FilterSomaticVcf` test data in [`tests/data`](tests/data): five tumor/normal calls on `chr1` at positions 100 to 500 in `calls.vcf`, the tumor's reads in `tumor.bam`, with artifact signal at positions 100, 400, and 500, and the reference in `ref.fa`.
+The examples run on fgbio's `FilterSomaticVcf` test data in [`tests/data`](tests/data): five tumor/normal calls on `chr1` at positions 100 to 500 in `calls.vcf`, the tumor's reads in `tumor.bam`, with alternate molecules near a template end at positions 100, 400, and 500, and the reference in `ref.fa`.
 
 ## Development and Testing
 

@@ -18,7 +18,7 @@ use chaff::read_end::{ATailing, EndRepairFillIn};
 use chaff::testing::{gt, Variant, VcfBuilder};
 use noodles::vcf::variant::record_buf::info::field::Value;
 use noodles::vcf::variant::RecordBuf;
-use streampile::testing::{Frag, Pair, SamBuilder};
+use streampile::testing::{Frag, Pair, SamBuilder, Strand};
 use tempfile::TempDir;
 
 const RLEN: usize = 40;
@@ -440,17 +440,15 @@ fn test_apply_filters_with_thresholds_under_the_fgbio_model() {
     );
 }
 
-/// fgbio: "apply filters if filter-specific p-value thresholds are supplied".
-/// Intended difference: the chaff model measures end repair fill-in from the
-/// 3' end of the strand each template was copied from, the rightmost end of
-/// these F1R2 templates. The alternate molecules of the C>A at 100 sit there,
-/// so ERFAP favors the artifact, but with a scale learned from four calls and
-/// so held near 15 bases it stays above the threshold; those of the A>T at 400
-/// and the C>G at 500 sit at the leftmost end, which fgbio's window counts and
-/// the chaff model does not, so ERFAP leaves them at 1. A-tailing still filters 100 and 400, whose alternate
-/// molecules all sit where 5% of reference ones do.
+/// fgbio: "apply filters if filter-specific p-value thresholds are supplied",
+/// under the chaff model, which pins the strand rule on fgbio's calls at 400
+/// and 500. Their alternate molecules sit at the leftmost end of F1R2
+/// templates, the 5' end of the forward strand they were copied from, where
+/// end repair adds no bases, so the chaff model leaves their ERFAP at 1 where
+/// fgbio's window filters them. A-tailing still filters 100 and 400, whose
+/// alternate molecules all sit where 5% of reference ones do.
 #[test]
-fn test_apply_filters_with_thresholds_under_the_chaff_model_reads_the_copied_strand() {
+fn test_apply_filters_with_thresholds_under_the_chaff_model_ignores_alternates_at_the_wrong_end() {
     let dir = TempDir::new().unwrap();
     let (tumor, _) = tumor_vcfs(dir.path());
     let records = run(&dir, &tumor, &tumor_bam(), thresholded(Model::Chaff)).unwrap();
@@ -459,20 +457,11 @@ fn test_apply_filters_with_thresholds_under_the_chaff_model_reads_the_copied_str
         .iter()
         .map(|r| has_filter(r, ATailing::FILTER))
         .collect();
-    let erfap: Vec<bool> = records
-        .iter()
-        .map(|r| has_filter(r, EndRepairFillIn::FILTER))
-        .collect();
     assert_eq!(atap, vec![true, false, false, true, false]);
-    assert_eq!(erfap, vec![false, false, false, false, false]);
-    let erfap: Vec<Option<f32>> = records
-        .iter()
-        .map(|r| float(r, EndRepairFillIn::INFO))
-        .collect();
-    assert_eq!(
-        erfap,
-        vec![Some(7.738e-3), Some(1.0), None, Some(1.0), Some(1.0)]
-    );
+    for record in &records[3..] {
+        assert_eq!(float(record, EndRepairFillIn::INFO), Some(1.0));
+        assert!(!has_filter(record, EndRepairFillIn::FILTER));
+    }
 }
 
 /// The metrics rows of the thresholded run: one per filter and substitution
@@ -742,15 +731,88 @@ fn test_contigs_ordered_unlike_the_bam_or_missing_from_it_fail_by_name() {
     );
 }
 
-/// The metrics rows of a run of `options` over the shared calls and reads, as
-/// `(stratum, alt_congruent, ref_congruent)`, and each call's ERFAP.
-fn erfap_and_congruent_counts(options: FilterOptions) -> (Vec<Option<f32>>, Vec<[String; 3]>) {
+/// Reads at 1-based sites 200 and 400, two 80-base templates per start, one
+/// F1R2 and one F2R1, with the site anywhere in them. At 200, end repair
+/// fill-in errors sit where they are made, near the 3' end of the strand each
+/// template was copied from: the rightmost 3 bases of three F1R2 templates and
+/// the leftmost 3 of three F2R1 templates. At 400, a mutation's six alternate
+/// molecules sit 15 to 65 bases from either end.
+fn fill_in_and_mutation_reads() -> SamBuilder {
+    let mut b = SamBuilder::new().read_length(RLEN).base_quality(40);
+    let template = |b: &mut SamBuilder, left: usize, base: char, f1r2: bool| {
+        let pair = if f1r2 {
+            Pair::filled(left, left + RLEN, base, RLEN)
+        } else {
+            Pair::filled(left + RLEN, left, base, RLEN)
+                .strand1(Strand::Minus)
+                .strand2(Strand::Plus)
+        };
+        b.add_pair(pair);
+    };
+    for site in [200, 400] {
+        for left in site - 79..=site {
+            template(&mut b, left, 'G', true);
+            template(&mut b, left, 'G', false);
+        }
+    }
+    for d in 0..3 {
+        template(&mut b, 200 - 79 + d, 'T', true);
+        template(&mut b, 200 - d, 'T', false);
+    }
+    for (i, left) in [335, 345, 355, 365, 375, 385].into_iter().enumerate() {
+        template(&mut b, left, 'T', i % 2 == 0);
+    }
+    b
+}
+
+/// End repair fill-in at 200, near the 3' end of each template's copied
+/// strand, is filtered under either model, and the mutation at 400 under
+/// neither. The models count the same 6 alternate molecules as congruent, but
+/// the chaff model counts reference molecules near only one end of each
+/// template, 10 of 80 positions per template, where fgbio's window counts both.
+#[test]
+fn test_end_repair_fill_in_near_the_copied_strand_s_three_prime_end_is_filtered() {
     let dir = TempDir::new().unwrap();
-    let (tumor, _) = tumor_vcfs(dir.path());
+    let mut vcf = VcfBuilder::new(&["tumor"]);
+    for pos in [200, 400] {
+        vcf.add(Variant::new(pos, &["G", "T"], vec![gt("tumor", "0/1")]));
+    }
+    let input = vcf.write(&dir.path().join("fill-in.vcf"));
+    for (model, ref_congruent) in [(Model::Chaff, "40"), (Model::Fgbio, "80")] {
+        let options = FilterOptions {
+            filters: vec![FilterKind::EndRepairFillIn],
+            end_repair_fill_in: EndRepairFillIn::new(10.0),
+            end_repair_fill_in_threshold: Some(0.05),
+            ..options(None, model)
+        };
+        let (records, rows) =
+            run_with_metrics(&dir, &input, &fill_in_and_mutation_reads(), options);
+        let filtered: Vec<bool> = records
+            .iter()
+            .map(|r| has_filter(r, EndRepairFillIn::FILTER))
+            .collect();
+        assert_eq!(filtered, vec![true, false], "{model}");
+        assert!(
+            float(&records[1], EndRepairFillIn::INFO).unwrap() > 0.5,
+            "{model}"
+        );
+        let counts = ["C>A", "6", ref_congruent].map(String::from);
+        assert_eq!(rows, vec![counts], "{model}");
+    }
+}
+
+/// A run of `options` over `input` and `reads` that writes metrics, as its
+/// records and its metrics rows as `(stratum, alt_congruent, ref_congruent)`.
+fn run_with_metrics(
+    dir: &TempDir,
+    input: &Path,
+    reads: &SamBuilder,
+    options: FilterOptions,
+) -> (Vec<RecordBuf>, Vec<[String; 3]>) {
     let output = dir.path().join("filtered.vcf");
     let metrics = dir.path().join("metrics.tsv");
     let args = FilterArgs {
-        input: tumor,
+        input: input.to_path_buf(),
         output: output.clone(),
         bam: PathBuf::from("reads.bam"),
         reference: None,
@@ -758,12 +820,7 @@ fn erfap_and_congruent_counts(options: FilterOptions) -> (Vec<Option<f32>>, Vec<
         pileup: PileupOptions::default(),
         options,
     };
-    run_filter_on(&args, tumor_bam().to_pileup_builder()).unwrap();
-    let erfap = read_vcf(&output)
-        .1
-        .iter()
-        .map(|r| float(r, EndRepairFillIn::INFO))
-        .collect();
+    run_filter_on(&args, reads.to_pileup_builder()).unwrap();
     let mut reader = csv::ReaderBuilder::new()
         .delimiter(b'\t')
         .from_path(&metrics)
@@ -775,52 +832,12 @@ fn erfap_and_congruent_counts(options: FilterOptions) -> (Vec<Option<f32>>, Vec<
         column("alt_congruent"),
         column("ref_congruent"),
     );
-    let counts = reader
+    let rows = reader
         .records()
         .map(|r| {
             let r = r.unwrap();
             [stratum, alt, refs].map(|i| r[i].to_string())
         })
         .collect();
-    (erfap, counts)
-}
-
-/// fgbio's window counts the alternate molecules of the A>T at 400, which sit
-/// 1 to 3 bases from their templates' leftmost ends, as end repair fill-in.
-/// These F1R2 templates come from the forward strand, whose 3' end, the one
-/// end repair extends, is their rightmost, so the chaff model counts none of
-/// them near, in the metrics as in the posterior, while the C>A at 100, whose
-/// alternate molecules sit at the rightmost ends, stays near under both.
-#[test]
-fn test_end_repair_fill_in_under_chaff_counts_only_the_copied_strand_s_three_prime_end() {
-    let with = |model| FilterOptions {
-        filters: vec![FilterKind::EndRepairFillIn],
-        end_repair_fill_in: EndRepairFillIn::new(10.0),
-        ..options(Some("tumor"), model)
-    };
-    let (window, window_counts) = erfap_and_congruent_counts(with(Model::Fgbio));
-    let (decay, decay_counts) = erfap_and_congruent_counts(with(Model::Chaff));
-    let counts = |rows: &[[&str; 3]]| -> Vec<[String; 3]> {
-        rows.iter().map(|row| row.map(String::from)).collect()
-    };
-    let window_rows = [
-        ["C>A", "3", "60"],
-        ["C>G", "5", "60"],
-        ["C>T", "5", "60"],
-        ["T>A", "5", "60"],
-    ];
-    let decay_rows = [
-        ["C>A", "3", "30"],
-        ["C>G", "0", "30"],
-        ["C>T", "2", "30"],
-        ["T>A", "0", "30"],
-    ];
-    assert_eq!(window_counts, counts(&window_rows));
-    assert_eq!(decay_counts, counts(&decay_rows));
-    assert!(
-        window.iter().flatten().filter(|p| **p < 1e-5).count() == 3,
-        "{window:?}"
-    );
-    assert_eq!(decay[3..], [Some(1.0), Some(1.0)]);
-    assert!(decay[0].unwrap() < 0.01, "{decay:?}");
+    (read_vcf(&output).1, rows)
 }
