@@ -111,8 +111,8 @@ impl ReferencePool {
     }
 
     /// `ln` of the mean decay weight `exp(-d / scale)` over the pooled
-    /// molecules, or `None` without any.
-    fn ln_mean_weight(&self, scale: f64) -> Option<f64> {
+    /// molecules, `ln W_p`, or `None` without any.
+    pub fn ln_mean_weight(&self, scale: f64) -> Option<f64> {
         let terms = self
             .distances
             .iter()
@@ -147,10 +147,11 @@ fn ln_sum_exp(terms: impl Iterator<Item = f64>) -> Option<f64> {
 /// ```
 ///
 /// since a base error lands anywhere a reference molecule could. A site with
-/// few reference molecules measures `W` poorly, so with a `pool` of its
-/// stratum's reference molecules, `W` is shrunk toward the pool's mean weight
-/// `W_p` by [`REFERENCE_PSEUDO_MOLECULES`] `k`, `W = (n W_site + k W_p) / (n +
-/// k)` for `n` reference molecules at the site: one reference molecule far
+/// few reference molecules measures `W` poorly, so given `ln_pool_weight`,
+/// the [`ReferencePool::ln_mean_weight`] at `scale` of its stratum's
+/// reference molecules, `W` is shrunk toward that mean weight `W_p` by
+/// [`REFERENCE_PSEUDO_MOLECULES`] `k`, `W = (n W_site + k W_p) / (n + k)` for
+/// `n` reference molecules at the site: one reference molecule far
 /// from the end no longer makes alternates near it look like a copy. The
 /// terms are summed in log space, so the ratio is finite however far a
 /// molecule sits from the end. Returns `None` without both a reference and an
@@ -159,7 +160,7 @@ pub fn tilt_log_likelihood_ratio(
     ref_distances: &[usize],
     alt: &[(usize, u8)],
     scale: f64,
-    pool: Option<&ReferencePool>,
+    ln_pool_weight: Option<f64>,
 ) -> Option<f64> {
     if alt.is_empty() || ref_distances.is_empty() {
         return None;
@@ -167,7 +168,7 @@ pub fn tilt_log_likelihood_ratio(
     let ln_w = |d: usize| -(d as f64) / scale;
     let ln_site = ln_sum_exp(ref_distances.iter().map(|&d| ln_w(d)))?;
     let n = ref_distances.len() as f64;
-    let ln_mean = match pool.and_then(|pool| pool.ln_mean_weight(scale)) {
+    let ln_mean = match ln_pool_weight {
         Some(ln_pool) => {
             ln_add_exp(ln_site, REFERENCE_PSEUDO_MOLECULES.ln() + ln_pool)
                 - (n + REFERENCE_PSEUDO_MOLECULES).ln()
@@ -215,18 +216,19 @@ impl Distances {
         distances
     }
 
-    /// The [`tilt_log_likelihood_ratio`] at `scale`, shrunk toward `pool`.
-    pub fn log_likelihood_ratio(&self, scale: f64, pool: Option<&ReferencePool>) -> Option<f64> {
-        tilt_log_likelihood_ratio(&self.reference, &self.alternate, scale, pool)
+    /// The [`tilt_log_likelihood_ratio`] at `scale`, shrunk toward a pool's
+    /// mean weight.
+    pub fn log_likelihood_ratio(&self, scale: f64, ln_pool_weight: Option<f64>) -> Option<f64> {
+        tilt_log_likelihood_ratio(&self.reference, &self.alternate, scale, ln_pool_weight)
     }
 
-    /// The score at `scale`, shrunk toward `pool`: its ratio, and the
-    /// molecules less than `scale` bases from the end as congruent.
-    pub fn score(&self, scale: f64, pool: Option<&ReferencePool>) -> Score {
+    /// The score at `scale`, shrunk toward a pool's mean weight: its ratio,
+    /// and the molecules less than `scale` bases from the end as congruent.
+    pub fn score(&self, scale: f64, ln_pool_weight: Option<f64>) -> Score {
         let near = |d: usize| (d as f64) < scale;
         let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
         Score {
-            log_likelihood_ratio: self.log_likelihood_ratio(scale, pool),
+            log_likelihood_ratio: self.log_likelihood_ratio(scale, ln_pool_weight),
             alt_molecules: count(self.alternate.len()),
             alt_congruent: count(self.alternate.iter().filter(|(d, _)| near(*d)).count()),
             ref_molecules: count(self.reference.len()),
@@ -896,19 +898,17 @@ mod tests {
     fn test_a_site_with_few_reference_molecules_is_shrunk_toward_its_pool() {
         let mut pool = ReferencePool::default();
         pool.add(&(0..150).cycle().take(3000).collect::<Vec<_>>());
+        let weight = pool.ln_mean_weight(30.0);
         let alt = [(0, 40), (1, 40), (2, 40)];
         let lone = tilt_log_likelihood_ratio(&[100], &alt, 30.0, None).unwrap();
-        let shrunk = tilt_log_likelihood_ratio(&[100], &alt, 30.0, Some(&pool)).unwrap();
+        let shrunk = tilt_log_likelihood_ratio(&[100], &alt, 30.0, weight).unwrap();
         assert!(lone > 9.5, "{lone}");
         assert!(shrunk < 5.5 && shrunk > 0.0, "{shrunk}");
         let many: Vec<usize> = (0..150).cycle().take(300).collect();
         let own = tilt_log_likelihood_ratio(&many, &alt, 30.0, None).unwrap();
-        let pooled = tilt_log_likelihood_ratio(&many, &alt, 30.0, Some(&pool)).unwrap();
+        let pooled = tilt_log_likelihood_ratio(&many, &alt, 30.0, weight).unwrap();
         assert!((own - pooled).abs() < 0.01, "{own} {pooled}");
-        assert_eq!(
-            tilt_log_likelihood_ratio(&[], &alt, 30.0, Some(&pool)),
-            None
-        );
+        assert_eq!(tilt_log_likelihood_ratio(&[], &alt, 30.0, weight), None);
         assert!(ReferencePool::default().ln_mean_weight(30.0).is_none());
     }
 

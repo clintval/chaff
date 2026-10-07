@@ -639,25 +639,24 @@ fn score_decays(calls: &mut [Vec<Annotation>], options: &FilterOptions) -> Scale
         if held.is_empty() {
             continue;
         }
-        let teaching = held
-            .iter()
-            .filter(|(d, stratum)| {
-                d.log_likelihood_ratio(fallback, pools.get(*stratum))
-                    .is_some()
-            })
-            .count();
+        let weights = |scale: f64| -> BTreeMap<&str, f64> {
+            pools
+                .iter()
+                .filter_map(|(stratum, pool)| Some((stratum.as_str(), pool.ln_mean_weight(scale)?)))
+                .collect()
+        };
+        let ratios = |scale: f64| -> Vec<f64> {
+            let weights = weights(scale);
+            held.iter()
+                .filter_map(|(d, stratum)| {
+                    d.log_likelihood_ratio(scale, weights.get(stratum).copied())
+                })
+                .collect()
+        };
+        let teaching = ratios(fallback).len();
         let scale = match distance {
             Distance::Bases(bases) => bases,
-            Distance::Learned => learn_scale(
-                |scale| {
-                    held.iter()
-                        .filter_map(|(d, stratum)| {
-                            d.log_likelihood_ratio(scale, pools.get(*stratum))
-                        })
-                        .collect()
-                },
-                fallback,
-            ),
+            Distance::Learned => learn_scale(ratios, fallback),
         };
         match kind {
             FilterKind::CopiedDamage => scales.copied_damage = scale,
@@ -673,9 +672,11 @@ fn score_decays(calls: &mut [Vec<Annotation>], options: &FilterOptions) -> Scale
                 plural(teaching, "call")
             );
         }
+        let weights = weights(scale);
         for annotation in calls.iter_mut().flatten().filter(|a| a.kind == kind) {
             if let Some(distances) = annotation.distances.take() {
-                annotation.score = distances.score(scale, pools.get(&annotation.stratum));
+                annotation.score =
+                    distances.score(scale, weights.get(annotation.stratum.as_str()).copied());
             }
         }
     }
