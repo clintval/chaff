@@ -371,6 +371,9 @@ pub struct Annotation {
     /// The call's molecules with a base at the quality floor, as a library
     /// profile counts a position's.
     pub depth: u32,
+    /// Those whose base is the alternate allele, as a library profile counts
+    /// a position's changes, whether or not the filter measures them.
+    pub changes: u32,
 }
 
 /// The index of the sample under test, resolved as fgbio does: the named
@@ -575,6 +578,7 @@ fn score_call(
                 posterior: None,
                 prior: None,
                 depth,
+                changes: count(alt_base),
             });
         }
     }
@@ -745,7 +749,7 @@ fn assign_posteriors(
             continue;
         };
         let learned = fractions.strata[&(annotation.kind, annotation.stratum.clone())];
-        let changes = annotation.score.alt_molecules;
+        let changes = annotation.changes;
         let chance = chances
             .get(&annotation.stratum)
             .filter(|_| annotation.kind == FilterKind::CopiedDamage)
@@ -2001,6 +2005,7 @@ mod tests {
             posterior: None,
             prior: None,
             depth,
+            changes: 2,
         };
         let mut calls = vec![vec![call(200)], vec![call(2000)], vec![call(8000)]];
         assign_posteriors(&mut calls, Model::Chaff, &chances);
@@ -2008,6 +2013,56 @@ mod tests {
         assert!(priors[0] < 0.2, "{priors:?}");
         assert!(priors[1] > 0.85, "{priors:?}");
         assert!(priors[2] > 0.75 && priors[2] < priors[1], "{priors:?}");
+    }
+
+    /// A call's chance prior counts every alternate molecule with a base at
+    /// the quality floor, as the library profile does, including those whose
+    /// distances are unknown and that the copied-damage score leaves out, so
+    /// a call with three takes the share at three, not the smaller share at
+    /// two, where real mutations gather.
+    #[test]
+    fn test_the_chance_prior_counts_alternate_molecules_as_the_profile_does() {
+        use crate::simplex::LibraryProfile;
+        use crate::testing::poisson_stratum;
+        let dir = tempfile::tempdir().unwrap();
+        let reference = write_fasta(dir.path(), "chr1", &"ACGTTCAA".repeat(250));
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(1002, &["C", "T"], vec![gt("tumor", "0/1")]));
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let options = FilterOptions {
+            filters: vec![FilterKind::CopiedDamage],
+            ..FilterOptions::default()
+        };
+        let at = |base, d| Molecule::new(base, 40, d, 149 - d);
+        let stratum = poisson_stratum(&[700], 100_000.0, 1e-3, 3_000);
+        let (expected, observed) = stratum.chance().at(2);
+        let run = |third: Molecule| {
+            let mut molecules: Vec<Molecule> = (0..600).map(|d| at(b'C', d % 150)).collect();
+            molecules.extend([at(b'T', 20), at(b'T', 90), third]);
+            let mut table = MoleculeTable::new();
+            table.insert("chr1", 1002, molecules);
+            let mut library = LibraryProfile::default();
+            library
+                .strata
+                .insert("C>T:CpG".to_string(), stratum.clone());
+            table.set_library(library);
+            let output = dir.path().join("out.vcf");
+            let mut reference = Reference::open(&reference).unwrap();
+            let rows =
+                filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
+            (rows[0].alt_molecules, rows[0].chance_fraction.unwrap())
+        };
+        let unknown = Molecule {
+            left: None,
+            right: None,
+            ..at(b'T', 0)
+        };
+        let (measured, prior) = run(unknown);
+        assert_eq!(measured, 2);
+        assert!(prior > expected / observed as f64 + 0.05, "{prior}");
+        let (measured, known) = run(at(b'T', 50));
+        assert_eq!(measured, 3);
+        assert!((prior - known).abs() < 1e-3, "{prior} vs {known}");
     }
 
     /// Chance explains every position with one change, since its rate is

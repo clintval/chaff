@@ -227,6 +227,10 @@ pub fn poisson_stratum(depths: &[u32], positions: f64, rate: f64, real: u64) -> 
             let extra = if k == 2 { real } else { 0 };
             stratum.positions.insert((n, k), count + extra);
             stratum.strand_positions.insert((n, k), count);
+            stratum.molecules += u64::from(n) * (count + extra);
+            stratum.changes += u64::from(k) * (count + extra);
+            stratum.strand_molecules += u64::from(n) * count;
+            stratum.single_strand_changes += u64::from(k) * count;
         }
     }
     stratum
