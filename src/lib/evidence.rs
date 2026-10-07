@@ -177,6 +177,12 @@ impl<S: RecordSource> Evidence for PileupEvidence<'_, S> {
         let mut molecules = Vec::new();
         for template in pileup.templates(AGREEMENT, DISAGREEMENT) {
             let molecule = molecule(&template, pileup.min_base_quality())
+                .map_err(|error| match error {
+                    streampile::Error::MissingMateCigar { .. } => {
+                        anyhow!("{error}; add mate CIGARs with samtools fixmate")
+                    }
+                    error => error.into(),
+                })
                 .with_context(|| format!("reading template ends at {contig}:{pos}"))?;
             molecules.extend(molecule);
         }
@@ -668,6 +674,10 @@ mod tests {
             let message = format!("{error:#}");
             assert!(message.contains("read q1"), "{message}");
             assert!(message.contains("MC"), "{message}");
+            assert!(
+                message.contains("add mate CIGARs with samtools fixmate"),
+                "{message}"
+            );
         }
     }
 
