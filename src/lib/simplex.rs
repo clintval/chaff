@@ -14,8 +14,9 @@
 //! a damage class can change, two kinds of molecule:
 //!
 //! - **Single-strand changes:** one strand holds the reference base and the
-//!   other the class's damaged base, read by at least [`MIN_STRAND_READS`] raw
-//!   reads. These are lesions polymerase never copied.
+//!   other the class's damaged base, each read by at least
+//!   [`MIN_STRAND_READS`] raw reads. These are lesions polymerase never
+//!   copied.
 //! - **Duplex changes:** the consensus base, at the base quality floor, and
 //!   both strands' bases are the damaged base. These are copied lesions and
 //!   real mutations alike.
@@ -70,8 +71,8 @@ use crate::classes::{complement, Context, DamageClass};
 use crate::evidence::PileupOptions;
 use crate::reference::Reference;
 
-/// The fewest raw reads behind a strand's base for its change to count as a
-/// single-strand change, so a single read's error does not.
+/// The fewest raw reads behind each strand's base for a molecule to count
+/// toward single-strand changes, so a single read's error does not.
 pub const MIN_STRAND_READS: i64 = 2;
 
 /// The most changes at a position the chance model tells apart; positions
@@ -129,7 +130,8 @@ pub struct StratumProfile {
     pub molecules: u64,
     /// Those whose consensus base is the damaged base.
     pub changes: u64,
-    /// Molecules with both strands' bases called.
+    /// Molecules with both strands' bases called, each by at least
+    /// [`MIN_STRAND_READS`] raw reads.
     pub strand_molecules: u64,
     /// Those with a single-strand change.
     pub single_strand_changes: u64,
@@ -868,11 +870,14 @@ impl<'a> Scanner<'a> {
         let (Some(ia), Some(ib)) = (index(a), index(b)) else {
             return Ok(());
         };
-        site.strand_molecules += 1;
         let reads = |r: &[i64]| r.get(query).is_some_and(|&n| n >= MIN_STRAND_READS);
-        if b == reference && a != reference && reads(strands.a_reads) {
+        if !reads(strands.a_reads) || !reads(strands.b_reads) {
+            return Ok(());
+        }
+        site.strand_molecules += 1;
+        if b == reference && a != reference {
             site.single_strand[ia] += 1;
-        } else if a == reference && b != reference && reads(strands.b_reads) {
+        } else if a == reference && b != reference {
             site.single_strand[ib] += 1;
         }
         Ok(())
@@ -1102,9 +1107,9 @@ mod tests {
         assert_eq!(cpg.positions.get(&(10, 0)), Some(&9));
         assert_eq!(other.molecules, 48);
         assert_eq!(other.changes, 0);
-        assert_eq!(other.strand_molecules, 50);
+        assert_eq!(other.strand_molecules, 49);
         assert_eq!(other.single_strand_changes, 1);
-        assert_eq!(other.single_strand_rate(), Some(0.02));
+        assert_eq!(other.single_strand_rate(), Some(1.0 / 49.0));
         assert_eq!(cpg.conversion_ratio(), None);
         let oxidation = profile.stratum("G>T:CpG").unwrap();
         assert_eq!((oxidation.molecules, oxidation.changes), (100, 0));

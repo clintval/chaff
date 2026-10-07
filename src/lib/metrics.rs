@@ -89,8 +89,8 @@ pub struct StratumMetrics {
     /// molecules as germline or clonal.
     #[serde(serialize_with = "six_digits_or_empty")]
     pub change_rate: Option<f64>,
-    /// Single-strand changes per molecule with both strands called, over the
-    /// same positions.
+    /// Single-strand changes per molecule with both strands called, each by
+    /// at least 2 raw reads, over the same positions.
     #[serde(serialize_with = "six_digits_or_empty")]
     pub single_strand_rate: Option<f64>,
     /// `change_rate / single_strand_rate`.
