@@ -37,7 +37,7 @@ use crate::prior::{
 };
 use crate::read_end::{is_filtered, ATailing, Distances, EndRepairFillIn, ReferencePool, Score};
 use crate::reference::Reference;
-use crate::simplex::{profile_library, Chance, LibraryProfile};
+use crate::simplex::{profile_library, Chance, LibraryProfile, MIN_CHANCE_CHANGES};
 use crate::spectrum::{channel, Spectrum};
 
 /// One of the artifact filters.
@@ -696,14 +696,14 @@ struct Fractions {
 }
 
 /// Learn the priors and fill in every annotation's posterior, returning the
-/// learned artifact fractions. Under the `chaff` model with a library
-/// profile, copied damage takes each call's prior from the library's chance
-/// model at the call's alternate molecules, shrunk toward its stratum's
-/// learned fraction.
+/// learned artifact fractions. Under the `chaff` model, copied damage with
+/// at least [`MIN_CHANCE_CHANGES`] alternate molecules takes each call's
+/// prior from its stratum's chance model in `chances`, shrunk toward its
+/// stratum's learned fraction.
 fn assign_posteriors(
     calls: &mut [Vec<Annotation>],
     model: Model,
-    library: Option<&LibraryProfile>,
+    chances: &BTreeMap<String, Chance>,
 ) -> Fractions {
     let mut filters: BTreeMap<FilterKind, Vec<f64>> = BTreeMap::new();
     let mut strata: BTreeMap<Stratum, Vec<f64>> = BTreeMap::new();
@@ -731,22 +731,19 @@ fn assign_posteriors(
         })
         .collect();
     let fractions = Fractions { filters, strata };
-    let mut chances: BTreeMap<String, Option<Chance>> = BTreeMap::new();
     for annotation in calls.iter_mut().flatten() {
         let Some(llr) = annotation.score.log_likelihood_ratio else {
             continue;
         };
         let learned = fractions.strata[&(annotation.kind, annotation.stratum.clone())];
-        let chance = match (model, annotation.kind, library) {
-            (Model::Chaff, FilterKind::CopiedDamage, Some(library)) => chances
-                .entry(annotation.stratum.clone())
-                .or_insert_with(|| library.stratum(&annotation.stratum).map(|s| s.chance()))
-                .as_ref(),
-            _ => None,
-        };
+        let changes = annotation.score.alt_molecules;
+        let chance = chances
+            .get(&annotation.stratum)
+            .filter(|_| annotation.kind == FilterKind::CopiedDamage)
+            .filter(|_| changes >= MIN_CHANCE_CHANGES);
         let artifact_prior = match (model, chance) {
             (Model::Chaff, Some(chance)) => {
-                let (expected, observed) = chance.at(annotation.score.alt_molecules);
+                let (expected, observed) = chance.at(changes);
                 chance_prior(expected, observed, learned)
             }
             (Model::Chaff, None) => learned,
@@ -910,10 +907,13 @@ pub fn filter_vcf_report(
         None
     };
     let chance = library.is_some();
-    if let Some(library) = &library {
-        log_chance(library);
-    }
-    let fractions = assign_posteriors(&mut calls, options.model, library.as_ref());
+    let chances: BTreeMap<String, Chance> = library
+        .iter()
+        .flat_map(|library| &library.strata)
+        .map(|(stratum, profile)| (stratum.clone(), profile.chance()))
+        .collect();
+    log_chance(&chances);
+    let fractions = assign_posteriors(&mut calls, options.model, &chances);
 
     let mut out_header = header.clone();
     options.add_header_lines(&mut out_header, &scales, chance);
@@ -1023,10 +1023,9 @@ fn tally_spectrum(
 }
 
 /// Log each stratum's chance model: how much of the library's positions
-/// with two and three changes chance explains.
-fn log_chance(library: &LibraryProfile) {
-    for (stratum, profile) in &library.strata {
-        let chance = profile.chance();
+/// with one to three changes chance explains.
+fn log_chance(chances: &BTreeMap<String, Chance>) {
+    for (stratum, chance) in chances {
         let shown: Vec<String> = (1..=3)
             .map(|k| {
                 let (expected, observed) = chance.at(k);
@@ -1942,6 +1941,48 @@ mod tests {
         let (unprofiled, unprofiled_real, _) = run(Some(other));
         assert_eq!(unprofiled.chance_fraction, None);
         assert!((unprofiled_real - learned_real).abs() < 1e-6);
+    }
+
+    /// Chance explains every position with one change, since its rate is
+    /// matched to them, so a one-molecule call keeps the learned fraction
+    /// however damaged the library.
+    #[test]
+    fn test_one_molecule_calls_keep_the_learned_fraction() {
+        use crate::simplex::{LibraryProfile, StratumProfile};
+        let dir = tempfile::tempdir().unwrap();
+        let reference = write_fasta(dir.path(), "chr1", &"ACGTTCAA".repeat(250));
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        let mut table = MoleculeTable::new();
+        let at = |base, d| Molecule::new(base, 40, d, 149 - d);
+        for (i, pos) in (1002..1800).step_by(8).take(20).enumerate() {
+            vcf.add(Variant::new(pos, &["C", "T"], vec![gt("tumor", "0/1")]));
+            let mut molecules: Vec<Molecule> = (0..150).map(|d| at(b'C', d)).collect();
+            molecules.push(at(b'T', 5 * i));
+            table.insert("chr1", pos, molecules);
+        }
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let options = FilterOptions {
+            filters: vec![FilterKind::CopiedDamage],
+            ..FilterOptions::default()
+        };
+        let mut stratum = StratumProfile::default();
+        for (k, count) in [(0, 607), (1, 303), (2, 76), (3, 14)] {
+            stratum.molecules += 1000 * count;
+            stratum.changes += k * count;
+            stratum.positions.insert((1000, k as u32), count);
+        }
+        let mut library = LibraryProfile::default();
+        library.strata.insert("C>T:CpG".to_string(), stratum);
+        table.set_library(library);
+        let output = dir.path().join("out.vcf");
+        let mut reference = Reference::open(&reference).unwrap();
+        let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
+        assert!(rows[0].change_rate.is_some(), "{:?}", rows[0]);
+        let (chance, learned) = (
+            rows[0].chance_fraction.unwrap(),
+            rows[0].artifact_fraction.unwrap(),
+        );
+        assert!((chance - learned).abs() < 1e-12, "{chance} vs {learned}");
     }
 
     /// The spectrum counts each heterozygous SNV in its channel, read from the

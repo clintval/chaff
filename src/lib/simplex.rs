@@ -74,6 +74,10 @@ pub const MIN_STRAND_READS: i64 = 2;
 /// with more pool with it.
 pub const MAX_CHANGES: u32 = 8;
 
+/// The fewest changes at a position the chance model gives a call's prior
+/// for: its rate matches the positions with one, so it explains them all.
+pub const MIN_CHANCE_CHANGES: u32 = 2;
+
 /// The records a library profile reads before it decides the BAM has no
 /// single-strand consensus.
 const TAG_PROBE: u64 = 1_000;

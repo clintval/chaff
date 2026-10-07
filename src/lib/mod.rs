@@ -68,11 +68,13 @@
 //!
 //! On a duplex consensus BAM that carries each strand's single-strand consensus,
 //! copied damage under the `chaff` model takes its prior from the library
-//! instead (see [`simplex`]): for a call with `k` alternate molecules, the
-//! share `E(k) / S(k)` of the library's positions with `k` duplex changes of
-//! its stratum that chance explains, as `π = (min(E(k), S(k)) + k' π_s) /
-//! (S(k) + k')` with `k' = 10` pseudo-positions at the stratum's learned
-//! fraction `π_s`.
+//! instead (see [`simplex`]): for a call with `k` of at least 2 alternate
+//! molecules, the share `E(k) / S(k)` of the library's positions with `k`
+//! duplex changes of its stratum that chance explains, as `π = (min(E(k),
+//! S(k)) + k' π_s) / (S(k) + k')` with `k' = 10` pseudo-positions at the
+//! stratum's learned fraction `π_s`. Chance explains every position with one
+//! change, since its rate is matched to them, so a one-molecule call keeps
+//! `π_s`.
 //!
 //! Under the `fgbio` model the prior is fgbio's per call: an artifact prior of
 //! `1 - min((2 m)^2, 0.9999)`, where `m` is the call's alternate molecule
