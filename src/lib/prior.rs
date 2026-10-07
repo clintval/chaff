@@ -23,16 +23,24 @@
 //! filter's fraction rather than moving its prior toward its own calls, and a
 //! stratum of hundreds keeps nearly its own.
 //!
-//! The `chaff` model learns each decay filter's scale `s` with its fraction,
-//! as the maximum of the filter's marginal likelihood over `(pi, s)`: a
-//! profile over `s` with `pi` solved exactly at each, under a log-normal
-//! prior on `s` centered on the filter's default with a standard deviation of
-//! [`SCALE_PRIOR_SD`] in natural-log units, so a library of a few calls keeps
-//! a scale near the default rather than the one that makes its calls look most
-//! like artifacts. The scale is one per filter, shared by its strata, since how
-//! far a polymerase copies is a property of the library's enzymes and not of
-//! the substitution, and pooling the strata gives the fit the most artifact
-//! calls.
+//! The `chaff` model learns each decay filter's scale `s` with its fraction.
+//! The maximum likelihood scale maximizes the filter's marginal likelihood
+//! over `(pi, s)`, a profile over `s` with `pi` solved exactly at each, and is
+//! then shrunk toward the filter's default the way a stratum's fraction is
+//! shrunk toward its filter's: the two are averaged in log space, weighted by
+//! the calls' expected artifacts `sum_i r_i` and [`SCALE_PRIOR_STRENGTH`]
+//! pseudo-calls at the default,
+//!
+//! ```text
+//! ln s = (sum_i r_i ln s_mle + k ln s_default) / (sum_i r_i + k)
+//! ```
+//!
+//! The weight counts artifacts rather than calls because only an artifact's
+//! molecules carry its scale, so a library of a few artifacts keeps nearly the
+//! default and one of hundreds keeps nearly its own. The scale is one per
+//! filter, shared by its strata, since how far a polymerase copies is a
+//! property of the library's enzymes and not of the substitution, and pooling
+//! the strata gives the fit the most artifact calls.
 //!
 //! The `fgbio` model keeps fgbio's prior for parity: a mutation prior of `min((2 * maf)^2,
 //! 0.9999)`, where `maf` is the call's alternate molecule fraction, or one over
@@ -134,10 +142,9 @@ pub fn learn_artifact_fraction(log_likelihood_ratios: &[f64], prior: BetaPrior) 
 /// The decay scales, in bases, a scale is learned between.
 pub const SCALE_RANGE: (f64, f64) = (1.0, 1000.0);
 
-/// The standard deviation, in natural-log units, of the log-normal prior on a
-/// learned scale: one, so a scale twice or half the default costs about a
-/// quarter of a nat.
-pub const SCALE_PRIOR_SD: f64 = 1.0;
+/// The pseudo-calls at its default that a learned scale is shrunk toward: ten,
+/// as many as a stratum's prior holds at its filter's fraction.
+pub const SCALE_PRIOR_STRENGTH: f64 = STRATUM_PRIOR_STRENGTH;
 
 /// `ln(exp(a) + exp(b))`, without overflow.
 pub(crate) fn ln_add_exp(a: f64, b: f64) -> f64 {
@@ -156,28 +163,41 @@ pub fn log_marginal_likelihood(log_likelihood_ratios: &[f64], pi: f64, prior: Be
     calls + prior.strength * (prior.mean * ln_pi + (1.0 - prior.mean) * ln_rest)
 }
 
-/// The decay scale that maximizes a set of calls' marginal likelihood, with
-/// their artifact fraction under `prior` solved exactly at each scale, times a
-/// log-normal prior on the scale centered on `default`. `log_likelihood_ratios`
-/// gives the calls' ratios at a scale. The profile is searched over a log grid
-/// of [`SCALE_RANGE`] and refined by golden-section search around the grid's
-/// best; without a call to learn from, the scale is `default`.
+/// A set of calls' decay scale: the maximum likelihood scale of
+/// [`max_likelihood_scale`] and `default` averaged in log space, weighted by
+/// the calls' expected artifacts at that scale and [`SCALE_PRIOR_STRENGTH`]
+/// pseudo-calls at `default`. `log_likelihood_ratios` gives the calls' ratios
+/// at a scale; without a call to learn from, the scale is `default`.
 pub fn learn_scale(
     log_likelihood_ratios: impl Fn(f64) -> Vec<f64>,
     prior: BetaPrior,
     default: f64,
 ) -> f64 {
-    const STEPS: usize = 48;
-    let center = default.ln();
-    let profile = |ln_scale: f64| {
-        let llrs = log_likelihood_ratios(ln_scale.exp());
-        let pi = learn_artifact_fraction(&llrs, prior);
-        let shrink = -0.5 * ((ln_scale - center) / SCALE_PRIOR_SD).powi(2);
-        log_marginal_likelihood(&llrs, pi, prior) + shrink
-    };
     if log_likelihood_ratios(default).is_empty() {
         return default;
     }
+    let mle = max_likelihood_scale(&log_likelihood_ratios, prior);
+    let llrs = log_likelihood_ratios(mle);
+    let odds = logit(learn_artifact_fraction(&llrs, prior));
+    let artifacts: f64 = llrs.iter().map(|l| sigmoid(l + odds)).sum();
+    let k = SCALE_PRIOR_STRENGTH;
+    ((artifacts * mle.ln() + k * default.ln()) / (artifacts + k)).exp()
+}
+
+/// The decay scale that maximizes a set of calls' marginal likelihood, with
+/// their artifact fraction under `prior` solved exactly at each scale. The
+/// profile is searched over a log grid of [`SCALE_RANGE`] and refined by
+/// golden-section search around the grid's best.
+pub fn max_likelihood_scale(
+    log_likelihood_ratios: impl Fn(f64) -> Vec<f64>,
+    prior: BetaPrior,
+) -> f64 {
+    const STEPS: usize = 48;
+    let profile = |ln_scale: f64| {
+        let llrs = log_likelihood_ratios(ln_scale.exp());
+        let pi = learn_artifact_fraction(&llrs, prior);
+        log_marginal_likelihood(&llrs, pi, prior)
+    };
     let (low, high) = (SCALE_RANGE.0.ln(), SCALE_RANGE.1.ln());
     let grid: Vec<f64> = (0..=STEPS)
         .map(|i| low + (high - low) * i as f64 / STEPS as f64)
@@ -317,16 +337,29 @@ mod tests {
         assert!(close(weak, pi.ln() + (1.0 - pi).ln(), 1e-12), "{weak}");
     }
 
-    /// Many calls whose ratio peaks at a scale of 20 bases teach nearly that
-    /// scale, one such call stays near the default, and a set without calls
-    /// keeps the default.
+    /// Calls whose ratio peaks at a scale of 20 bases have that maximum
+    /// likelihood scale.
     #[test]
-    fn test_learn_scale_finds_the_peak_of_the_profile() {
-        let llrs = |n| move |scale: f64| vec![4.0 - (scale.ln() - 20f64.ln()).powi(2); n];
-        let many = learn_scale(llrs(500), FILTER_PRIOR, 30.0);
-        assert!(close(many, 20.0, 0.1), "{many}");
-        let one = learn_scale(llrs(1), FILTER_PRIOR, 30.0);
-        assert!(one > many + 1.0 && one < 30.0, "{one}");
+    fn test_max_likelihood_scale_finds_the_peak_of_the_profile() {
+        let llrs = |scale: f64| vec![4.0 - (scale.ln() - 20f64.ln()).powi(2); 3];
+        let scale = max_likelihood_scale(llrs, FILTER_PRIOR);
+        assert!(close(scale, 20.0, 1e-3), "{scale}");
+    }
+
+    /// Five hundred artifact calls peaking at 20 bases keep nearly that scale,
+    /// two barely move it from the default of 30, and as many calls that are
+    /// mutations, whose ratios also peak at 20, do not move it at all.
+    #[test]
+    fn test_learn_scale_weighs_the_default_as_ten_artifact_calls() {
+        let peaked =
+            |n, height: f64| move |scale: f64| vec![height - (scale.ln() - 20f64.ln()).powi(2); n];
+        let many = learn_scale(peaked(500, 8.0), FILTER_PRIOR, 30.0);
+        let expected = ((500.0 * 20f64.ln() + 10.0 * 30f64.ln()) / 510.0).exp();
+        assert!(close(many, expected, 0.01), "{many} vs {expected}");
+        let two = learn_scale(peaked(2, 8.0), FILTER_PRIOR, 30.0);
+        assert!(two > 27.5 && two < 30.0, "{two}");
+        let mutations = learn_scale(peaked(500, -8.0), FILTER_PRIOR, 30.0);
+        assert!(close(mutations, 30.0, 0.1), "{mutations}");
         assert_eq!(learn_scale(|_| Vec::new(), FILTER_PRIOR, 30.0), 30.0);
     }
 

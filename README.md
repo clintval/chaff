@@ -69,7 +69,7 @@ Each filter also weighs how far a call's molecules sit from the end its artifact
 | `a-tailing` | The end where an added A reads | A 2 bp window | The same window |
 
 A polymerase fills an overhang or copies a lesion over a length that varies from fragment to fragment, so the evidence for copied damage and end repair fill-in fades with distance, as `w(d) = exp(-d / s)`, with no cliff at any one distance.
-chaff learns the scale `s` from each library's calls unless you fix it.
+chaff learns the scale `s` from each library's calls, shrunk toward 30 bp for copied damage and 15 bp for end repair fill-in by 10 pseudo-calls, unless you fix it.
 A-tailing changes only the last base or two of a 3′ end, so a window is its shape.
 
 The strand a template was copied from is the strand of its read 1, which copies that strand from its 5′ end: an F1R2 pair comes from the forward strand and an F2R1 pair from the reverse, as GATK's `LearnReadOrientationModel` reads them.
@@ -125,19 +125,19 @@ cut -f 2,3,6,8,17 tumor.chaff.tsv | column -t
 
 ```text
 filter              stratum      artifact_fraction  distance  asymmetry_p_value
-copied-damage       C>T:non-CpG  0.454448           4.25027   0.745398
-copied-damage       G>T:CpG      0.545324           4.25027   0.000289011
+copied-damage       C>T:non-CpG  0.448724           22.7678   0.72908
+copied-damage       G>T:CpG      0.53767            22.7678   0.0242018
 a-tailing           C>A          0.19272            2.0       0.00246167
 a-tailing           C>T          0.189318           2.0       1.0
 a-tailing           T>A          0.189332           2.0       0.000231639
-end-repair-fill-in  C>A          0.393831           3.10398   0.000155019
-end-repair-fill-in  C>G          0.302956           3.10398   1.0
-end-repair-fill-in  C>T          0.302956           3.10398   0.668562
-end-repair-fill-in  T>A          0.302956           3.10398   1.0
+end-repair-fill-in  C>A          0.391718           12.1245   0.00451579
+end-repair-fill-in  C>G          0.301512           12.1245   1.0
+end-repair-fill-in  C>T          0.301512           12.1245   0.665409
+end-repair-fill-in  T>A          0.301512           12.1245   1.0
 ```
 
 Every filter learns a fraction well above zero on these calls, which were built to carry A-tailing and end repair artifacts, so all three stay on; across many calls, a fraction near zero says a library lacks that artifact.
-The decays learn scales of 4.3 and 3.1 bp because the alternate molecules here sit within 3 bp of an end.
+The decays learn scales of 22.8 and 12.1 bp: the alternate molecules here sit within 3 bp of an end, but 2 and 4 calls move a scale only part of the way from its default.
 The counts behind a p-value are in the row:
 
 ```console
@@ -186,15 +186,15 @@ gzip -dc calls.chaff.vcf.gz | grep -v '^#' | cut -f 2,4,5,8 | column -t
 ```
 
 ```text
-100  C    A    CDAP=0.0003579;CDLR=3.367;CDAC=3,3;CDRC=15,240;ATAP=0.963;ERFAP=0.0003782
-200  G    A    CDAP=1;CDLR=-47.16;CDAC=1,20;CDRC=15,240;ATAP=1;ERFAP=1
+100  C    A    CDAP=0.022;CDLR=1.591;CDAC=3,3;CDRC=69,240;ATAP=0.963;ERFAP=0.007738
+200  G    A    CDAP=1;CDLR=-4.652;CDAC=5,20;CDRC=69,240;ATAP=1;ERFAP=1
 300  AAA  A    .
 400  A    T    ATAP=1;ERFAP=1
 500  C    G    ERFAP=1
 ```
 
 The `CDAP`, `ATAP`, and `ERFAP` fields are the posteriors, `CDLR` is the log10 likelihood ratio of copied damage to a true mutation, and `CDAC` and `CDRC` count the alternate and reference molecules within the learned distance of the lesion strand's 5′ end, out of all measured.
-All 3 alternate molecules of the C>A at position 100 sit within it, where 15 of the 240 reference molecules do, while 1 of the 20 alternate molecules of the G>A at position 200 does.
+All 3 alternate molecules of the C>A at position 100 sit within it, where 69 of the 240 reference molecules do, while 5 of the 20 alternate molecules of the G>A at position 200 do.
 The deletion at position 300 is not scored.
 
 To check a threshold, run chaff on germline heterozygous calls from the same reads: they are real, so the share it filters estimates how often it filters real somatic calls.
@@ -215,14 +215,14 @@ for model in fgbio chaff; do
         --sample tumor \
         --output $model.vcf \
         --filters end-repair-fill-in \
-        --end-repair-fill-in-threshold 0.001 \
+        --end-repair-fill-in-threshold 0.05 \
         --model $model
 done
 paste fgbio.vcf chaff.vcf | grep -v '^#' | cut -f 2,7,8,18,19 | column -t
 ```
 
 ```text
-100  EndRepairFillInArtifact  ERFAP=0.00003218  EndRepairFillInArtifact  ERFAP=0.0003782
+100  EndRepairFillInArtifact  ERFAP=0.00003218  EndRepairFillInArtifact  ERFAP=0.007738
 200  .                        ERFAP=1           .                        ERFAP=1
 300  .                        .                 .                        .
 400  EndRepairFillInArtifact  ERFAP=0.00001239  .                        ERFAP=1
@@ -266,7 +266,7 @@ A VCF that already declares an enabled filter's INFO or FILTER, from an earlier 
 
 ## Likelihoods
 
-- Copied damage, and end repair fill-in under the chaff model: a copy reaches distance `d` from its end with probability `w(d) = exp(-d / s)`, so `LLR = Σ ln((1 - e) w(d) / W + e)` over the alternate molecules, with `W` the mean `w(d)` of the reference molecules and `e` the base error. The scale `s` is one per filter, shared by its strata, and maximizes the filter's marginal likelihood with `π_f` solved exactly at each scale, under a log-normal prior centered on 30 bp for copied damage and 15 bp for end repair fill-in. A call without both a measured reference and a measured alternate molecule gets no posterior.
+- Copied damage, and end repair fill-in under the chaff model: a copy reaches distance `d` from its end with probability `w(d) = exp(-d / s)`, so `LLR = Σ ln((1 - e) w(d) / W + e)` over the alternate molecules, with `W` the mean `w(d)` of the reference molecules and `e` the base error. The scale `s` is one per filter, shared by its strata, and is the scale `s_mle` that maximizes the filter's marginal likelihood, with `π_f` solved exactly at each scale, shrunk toward the default `s_0`, 30 bp for copied damage and 15 bp for end repair fill-in, as `ln s = (Σ r_i ln s_mle + 10 ln s_0) / (Σ r_i + 10)`: only artifact calls carry a scale, so their expected count `Σ r_i` weighs the data against 10 pseudo-calls at the default. A call without both a measured reference and a measured alternate molecule gets no posterior.
 - A-tailing, and end repair fill-in under the fgbio model: fgbio's windowed likelihoods, which compare the alternate molecules inside the window with the share of reference molecules there.
 
 The examples run on fgbio's `FilterSomaticVcf` test data in [`tests/data`](tests/data): five tumor/normal calls on `chr1` at positions 100 to 500 in `calls.vcf`, the tumor's reads in `tumor.bam`, with artifact signal at positions 100, 400, and 500, and the reference in `ref.fa`.

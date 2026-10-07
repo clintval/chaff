@@ -444,9 +444,10 @@ fn test_apply_filters_with_thresholds_under_the_fgbio_model() {
 /// Intended difference: the chaff model measures end repair fill-in from the
 /// 3' end of the strand each template was copied from, the rightmost end of
 /// these F1R2 templates. The alternate molecules of the C>A at 100 sit there,
-/// so ERFAP filters it; those of the A>T at 400 and the C>G at 500 sit at the
-/// leftmost end, which fgbio's window counts and the chaff model does not, so
-/// ERFAP leaves them at 1. A-tailing still filters 100 and 400, whose alternate
+/// so ERFAP favors the artifact, but with a scale learned from four calls and
+/// so held near 15 bases it stays above the threshold; those of the A>T at 400
+/// and the C>G at 500 sit at the leftmost end, which fgbio's window counts and
+/// the chaff model does not, so ERFAP leaves them at 1. A-tailing still filters 100 and 400, whose alternate
 /// molecules all sit where 5% of reference ones do.
 #[test]
 fn test_apply_filters_with_thresholds_under_the_chaff_model_reads_the_copied_strand() {
@@ -463,14 +464,14 @@ fn test_apply_filters_with_thresholds_under_the_chaff_model_reads_the_copied_str
         .map(|r| has_filter(r, EndRepairFillIn::FILTER))
         .collect();
     assert_eq!(atap, vec![true, false, false, true, false]);
-    assert_eq!(erfap, vec![true, false, false, false, false]);
+    assert_eq!(erfap, vec![false, false, false, false, false]);
     let erfap: Vec<Option<f32>> = records
         .iter()
         .map(|r| float(r, EndRepairFillIn::INFO))
         .collect();
     assert_eq!(
         erfap,
-        vec![Some(3.782e-4), Some(1.0), None, Some(1.0), Some(1.0)]
+        vec![Some(7.738e-3), Some(1.0), None, Some(1.0), Some(1.0)]
     );
 }
 
