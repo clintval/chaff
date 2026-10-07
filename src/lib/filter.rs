@@ -361,12 +361,16 @@ pub fn resolve_sample(header: &vcf::Header, sample: Option<&str>) -> Result<(usi
     match sample {
         Some(name) => match names.get_index_of(name) {
             Some(i) => Ok((i, name.to_string())),
-            None => bail!("there is no genotype with the following sample in the input VCF/BCF: {name}"),
+            None => {
+                bail!("there is no genotype with the following sample in the input VCF/BCF: {name}")
+            }
         },
         None => match names.len() {
             1 => Ok((0, names[0].clone())),
             0 => bail!("the input VCF/BCF has no samples"),
-            n => bail!("the input VCF/BCF has {n} samples, so --sample must name the one whose reads are in the BAM"),
+            n => bail!(
+                "the input VCF/BCF has {n} samples, so --sample must name the one the BAM holds"
+            ),
         },
     }
 }
