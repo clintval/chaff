@@ -89,7 +89,7 @@ Fragmenting with a restriction enzyme that leaves blunt ends, as NanoSeq does [[
 - **Use it when:** UMI-bearing adapters are ligated after any polymerase fills in ends, nicks, or gaps, as in Duplex Sequencing; it needs the reference, `--ref`.
 
 As the copied damage diagram shows, the copy runs from the partner's recessed end toward the lesion strand's 5′ end, so copied lesions sit near that end, while a real mutation's molecules sit wherever the reference molecules do.
-On the simulated sample in the figure, the tool learns a scale of 30.3 bp, against a true 30 bp, and 65% of the copied damage's alternate molecules sit within it, against 17% of the real mutations' and of the reference molecules:
+On a simulated duplex sample of 6,000 real mutations and 2,000 copied-damage calls at CpG C>T, a quarter of each with 2, 3, 5, or 10 alternate molecules, about 400 duplex molecules per site, fragments of median length 200 bp, and fill-in that copies a lesion from the lesion strand's 5′ end over an exponential length with a mean of 30 bp, the tool learns a scale of 30.3 bp and 65% of the copied damage's alternate molecules sit within it, against 17% of the real mutations' and of the reference molecules:
 
 ![Distances of alternate and reference molecules from the lesion strand's 5′ and 3′ ends: copied damage piles up near the 5′ end and avoids the 3′ end, while real mutations follow the reference molecules.](.github/img/copied-damage-ends.png)
 
@@ -229,13 +229,13 @@ The deletion at position 300 is not scored.
 To check a threshold, run the tool on germline heterozygous calls from the same reads, down-sampled to the 2 to 10 alternate molecules of your somatic calls: they are real, so the share it filters estimates how often it filters real somatic calls.
 Where a matched normal or a replicate library exists, the somatic calls it shares are a second check.
 
-On simulated libraries with known damage, the learned prior recovers each library's share of copied damage and its scale, and the posteriors match how often calls are real:
+On 8 simulated libraries of 400 C>T calls at CpG, each with a known share of copied damage and fill-in scale, the learned prior recovers each library's share and scale, though it puts a 60 bp scale at 53.5 bp, and the posteriors, pooled into bins of at least 15 calls, match how often calls are real:
 
 ![Left, the learned artifact fraction against the true share of copied damage in 8 simulated libraries, on the identity line, with an inset of the learned against the true fill-in scale; right, the share of calls that are real against their CDAP, near the identity line under the chaff model and far above it under the fgbio model.](.github/img/copied-damage-learning.png)
 
-On the simulated sample of the copied damage section, with a quarter of each kind of call at 2, 3, 5, or 10 alternate molecules, a threshold of 0.05 filters 1,427 of the 2,000 copied-damage calls and 23 of the 1,065 real C>T at CpG, and none of the 4,935 calls in other channels.
+On the simulated sample of the copied damage section, a threshold of 0.05 filters 1,427 of the 2,000 copied-damage calls and 23 of the 1,065 real C>T at CpG, and none of the 4,935 calls in other channels.
 That threshold filters 95% of the copied damage with 10 alternate molecules and 86% with 5, but only 40% with 2, where it also filters 6 of 253 real C>T at CpG.
-The open circles show `--model fgbio`, which uses fgbio's per-call prior from the alternate allele fraction: at the same threshold it filters 1,998 of the copied-damage calls, but also 82%, 60%, 24%, and 5.4% of the real C>T at CpG with 2, 3, 5, and 10 alternate molecules, against at most 3.3% under the `chaff` model:
+In the figure, each curve sweeps the threshold, counting real calls filtered among the real C>T at CpG, the stratum copied damage shares, and the filled dots mark a threshold of 0.05; the open circles show `--model fgbio`, which uses fgbio's per-call prior from the alternate allele fraction: at the same threshold it filters 1,998 of the copied-damage calls, but also 82%, 60%, 24%, and 5.4% of the real C>T at CpG with 2, 3, 5, and 10 alternate molecules, against at most 3.3% under the `chaff` model:
 
 ![The SBS96 spectrum of the simulated sample before and after filtering, where the copied damage at CpG C>T mostly leaves and the other channels stay, and the share of copied damage filtered against the share of real C>T at CpG filtered, by alternate molecules per call and model.](.github/img/copied-damage-filtering.png)
 

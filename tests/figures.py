@@ -31,12 +31,6 @@ CPG_CT = [ch for ch in CHANNELS if ch[2:5] == "C>T" and ch[-1] == "G"]
 ALT_COLOR, REF_COLOR, REAL_COLOR, GRAY, GREEN = "#e34948", "#8c8b86", "#2a78d6", "0.45", "#12875c"
 RAMP = ["#b7aee8", "#8a7cd3", "#5f4fbb", "#33267f"]
 COMPLEMENT = str.maketrans("ACGTN", "TGCAN")
-NOTE = (
-    f"Simulated duplex sample: {REAL:,} real mutations and {ARTIFACTS:,} copied-damage calls at CpG C>T, "
-    f"a quarter of each with {', '.join(map(str, ALT_MOLECULES[:-1]))}, or {ALT_MOLECULES[-1]} alternate molecules;\n"
-    f"about {DEPTH} duplex molecules per site and a median fragment of {MEDIAN} bp;\n"
-    f"fill-in copies a lesion onto the partner strand from the lesion strand's 5′ end, over an exponential mean of {FILL_IN} bp."
-)
 
 
 def spectrum(rng):
@@ -172,11 +166,9 @@ def share(called, truth, kind, field):
     return 100 * sum(a for a, _ in pairs) / sum(n for _, n in pairs)
 
 
-def finish(fig, name, title, note):
+def finish(fig, name, title):
     box = fig.get_tightbbox(fig.canvas.get_renderer())
     width, height = fig.get_figwidth(), fig.get_figheight()
-    fig.text(box.x0 / width, (box.y0 - 0.15) / height, note, fontsize=8.5, color=GRAY, va="top", linespacing=1.4)
-    box = fig.get_tightbbox(fig.canvas.get_renderer())
     fig.text(0.5 * (box.x0 + box.x1) / width, (box.y1 + 0.12) / height, title, ha="center", va="bottom", fontsize=11.5, fontweight="bold")
     fig.savefig(OUT / name, dpi=200, bbox_inches="tight", pad_inches=0.15, facecolor="white")
     plt.close(fig)
@@ -198,7 +190,7 @@ def ends_figure(truth, called):
         ax.set_xlim(0, 400)
         ax.set_xlabel(f"Distance from the lesion strand's {end_label} end (bp)")
         bold = {"fontweight": "bold"}
-        label(ax, 0, 1.04, [("From the lesion strand's ", bold), (f"{end_label} end", {**bold, "color": GREEN})], fontsize=10, va="bottom")
+        label(ax, 0, 1.04, [("From the Lesion Strand's ", bold), (f"{end_label} End", {**bold, "color": GREEN})], fontsize=10, va="bottom")
     axes[0].set_ylabel("Molecules per 10 bp bin (%)")
     axes[0].set_ylim(0, None)
     axes[0].axvline(scale, color=GRAY, lw=0.9, ls="--", zorder=1)
@@ -209,8 +201,7 @@ def ends_figure(truth, called):
         handles.append(Patch(facecolor=color, alpha=0.3, edgecolor=color, label=text) if kind == "reference" else Line2D([], [], color=color, lw=1.8, label=text))
     axes[0].legend(handles=handles, loc="upper right", fontsize=8.5, handlelength=1.6, bbox_to_anchor=(1.0, 0.8))
     fig.tight_layout(w_pad=2.0)
-    finish(fig, "copied-damage-ends.png", "Copied Damage Crowds the Lesion Strand's 5′ End; Real Mutations Follow the Reference",
-           NOTE + "\nThe dashed line is the decay scale chaff learned; the legend's shares are its CDAC and CDRC counts.")
+    finish(fig, "copied-damage-ends.png", "Copied Damage Crowds the Lesion Strand's 5′ End; Real Mutations Follow the Reference")
 
 
 def spectrum_row(ax, truth, keep, title, detail):
@@ -253,8 +244,8 @@ def outcome_figure(truth, chaff, fgbio):
     grid = fig.add_gridspec(2, 2, width_ratios=[2.4, 1], hspace=0.12, wspace=0.16)
     before = fig.add_subplot(grid[0, 0])
     after = fig.add_subplot(grid[1, 0], sharey=before)
-    top = spectrum_row(before, truth, lambda p: True, "Before chaff", ": all calls").max()
-    heights = spectrum_row(after, truth, lambda p: not chaff[p]["filtered"], "After chaff", f": the calls it passes at a threshold of {THRESHOLD}")
+    top = spectrum_row(before, truth, lambda p: True, "Before chaff", ": All Calls").max()
+    heights = spectrum_row(after, truth, lambda p: not chaff[p]["filtered"], "After chaff", f": Calls Passing a Threshold of {THRESHOLD}")
     for ch in CPG_CT:
         i = CHANNELS.index(ch)
         after.text(i, heights[i] + top * 0.05, ch[0] + "CG", rotation=90, ha="center", va="bottom", fontsize=7.5, color="#12875c",
@@ -285,9 +276,7 @@ def outcome_figure(truth, chaff, fgbio):
                 for m, face in (("chaff", "black"), ("fgbio", "white"))]
     ax.legend(handles=handles, loc="lower right", fontsize=8.5, handlelength=1.4)
     fig.subplots_adjust(left=0.07, right=0.99, bottom=0.12, top=0.9)
-    finish(fig, "copied-damage-filtering.png", "Filtering Removes Most Copied Damage and Keeps Real Mutations; 2 Molecules Are Its Limit",
-           NOTE + "\nCurves sweep the threshold under the chaff model, and dots mark a threshold of 0.05. Real calls filtered are counted among the real C>T at CpG,"
-           "\nthe stratum copied damage shares, on an axis linear below 1% and logarithmic above.")
+    finish(fig, "copied-damage-filtering.png", "Filtering Removes Most Copied Damage and Keeps Real Mutations; 2 Molecules Are Its Limit")
 
 
 LIBRARIES = [(f, 30) for f in (0, 0.05, 0.1, 0.2, 0.4, 0.6)] + [(0.4, 15), (0.4, 60)]
@@ -327,7 +316,7 @@ def learning_figure(libs):
     left.set_ylim(0, 70)
     left.set_xlabel("True copied damage (% of calls)")
     left.set_ylabel("Learned artifact fraction (%)")
-    left.set_title("chaff learns each library's damage", fontsize=10, fontweight="bold", loc="left")
+    left.set_title("chaff Learns Each Library's Damage", fontsize=10, fontweight="bold", loc="left")
     inset = left.inset_axes([0.6, 0.1, 0.36, 0.36])
     inset.plot([0, 80], [0, 80], color=GRAY, lw=0.8, ls="--", zorder=1)
     for lib in libs:
@@ -350,14 +339,12 @@ def learning_figure(libs):
     right.set_ylim(0, 1)
     right.set_xlabel("CDAP, the posterior that a call is real")
     right.set_ylabel("Calls that are real")
-    right.set_title("Its posteriors mean what they say", fontsize=10, fontweight="bold", loc="left")
+    right.set_title("Its Posteriors Mean What They Say", fontsize=10, fontweight="bold", loc="left")
     right.legend(loc="lower right", fontsize=8.5, handlelength=1.4)
     shapes = [Line2D([], [], ls="", marker=m, ms=6, color=ALT_COLOR, label=f"{scale} bp fill-in") for m, scale in (("s", 15), ("o", 30), ("D", 60))]
     left.legend(handles=shapes, loc="upper left", fontsize=8.5, handlelength=1.0)
     fig.tight_layout(w_pad=3.0)
-    finish(fig, "copied-damage-learning.png", LEARNING_TITLE,
-           f"{len(libs)} simulated duplex libraries of {LIBRARY_CALLS} C>T calls at CpG, each with a known share of copied damage and fill-in scale and with\n"
-           f"{', '.join(map(str, ALT_MOLECULES[:-1]))}, or {ALT_MOLECULES[-1]} alternate molecules per call; calls are pooled across libraries into bins of CDAP, with bins of fewer than 15 calls left out.")
+    finish(fig, "copied-damage-learning.png", LEARNING_TITLE)
 
 
 LEARNING_TITLE = "The Learned Prior Tracks Each Library's Damage and Calibrates Its Posteriors"
