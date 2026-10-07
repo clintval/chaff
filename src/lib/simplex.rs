@@ -195,12 +195,14 @@ impl StratumProfile {
 
     /// The chance model at a given dispersion.
     pub fn chance_at(&self, dispersion: f64) -> Chance {
-        let rate = matched_rate(&self.positions, dispersion);
+        let depths = depths(&self.positions);
+        let ones = observed(&self.positions, 1) as f64;
+        let rate = matched_rate(&depths, ones, dispersion);
         let mut bins: BTreeMap<u32, Tally> = BTreeMap::new();
         for (&(n, k), &count) in &self.positions {
             bins.entry(depth_bin(n)).or_default().observed[k.min(MAX_CHANGES) as usize] += count;
         }
-        for (n, count) in depths(&self.positions) {
+        for (n, count) in depths {
             let expected = &mut bins.entry(depth_bin(n)).or_default().expected;
             let mean = f64::from(n) * rate;
             for (k, p) in (0..).zip(probabilities(mean, dispersion)) {
@@ -394,49 +396,55 @@ pub fn negative_binomial(k: u32, mean: f64, dispersion: f64) -> f64 {
     (coefficient + zero + rest).exp()
 }
 
-/// The positions expected with `k` changes at `rate` per molecule.
-fn expected_at(positions: &Positions, k: u32, rate: f64, dispersion: f64) -> f64 {
-    positions
+/// The positions of `depths` expected with `k` changes at `rate` per
+/// molecule.
+fn expected_at(depths: &BTreeMap<u32, f64>, k: u32, rate: f64, dispersion: f64) -> f64 {
+    depths
         .iter()
-        .map(|(&(n, _), &count)| {
-            count as f64 * negative_binomial(k, f64::from(n) * rate, dispersion)
-        })
+        .map(|(&n, &count)| count * negative_binomial(k, f64::from(n) * rate, dispersion))
         .sum()
 }
 
-/// The rate per molecule at which the positions expected with one change
-/// match those observed, on the rising side of that count, or where it
-/// peaks when it never rises that high; zero without such positions.
-fn matched_rate(positions: &Positions, dispersion: f64) -> f64 {
-    let ones = observed(positions, 1) as f64;
-    let deepest = positions.keys().map(|&(n, _)| n).max().unwrap_or(0);
-    if ones == 0.0 || deepest == 0 {
+/// The rate per molecule at which the positions of `depths` expected with
+/// one change first match `ones`, as the rate rises from zero, or where they
+/// peak when they never rise that high; zero without such positions. A
+/// position of `n` molecules expects at most `n` times the rate, so none
+/// matches below `ones` over the molecules, and its chance of one change
+/// peaks where it expects one, so past one over the fewest molecules every
+/// position's falls.
+fn matched_rate(depths: &BTreeMap<u32, f64>, ones: f64, dispersion: f64) -> f64 {
+    const STEP: f64 = 1.189_207_115_002_721;
+    let molecules: f64 = depths.iter().map(|(&n, &count)| f64::from(n) * count).sum();
+    let Some(&shallowest) = depths.keys().next() else {
+        return 0.0;
+    };
+    if ones <= 0.0 || molecules <= 0.0 {
         return 0.0;
     }
-    let singles = |ln_rate: f64| expected_at(positions, 1, ln_rate.exp(), dispersion);
-    let (mut low, mut high) = ((1e-12f64).ln(), (100.0 / f64::from(deepest)).ln());
-    let mut peak = (low, high);
-    for _ in 0..100 {
-        let third = (peak.1 - peak.0) / 3.0;
-        if singles(peak.0 + third) < singles(peak.1 - third) {
-            peak.0 += third;
-        } else {
-            peak.1 -= third;
+    let singles = |rate: f64| expected_at(depths, 1, rate, dispersion);
+    let (mut low, last) = (ones / molecules, 1.0 / f64::from(shallowest.max(1)));
+    let mut peak = (singles(low), low);
+    while low < last {
+        let high = (low * STEP).min(last);
+        let value = singles(high);
+        if value >= ones {
+            let (mut low, mut high) = (low.ln(), high.ln());
+            for _ in 0..40 {
+                let mid = (low + high) / 2.0;
+                if singles(mid.exp()) < ones {
+                    low = mid;
+                } else {
+                    high = mid;
+                }
+            }
+            return ((low + high) / 2.0).exp();
         }
-    }
-    high = (peak.0 + peak.1) / 2.0;
-    if singles(high) <= ones {
-        return high.exp();
-    }
-    for _ in 0..100 {
-        let mid = (low + high) / 2.0;
-        if singles(mid) < ones {
-            low = mid;
-        } else {
-            high = mid;
+        if value > peak.0 {
+            peak = (value, high);
         }
+        low = high;
     }
-    ((low + high) / 2.0).exp()
+    peak.1
 }
 
 /// The gamma shape of a rate's variation across positions, fitted so the
@@ -448,18 +456,15 @@ fn matched_rate(positions: &Positions, dispersion: f64) -> f64 {
 /// shape is the first crossing on the way down.
 fn fitted_dispersion(positions: &Positions) -> f64 {
     const STEPS: usize = 48;
-    let zeros = observed(positions, 0) as f64;
-    if observed(positions, 1) == 0 {
+    let depths = depths(positions);
+    let (zeros, ones) = (observed(positions, 0) as f64, observed(positions, 1) as f64);
+    if ones == 0.0 {
         return f64::INFINITY;
     }
     let excess = |ln_dispersion: f64| {
         let dispersion = ln_dispersion.exp();
-        expected_at(
-            positions,
-            0,
-            matched_rate(positions, dispersion),
-            dispersion,
-        ) - zeros
+        let rate = matched_rate(&depths, ones, dispersion);
+        expected_at(&depths, 0, rate, dispersion) - zeros
     };
     let (top, bottom) = (DISPERSIONS.1.ln(), DISPERSIONS.0.ln());
     if excess(top) <= 0.0 {
@@ -1401,6 +1406,20 @@ mod tests {
         assert!(chance.dispersion > 10.0 * fitted, "{chance:?}");
         let (expected, observed) = chance.at(2);
         assert!(expected <= observed as f64 + FIT_TOLERANCE * expected.sqrt());
+    }
+
+    /// Positions of one and of 10,000 molecules each expect one change most
+    /// often at a rate of one over their molecules, so the positions expected
+    /// with one rise, fall, and rise again, and the rate matched to 300 is
+    /// where they first reach it, not where they reach it again.
+    #[test]
+    fn test_the_matched_rate_is_the_first_to_explain_the_positions_with_one() {
+        let depths = BTreeMap::from([(1, 100_000.0), (10_000, 1_000.0)]);
+        let rate = matched_rate(&depths, 300.0, f64::INFINITY);
+        assert!(rate < 1e-4, "{rate}");
+        assert!((expected_at(&depths, 1, rate, f64::INFINITY) - 300.0).abs() < 1e-6);
+        let peak = matched_rate(&depths, 1e6, f64::INFINITY);
+        assert!((peak - 1.0).abs() < 0.2, "{peak}");
     }
 
     #[test]
