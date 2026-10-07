@@ -225,14 +225,14 @@ impl FilterOptions {
                 CopiedDamage::INFO_POSTERIOR,
                 Number::Count(1),
                 Type::Float,
-                &format!("Posterior probability that the call is a true mutation rather than damage copied onto both strands, with {model} and {prior}."),
+                &format!("Posterior probability that the call is a real mutation rather than damage copied onto both strands, with {model} and {prior}."),
             );
             add_info(
                 header,
                 CopiedDamage::INFO_RATIO,
                 Number::Count(1),
                 Type::Float,
-                "Log10 likelihood ratio of the copied damage artifact to a true mutation.",
+                "Log10 likelihood ratio of copied damage to a real mutation.",
             );
             add_info(
                 header,
@@ -264,7 +264,7 @@ impl FilterOptions {
                 ATailing::INFO,
                 Number::Count(1),
                 Type::Float,
-                &format!("Posterior probability that the call is a true mutation rather than an A-tailing artifact, with a {distance} bp window from the template end and {prior}."),
+                &format!("Posterior probability that the call is a real mutation rather than an A-tailing artifact, with a {distance} bp window from the template end and {prior}."),
             );
             add_filter(
                 header,
@@ -292,7 +292,7 @@ impl FilterOptions {
                 EndRepairFillIn::INFO,
                 Number::Count(1),
                 Type::Float,
-                &format!("Posterior probability that the call is a true mutation rather than an end repair fill-in artifact, with {model} and {prior}."),
+                &format!("Posterior probability that the call is a real mutation rather than an end repair fill-in artifact, with {model} and {prior}."),
             );
             add_filter(
                 header,

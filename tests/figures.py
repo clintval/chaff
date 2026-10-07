@@ -221,7 +221,7 @@ def spectrum_row(ax, truth, keep, title, detail):
     ax.set_xticks([])
     ax.set_ylabel("Calls")
     label(ax, 0.01, 0.9, [(title, {"fontweight": "bold"}), (detail, {})], fontsize=9.5, va="bottom")
-    return (real + artifact).max()
+    return real + artifact
 
 
 def roc(called, truth, n):
@@ -244,8 +244,12 @@ def outcome_figure(truth, chaff, fgbio):
     grid = fig.add_gridspec(2, 2, width_ratios=[2.4, 1], hspace=0.12, wspace=0.16)
     before = fig.add_subplot(grid[0, 0])
     after = fig.add_subplot(grid[1, 0], sharey=before)
-    top = spectrum_row(before, truth, lambda p: True, "Before chaff", ": all calls")
-    spectrum_row(after, truth, lambda p: not chaff[p]["filtered"], "After chaff", f": the calls it passes at a threshold of {THRESHOLD}")
+    top = spectrum_row(before, truth, lambda p: True, "Before chaff", ": all calls").max()
+    heights = spectrum_row(after, truth, lambda p: not chaff[p]["filtered"], "After chaff", f": the calls it passes at a threshold of {THRESHOLD}")
+    for ch in CPG_CT:
+        i = CHANNELS.index(ch)
+        after.text(i, heights[i] + top * 0.05, ch[0] + "CG", rotation=90, ha="center", va="bottom", fontsize=7.5, color="#12875c",
+                   fontfamily=["Menlo", "DejaVu Sans Mono"], bbox={"boxstyle": "round,pad=0.25,rounding_size=0.4", "facecolor": "#1baf7a", "alpha": 0.18, "edgecolor": "none"})
     before.set_ylim(0, top * 1.02)
     for i, cls in enumerate(CLASSES):
         before.add_patch(plt.Rectangle((i * 16 - 0.45, top * 1.04), 15.9, top * 0.05, color=CLASS_COLOR[cls], clip_on=False, lw=0))

@@ -51,7 +51,7 @@ This is the filter for Duplex Sequencing, since a duplex consensus cannot remove
 
 - **Measured from:** the 5′ end of the lesion strand, the strand that carries the reference C of a C>T or the reference G of a G>T.
 - **Scored with:** a decay whose scale is learned per library.
-- **Writes:** the INFO keys `CDAP`, `CDLR`, `CDAC`, and `CDRC`, and the FILTER `CopiedDamageArtifact`.
+- **Writes:** `CDAP`, the posterior probability that the call is a real mutation rather than damage copied onto both strands; `CDLR`, the log10 likelihood ratio of copied damage to a real mutation; `CDAC` and `CDRC`, the alternate and reference molecules within the decay scale of the lesion strand's 5′ end, and all of each measured; and the FILTER `CopiedDamageArtifact`.
 - **Use it when:** the UMI-bearing adapters are ligated after any polymerase fills in ends, nicks, or gaps, as in Duplex Sequencing; it needs the reference FASTA, `--ref`, for CpG context.
 
 The copy runs from the partner's recessed end toward the lesion strand's 5′ end, so copied lesions sit near that end, while a real mutation's molecules sit wherever the reference molecules at the site do.
@@ -64,15 +64,19 @@ A lesion copied onto the partner strand from an internal nick, by nick translati
 
 ### End Repair Fill-In
 
+![End repair fill-in makes an error: a polymerase fills in a recessed 3′ end and misincorporates a C opposite a T, the UMI-bearing adapters are ligated, and only the filled-in strand carries the error, so the two strands disagree and a duplex consensus masks it.](.github/img/end-repair-fill-in.svg)
+
 End repair's polymerase can misincorporate a base, or copy a damaged base from the overhang it fills, so the error sits on the strand it extended, near that strand's 3′ end.
 Only that strand carries it, so a duplex consensus mostly removes it.
 
-- **Measured from:** the 3′ end of the strand each template was copied from, the strand of its read 1: forward for an F1R2 pair and reverse for F2R1, as GATK's `LearnReadOrientationModel` reads them, or the nearer end of a duplex consensus, whose reads carry fgbio's `aD` and `bD`.
+- **Measured from:** the 3′ end of the strand each template was copied from, the strand of its read 1: forward for an F1R2 pair and reverse for F2R1, as GATK's `LearnReadOrientationModel` reads them, or the nearer end of a duplex consensus, whose reads carry the `aD` and `bD` depths of both strands.
 - **Scored with:** a decay whose scale is learned per library.
-- **Writes:** the INFO key `ERFAP` and the FILTER `EndRepairFillInArtifact`.
+- **Writes:** `ERFAP`, the posterior probability that the call is a real mutation rather than an end repair fill-in artifact, and the FILTER `EndRepairFillInArtifact`.
 - **Use it when:** a polymerase end-repaired the library before adapter ligation, as in most ligation preps after mechanical or enzymatic fragmentation, and its reads are not a duplex consensus.
 
 ### A-Tailing
+
+![A-tailing makes an error: end repair trims a 3′ end one base too far, A-tailing adds a non-templated A where a C belongs, the UMI-bearing adapters are ligated, and only that strand reads A at the last base of its 3′ end, so the two strands disagree.](.github/img/a-tailing.svg)
 
 A-tailing adds a non-templated A to each 3′ end, for adapters with a T overhang to ligate to.
 Where end repair over-digested a 3′ end, that A stands in for a lost base, so copies of the strand begin with a T where another base belongs: a T near the template's left end or, from the other strand, an A near its right end.
@@ -80,17 +84,18 @@ Only one strand carries it, so a duplex consensus mostly removes it.
 
 - **Measured from:** the template end where the added A reads, the left end for a T and the right end for an A.
 - **Scored with:** a 2 bp window, since the artifact changes only the last base or two of a 3′ end.
-- **Writes:** the INFO key `ATAP` and the FILTER `ATailingArtifact`.
+- **Writes:** `ATAP`, the posterior probability that the call is a real mutation rather than an A-tailing artifact, and the FILTER `ATailingArtifact`.
 - **Use it when:** the library was A-tailed for T-overhang adapters, unlike blunt-end ligation or transposase (tagmentation) preps, and its reads are not a duplex consensus.
 
-### Which to Keep
+### Choosing Filters for Your Library
 
-The data say to keep a filter when somatic calls show an excess of C>T or C>A with few supporting molecules, when their alternate bases crowd one fragment end, or when the filter's metrics, below, learn an artifact fraction well above zero.
+Start from each filter's **Use it when** line, which follows from how your library was prepared, then let the data confirm the choice: keep a filter when somatic calls show an excess of C>T or C>A with few supporting molecules, when their alternate bases crowd one fragment end, or when the filter's metrics, below, learn an artifact fraction well above zero.
 Suspect copied damage in old, stored, or degraded specimens, and when C>T calls crowd CpGs.
 
 ## What `chaff` Writes
 
-The examples run on fgbio's `FilterSomaticVcf` test data in [`tests/data`](tests/data): five tumor/normal calls on `chr1` at positions 100 to 500 in `calls.vcf`, the tumor's reads in `tumor.bam`, with alternate molecules near a template end at positions 100, 400, and 500, and the reference in `ref.fa`.
+Each filter writes its posterior into the INFO of every call it scores and applies its FILTER where the posterior is at or below its threshold, and copied damage also writes the molecule counts behind its posterior.
+The examples run on the five calls at positions 100 to 500 in [`tests/data`](tests/data), with the tumor's reads and the reference beside them.
 Here copied damage applies its FILTER at a posterior of 0.05, and the call at position 100 is split into its FILTER and its INFO values, one per line:
 
 ```console
@@ -114,8 +119,8 @@ ATAP=0.963
 ERFAP=0.007738
 ```
 
-Its `CDAP` of 0.022, at or below the threshold of 0.05, puts the copied damage FILTER on the call, and its `CDLR` of 1.591 is the log10 likelihood ratio of copied damage to a real mutation.
-Its `CDAC` of 3,3 and `CDRC` of 69,240 count the alternate and reference molecules within the learned distance of the lesion strand's 5′ end, out of all measured: all 3 alternate molecules sit there, against 69 of the 240 reference molecules.
+Its `CDAP` of 0.022, at or below the threshold of 0.05, puts the copied damage FILTER on the call, and its `CDLR` of 1.591 favors copied damage.
+Its `CDAC` of 3,3 and `CDRC` of 69,240 say that all 3 alternate molecules sit within the learned scale of the lesion strand's 5′ end, against 69 of the 240 reference molecules.
 Without thresholds of their own, the `ATAP` and `ERFAP` posteriors of A-tailing and end repair fill-in annotate the call without filtering it.
 
 Each posterior is the probability that the call is a real mutation, so a lower value means a call more likely to be an artifact.
@@ -201,7 +206,6 @@ The call at position 100 is filtered as copied damage and end repair fill-in, th
 
 To check a threshold, run `chaff` on germline heterozygous calls from the same reads: they are real, so the share it filters estimates how often it filters real somatic calls.
 Where a matched normal or a replicate library exists, the somatic calls it shares are a second check.
-To reproduce the values of fgbio's `FilterSomaticVcf` instead, run with `--model fgbio`.
 
 On the simulated sample of the copied damage section, with a quarter of each kind of call at 2, 3, 5, or 10 alternate molecules, a threshold of 0.05 filters 1,427 of the 2,000 copied-damage calls and 23 of the 1,065 real C>T at CpG, and none of the 4,935 calls in other channels.
 That threshold filters 95% of the copied damage with 10 alternate molecules and 86% with 5, but only 40% with 2, where it also filters 6 of 253 real C>T at CpG:
@@ -229,11 +233,12 @@ The VCF/BCF and the BAM must be coordinate sorted, and neither needs an index.
 Each template counts once, and a read whose mate maps to the same contig needs the mate's CIGAR in its `MC` tag.
 Both ends of a template are measured for an FR pair, whose forward read starts at or before its reverse read's 5′ end; a read of any other pair knows only its own end.
 An option of a filter that `--filters` leaves out is a usage error, and so is `--ref` without `copied-damage`.
-A VCF that already declares an enabled filter's INFO or FILTER, from an earlier run of `chaff` or fgbio, is refused, so a FILTER never outlives the run that applied it; remove them first, as with `bcftools annotate -x`.
+A VCF that already declares an enabled filter's INFO or FILTER, from an earlier run, is refused, so a FILTER never outlives the run that applied it; remove them first, as with `bcftools annotate -x`.
 
 ## Development and Testing
 
 See the [contributing guide](./CONTRIBUTING.md) for more information.
+For compatibility with fgbio's `FilterSomaticVcf`, end repair fill-in and A-tailing write its INFO keys and FILTER names, `--model fgbio` reproduces its values, and the README examples run on its test data.
 
 ## References
 
