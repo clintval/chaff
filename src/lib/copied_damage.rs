@@ -37,7 +37,7 @@
 use crate::call::Genotype;
 use crate::classes::{Context, DamageClass, Strand};
 use crate::evidence::Molecule;
-use crate::model::Distance;
+use crate::model::{CopiedDamagePrior, Distance};
 use crate::read_end::{Distances, Score};
 
 /// The copied damage filter.
@@ -48,6 +48,9 @@ pub struct CopiedDamage {
     /// The decay scale in bases from the lesion strand's 5' end, the mean
     /// resynthesis length: learned by default.
     pub distance: Distance,
+    /// Where each call's artifact prior comes from under the `chaff` model:
+    /// the library's chance model by default.
+    pub prior: CopiedDamagePrior,
 }
 
 impl Default for CopiedDamage {
@@ -55,6 +58,7 @@ impl Default for CopiedDamage {
         Self {
             classes: vec![DamageClass::DEAMINATION, DamageClass::OXIDATION],
             distance: Distance::Learned,
+            prior: CopiedDamagePrior::Chance,
         }
     }
 }

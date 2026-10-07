@@ -75,7 +75,8 @@
 //! pseudo-positions at the stratum's learned fraction `π_s`, and the call
 //! takes the same share within its own depth bin, shrunk toward `π_p`.
 //! Chance explains every position with one change, since its rate is
-//! matched to them, so a one-molecule call keeps `π_s`.
+//! matched to them, so a one-molecule call keeps `π_s`, and
+//! [`model::CopiedDamagePrior::Learned`] keeps `π_s` for every call.
 //!
 //! Under the `fgbio` model the prior is fgbio's per call: an artifact prior of
 //! `1 - min((2 m)^2, 0.9999)`, where `m` is the call's alternate molecule

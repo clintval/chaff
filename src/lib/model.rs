@@ -42,6 +42,30 @@ impl fmt::Display for Model {
     }
 }
 
+/// Where copied damage takes each call's artifact prior from under the
+/// `chaff` model.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum CopiedDamagePrior {
+    /// On a BAM with single-strand consensus, the share of the library's
+    /// positions as deep, with as many duplex changes, that chance explains
+    /// (see [`crate::simplex`]); the learned fraction otherwise.
+    #[default]
+    Chance,
+    /// The fraction learned per sample and stratum from the calls, even on a
+    /// BAM with single-strand consensus, whose profile still fills the
+    /// metrics.
+    Learned,
+}
+
+impl fmt::Display for CopiedDamagePrior {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CopiedDamagePrior::Chance => write!(f, "chance"),
+            CopiedDamagePrior::Learned => write!(f, "learned"),
+        }
+    }
+}
+
 /// A filter's distance: learned from the calls, or fixed in bases.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum Distance {

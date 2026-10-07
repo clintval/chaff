@@ -30,7 +30,7 @@ use crate::copied_damage::{CopiedDamage, DamageSite};
 use crate::evidence::{Evidence, Molecule, PendingLibrary, PileupEvidence, PileupOptions};
 use crate::io::{add_filter, add_info, significant, vcf_float, VariantReader, VariantWriter};
 use crate::metrics::{null_fraction, write_metrics, StratumMetrics};
-use crate::model::{Distance, Model};
+use crate::model::{CopiedDamagePrior, Distance, Model};
 use crate::prior::{
     chance_prior, fgbio_artifact_prior, learn_artifact_fraction, learn_scale, posterior_mutation,
     BetaPrior, FILTER_PRIOR, STRATUM_PRIOR_STRENGTH,
@@ -118,6 +118,7 @@ impl FilterKind {
                 "reference",
                 "copied_damage_classes",
                 "copied_damage_distance",
+                "copied_damage_prior",
                 "copied_damage_threshold",
             ],
             FilterKind::ATailing => &["a_tailing_distance", "a_tailing_threshold"],
@@ -368,6 +369,9 @@ pub struct Annotation {
     pub posterior: Option<f64>,
     /// The artifact prior the posterior used, once known.
     pub prior: Option<f64>,
+    /// The artifact prior the library's chance model gives, for copied damage
+    /// in a profiled stratum, whichever prior the posterior used.
+    pub chance_prior: Option<f64>,
     /// The call's molecules with a base at the quality floor, as a library
     /// profile counts a position's.
     pub depth: u32,
@@ -581,6 +585,7 @@ fn score_call(
                 fgbio_prior,
                 posterior: None,
                 prior: None,
+                chance_prior: None,
                 depth,
                 changes: count(alt_base),
             });
@@ -724,12 +729,14 @@ struct Fractions {
 /// Learn the priors and fill in every annotation's posterior, returning the
 /// learned artifact fractions. Under the `chaff` model, copied damage with
 /// at least [`MIN_CHANCE_CHANGES`] alternate molecules takes each call's
-/// prior from its stratum's chance model in `chances`: the share chance
-/// explains at the call's depth, shrunk toward the share over every depth,
-/// itself shrunk toward the stratum's learned fraction.
+/// prior from its stratum's chance model in `chances`, unless `prior` asks
+/// for the learned one: the share chance explains at the call's depth, shrunk
+/// toward the share over every depth, itself shrunk toward the stratum's
+/// learned fraction.
 fn assign_posteriors(
     calls: &mut [Vec<Annotation>],
     model: Model,
+    prior: CopiedDamagePrior,
     chances: &BTreeMap<String, Chance>,
 ) -> Fractions {
     let mut filters: BTreeMap<FilterKind, Vec<f64>> = BTreeMap::new();
@@ -770,18 +777,25 @@ fn assign_posteriors(
         let changes = annotation.changes;
         let chance = chances
             .get(&annotation.stratum)
-            .filter(|_| annotation.kind == FilterKind::CopiedDamage)
-            .filter(|_| changes >= MIN_CHANCE_CHANGES);
-        let artifact_prior = match (model, chance) {
-            (Model::Chaff, Some(chance)) => {
-                fractions.chance_calls += 1;
-                let (expected, observed) = chance.at(changes);
-                let pooled = chance_prior(expected, observed, learned);
-                let (expected, observed) = chance.at_depth(annotation.depth, changes);
-                chance_prior(expected, observed, pooled)
+            .filter(|_| model == Model::Chaff && annotation.kind == FilterKind::CopiedDamage);
+        annotation.chance_prior = chance.map(|chance| {
+            if changes < MIN_CHANCE_CHANGES {
+                return learned;
             }
-            (Model::Chaff, None) => learned,
-            (Model::Fgbio, _) => annotation.fgbio_prior,
+            let (expected, observed) = chance.at(changes);
+            let pooled = chance_prior(expected, observed, learned);
+            let (expected, observed) = chance.at_depth(annotation.depth, changes);
+            chance_prior(expected, observed, pooled)
+        });
+        let artifact_prior = match (model, prior, annotation.chance_prior) {
+            (Model::Fgbio, _, _) => annotation.fgbio_prior,
+            (Model::Chaff, CopiedDamagePrior::Chance, Some(chance))
+                if changes >= MIN_CHANCE_CHANGES =>
+            {
+                fractions.chance_calls += 1;
+                chance
+            }
+            (Model::Chaff, _, _) => learned,
         };
         annotation.prior = Some(artifact_prior);
         annotation.posterior = Some(posterior_mutation(llr, artifact_prior));
@@ -946,12 +960,17 @@ pub fn filter_vcf_report(
         .map(|(stratum, profile)| (stratum.clone(), profile.chance()))
         .collect();
     log_chance(&chances);
-    let fractions = assign_posteriors(&mut calls, options.model, &chances);
-    if library.is_some() {
-        info!(
+    let prior = options.copied_damage.prior;
+    let fractions = assign_posteriors(&mut calls, options.model, prior, &chances);
+    match (library.is_some(), prior) {
+        (true, CopiedDamagePrior::Chance) => info!(
             "{} took a copied-damage prior from the library's chance model",
             plural(fractions.chance_calls, "call")
-        );
+        ),
+        (true, CopiedDamagePrior::Learned) => info!(
+            "copied damage keeps the priors learned from the calls, as --copied-damage-prior learned asks, and the library's chance model fills only the metrics"
+        ),
+        (false, _) => {}
     }
 
     let mut out_header = header.clone();
@@ -1152,7 +1171,7 @@ fn metrics_rows(
             }
             None => row.expected_mutations += 1.0,
         }
-        if let (Some(prior), Some(_)) = (annotation.prior, row.change_rate) {
+        if let Some(prior) = annotation.chance_prior {
             let (sum, calls) = priors.entry(key).or_default();
             *sum += prior;
             *calls += 1;
@@ -1929,9 +1948,11 @@ mod tests {
 
     /// A library whose duplex C>T changes at CpG fall together by chance at
     /// nearly every position with two of them makes two-molecule calls
-    /// there artifacts, whatever their few molecules say; a library where
-    /// chance explains none of them leaves the learned fraction in charge,
-    /// and so does a stratum it has no profile for.
+    /// there artifacts, whatever their few molecules say, unless
+    /// `--copied-damage-prior learned` keeps the learned fraction, with the
+    /// same metrics; a library where chance explains none of them leaves the
+    /// learned fraction in charge, and so does a stratum it has no profile
+    /// for.
     #[test]
     fn test_a_library_profile_sets_copied_damage_priors_by_chance() {
         use crate::simplex::{LibraryProfile, StratumProfile};
@@ -1966,13 +1987,15 @@ mod tests {
             library.strata.insert("C>T:CpG".to_string(), stratum);
             library
         };
-        let run = |library: Option<LibraryProfile>| {
+        let run_with = |library: Option<LibraryProfile>, prior: CopiedDamagePrior| {
             let mut table = table.clone();
             if let Some(library) = library {
                 table.set_library(library);
             }
             let output = dir.path().join("out.vcf");
             let mut reference = Reference::open(&reference).unwrap();
+            let mut options = options.clone();
+            options.copied_damage.prior = prior;
             let rows =
                 filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
             let (header, records) = read_records(&output);
@@ -1989,6 +2012,7 @@ mod tests {
                 description,
             )
         };
+        let run = |library| run_with(library, CopiedDamagePrior::Chance);
         let (learned, learned_real, learned_text) = run(None);
         assert_eq!(learned.chance_fraction, None);
         assert_eq!(learned.change_rate, None);
@@ -2008,6 +2032,23 @@ mod tests {
         assert!((damaged.conversion_ratio.unwrap() - 4.97).abs() < 1e-9);
         assert!(damaged.chance_excess.unwrap() < 0.05, "{damaged:?}");
         assert!(damaged_text.contains("chance explains"), "{damaged_text}");
+
+        let kept = run_with(
+            Some(profile([607, 303, 76, 14])),
+            CopiedDamagePrior::Learned,
+        );
+        let profiled = |row: &StratumMetrics| {
+            (
+                row.change_rate,
+                row.single_strand_rate,
+                row.conversion_ratio,
+                row.chance_fraction,
+                row.chance_excess,
+            )
+        };
+        assert_eq!(profiled(&kept.0), profiled(&damaged));
+        assert!((kept.1 - learned_real).abs() < 1e-6, "{kept:?}");
+        assert_eq!(kept.2, learned_text);
 
         let (clean, clean_real, _) = run(Some(profile([980, 10, 10, 0])));
         assert!(clean.chance_fraction.unwrap() < damaged.chance_fraction.unwrap() / 2.0);
@@ -2043,11 +2084,17 @@ mod tests {
             fgbio_prior: 0.5,
             posterior: None,
             prior: None,
+            chance_prior: None,
             depth,
             changes: 2,
         };
         let mut calls = vec![vec![call(200)], vec![call(2000)], vec![call(8000)]];
-        assign_posteriors(&mut calls, Model::Chaff, &chances);
+        assign_posteriors(
+            &mut calls,
+            Model::Chaff,
+            CopiedDamagePrior::Chance,
+            &chances,
+        );
         let priors: Vec<f64> = calls.iter().map(|c| c[0].prior.unwrap()).collect();
         assert!(priors[0] < 0.2, "{priors:?}");
         assert!(priors[1] > 0.85, "{priors:?}");
