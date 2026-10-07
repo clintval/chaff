@@ -19,7 +19,8 @@ pixi exec \
 
 ## Quick Start
 
-For a hybrid-capture Duplex Sequencing library, made with enzymatic fragmentation, a combined end repair and A-tailing step, and UMI-bearing adapters, score somatic calls for copied damage against the duplex consensus BAM:
+The tool `chaff` takes a VCF of somatic calls, the BAM they were called from, and the reference FASTA, which needs a `.fai`.
+For a hybrid-capture Duplex Sequencing library, made with enzymatic fragmentation, a combined end repair and A-tailing step, and UMI-bearing adapters, score the calls for copied damage against the duplex consensus BAM:
 
 ```console
 chaff \
@@ -33,7 +34,6 @@ chaff \
     --output calls.chaff.vcf.gz
 ```
 
-The reference needs a `.fai` beside it.
 The calls land in `calls.chaff.vcf.gz`, each scored call annotated in INFO and the calls likely to be copied damage filtered, and the per-sample metrics in `tumor.chaff.tsv`:
 
 ```console
@@ -48,40 +48,11 @@ gzip -dc calls.chaff.vcf.gz | grep -v '^#' | cut -f 2,4,5,7,8 | column -t
 500  C    G  .                     .
 ```
 
-The sections below explain what each filter scores, how to choose filters, and how strictly to filter.
-
-## Outputs
-
-Each filter compares where a call's alternate molecules sit on their templates with where the reference molecules sit, then writes the posterior probability that the call is real, given how common the artifact is in that sample.
-A low posterior marks a likely artifact, and a threshold filters calls at or below it, through these INFO keys and FILTERs:
-
-| Name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | Stands for | Meaning |
-| --- | --- | --- |
-| `CDAP` | Copied Damage Artifact Posterior | The posterior probability that the call is a real mutation rather than damage copied onto both strands; a low value means likely copied damage. |
-| `CDLR` | Copied Damage Likelihood Ratio | The log10 likelihood ratio of copied damage to a real mutation; a high value favors copied damage. |
-| `CDAC` | Copied Damage Alternate Counts | The alternate molecules within the decay scale of the lesion strand's 5′ end, and all alternate molecules measured. |
-| `CDRC` | Copied Damage Reference Counts | The same two counts for the reference molecules. |
-| `ERFAP` | End Repair Fill-in Artifact Posterior | The posterior probability that the call is a real mutation rather than an end repair fill-in error; a low value means a likely error. |
-| `ATAP` | A-Tailing Artifact Posterior | The posterior probability that the call is a real mutation rather than an A-tailing artifact; a low value means a likely artifact. |
-| `CopiedDamageArtifact` | A FILTER | Applied where `CDAP` is at or below the copied damage threshold. |
-| `EndRepairFillInArtifact` | A FILTER | Applied where `ERFAP` is at or below the end repair fill-in threshold. |
-| `ATailingArtifact` | A FILTER | Applied where `ATAP` is at or below the A-tailing threshold. |
-
-The call at position 100 above is a C>A, which copied damage reads as a G>T lesion, an oxidized G, on the reverse strand.
-Its `CDAP` of 0.022, at or below the threshold of 0.05, puts the FILTER on it, and its `CDAC` of 3,3 and `CDRC` of 72,240 say that all 3 of its alternate molecules sit within the learned scale of the lesion strand's 5′ end, where 72 of its 240 reference molecules do.
-The tool learns per sample how common each artifact is and how far it reaches, so most runs need only the filters and a threshold, and the model behind the posteriors is described in the crate documentation, in [`src/lib/mod.rs`](src/lib/mod.rs).
-
-## Inputs
-
-The tool `chaff` reads three files for one sample, one library:
-
-- **Calls:** a coordinate-sorted VCF or BCF of somatic SNVs; each filter scores those genotyped heterozygous (0/1) in `--sample`.
-- **Reads:** a coordinate-sorted BAM of the sample's reads, mapped as pairs, with each read's mate CIGAR in its `MC` tag. For a Duplex Sequencing library, give the duplex consensus BAM; for a library without duplex tags, give the single-strand consensus BAM, or the raw reads with duplicates marked. Each template, one read pair, counts as one molecule.
-- **Reference:** the FASTA the reads were mapped to, with its `.fai`, which copied damage needs for CpG context.
+The sections below explain how damage becomes a call, what each filter scores, how to choose filters and how strictly to filter, and what each output means.
 
 ## How DNA Damage Becomes a Variant Call
 
-A *template* is one DNA fragment as its read pair sequences it, and its *template ends* are its outermost bases, the 5′ ends of its two strands.
+A *template* is one DNA fragment as its read pair sequences it, counted as one *molecule*, and its *template ends* are its outermost bases, the 5′ ends of its two strands.
 A *lesion* is a damaged base on one strand that a polymerase copies as another base:
 
 - **5-methylcytosine deaminates to thymine**, so a methylated CpG reads C>T.
@@ -90,9 +61,14 @@ A *lesion* is a damaged base on one strand that a polymerase copies as another b
 
 Duplex Sequencing [[2]](#references) ligates UMI-bearing adapters to both ends of each fragment and keeps a base only where its two strands agree.
 A duplex consensus therefore removes an error on one strand, such as a lesion left uncopied, but not damage copied onto both strands before the adapters were ligated.
+End repair's polymerase does that copying before the adapters are ligated: it extends each recessed 3′ end across the 5′ overhang opposite it, and from any nick, and copies a lesion it passes onto the partner strand, so this *copied damage* reads as a real change on both strands:
+
+![A lesion, a methylated C at a CpG deaminated to T, sits near one strand's 5′ end; end repair fill-in copies it onto the partner strand as an A; UMI-bearing adapters are ligated after the copy; and the duplex consensus of both strands agrees on a C>T.](.github/img/copied-damage.svg)
 
 ## The Filters
 
+Each filter compares where a call's alternate molecules sit on their templates with where the reference molecules sit, then writes the posterior probability that the call is real, given how common the artifact is in that sample.
+A low posterior marks a likely artifact, and a threshold filters calls at or below it.
 Each filter models one library-preparation step that leaves an artifact near a known end of the fragment:
 
 ![One fragment with the end each artifact sits near: copied damage, a methylated C deaminated to T and its copy, near the lesion strand's 5′ end, end repair fill-in errors in the new bases near the extended strand's 3′ end, and an A that fills a base end repair removed at the last base of a 3′ end.](.github/img/reference-points.svg)
@@ -104,18 +80,15 @@ A-tailing scores those whose alternate base is A or T, and end repair fill-in al
 
 ### Copied Damage
 
-![A lesion, a methylated C at a CpG deaminated to T, sits near one strand's 5′ end; end repair fill-in copies it onto the partner strand as an A; UMI-bearing adapters are ligated after the copy; and the duplex consensus of both strands agrees on a C>T.](.github/img/copied-damage.svg)
-
-End repair's polymerase extends each recessed 3′ end across the 5′ overhang opposite it, and from any nick, copying a lesion onto the partner strand before the UMI-bearing adapters are ligated.
-Both strands then carry the change, so the duplex consensus agrees on it, which makes this the filter for Duplex Sequencing.
+Copied damage carries its change on both strands, so the duplex consensus agrees on it, which makes this the filter for Duplex Sequencing.
 Fragmenting with a restriction enzyme that leaves blunt ends, as NanoSeq does [[3]](#references), or repairing lesions before end repair, as Duplex-Repair does [[4]](#references), keeps lesions from being copied.
 
 - **Measured from:** the 5′ end of the *lesion strand*, the strand that carries the damaged base.
 - **Scored with:** a decay whose scale is learned per sample, from a default of 30 bp.
-- **Writes:** `CDAP`, `CDLR`, `CDAC`, `CDRC`, and the FILTER `CopiedDamageArtifact`.
+- **Writes:** the posterior `CDAP`, the likelihood ratio `CDLR`, the molecule counts `CDAC` and `CDRC`, and the FILTER `CopiedDamageArtifact`.
 - **Use it when:** UMI-bearing adapters are ligated after any polymerase fills in ends, nicks, or gaps, as in Duplex Sequencing; it needs the reference, `--ref`.
 
-The copy runs from the partner's recessed end toward the lesion strand's 5′ end, so copied lesions sit near that end, while a real mutation's molecules sit wherever the reference molecules do.
+As the copied damage diagram shows, the copy runs from the partner's recessed end toward the lesion strand's 5′ end, so copied lesions sit near that end, while a real mutation's molecules sit wherever the reference molecules do.
 On the simulated sample in the figure, the tool learns a scale of 30.3 bp, against a true 30 bp, and 65% of the copied damage's alternate molecules sit within it, against 17% of the real mutations' and of the reference molecules:
 
 ![Distances of alternate and reference molecules from the lesion strand's 5′ and 3′ ends: copied damage piles up near the 5′ end and avoids the 3′ end, while real mutations follow the reference molecules.](.github/img/copied-damage-ends.png)
@@ -133,7 +106,7 @@ A call near an end can be flagged by both filters, as the call at position 100 i
 
 - **Measured from:** the 3′ end of the strand each template was copied from, the strand its read 1 copies: forward for an F1R2 pair and reverse for an F2R1 pair.
 - **Scored with:** a decay whose scale is learned per sample, from a default of 15 bp.
-- **Writes:** `ERFAP` and the FILTER `EndRepairFillInArtifact`.
+- **Writes:** the posterior `ERFAP` and the FILTER `EndRepairFillInArtifact`.
 - **Use it when:** a polymerase end-repaired the library before adapter ligation, as in most ligation preps after mechanical or enzymatic fragmentation, and its reads are not a duplex consensus.
 
 ### A-Tailing
@@ -146,7 +119,7 @@ Only one strand carries it, so a duplex consensus mostly removes it.
 
 - **Measured from:** the template end where the added A reads, the left end for a T and the right end for an A.
 - **Scored with:** a 2 bp window, since the artifact changes only the last base or two of a 3′ end.
-- **Writes:** `ATAP` and the FILTER `ATailingArtifact`.
+- **Writes:** the posterior `ATAP` and the FILTER `ATailingArtifact`.
 - **Use it when:** the library was A-tailed for T-overhang adapters, unlike blunt-end ligation or transposase (tagmentation) preps, and its reads are not a duplex consensus.
 
 ### Choosing Filters for Your Library
@@ -265,6 +238,26 @@ That threshold filters 95% of the copied damage with 10 alternate molecules and 
 The open circles show `--model fgbio`, which uses fgbio's per-call prior from the alternate allele fraction: at the same threshold it filters 1,998 of the copied-damage calls, but also 82%, 60%, 24%, and 5.4% of the real C>T at CpG with 2, 3, 5, and 10 alternate molecules, against at most 3.3% under the `chaff` model:
 
 ![The SBS96 spectrum of the simulated sample before and after filtering, where the copied damage at CpG C>T mostly leaves and the other channels stay, and the share of copied damage filtered against the share of real C>T at CpG filtered, by alternate molecules per call and model.](.github/img/copied-damage-filtering.png)
+
+## What `chaff` Writes
+
+Each filter writes its posteriors and counts into the INFO of the calls it scores, and its FILTER onto the calls at or below its threshold:
+
+| Name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | Stands for | Meaning |
+| --- | --- | --- |
+| `CDAP` | Copied Damage Artifact Posterior | The posterior probability that the call is a real mutation rather than damage copied onto both strands; a low value means likely copied damage. |
+| `CDLR` | Copied Damage Likelihood Ratio | The log10 likelihood ratio of copied damage to a real mutation; a high value favors copied damage. |
+| `CDAC` | Copied Damage Alternate Counts | The alternate molecules within the decay scale of the lesion strand's 5′ end, and all alternate molecules measured. |
+| `CDRC` | Copied Damage Reference Counts | The same two counts for the reference molecules. |
+| `ERFAP` | End Repair Fill-in Artifact Posterior | The posterior probability that the call is a real mutation rather than an end repair fill-in error; a low value means a likely error. |
+| `ATAP` | A-Tailing Artifact Posterior | The posterior probability that the call is a real mutation rather than an A-tailing artifact; a low value means a likely artifact. |
+| `CopiedDamageArtifact` | A FILTER | Applied where `CDAP` is at or below the copied damage threshold. |
+| `EndRepairFillInArtifact` | A FILTER | Applied where `ERFAP` is at or below the end repair fill-in threshold. |
+| `ATailingArtifact` | A FILTER | Applied where `ATAP` is at or below the A-tailing threshold. |
+
+The call at position 100 in the quick start is a C>A, which copied damage reads as a G>T lesion, an oxidized G, on the reverse strand.
+Its `CDAP` of 0.022, at or below the threshold of 0.05, puts the FILTER on it, and its `CDAC` of 3,3 and `CDRC` of 72,240 say that all 3 of its alternate molecules sit within the learned scale of the lesion strand's 5′ end, where 72 of its 240 reference molecules do.
+The tool learns per sample how common each artifact is and how far it reaches, so most runs need only the filters and a threshold, and the model behind the posteriors is described in the crate documentation, in [`src/lib/mod.rs`](src/lib/mod.rs).
 
 ## Options
 
