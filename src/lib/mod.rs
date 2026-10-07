@@ -41,7 +41,9 @@
 //!   and an incongruent one `ln(e) - ln((1 - e)(1 - f) + e f)`.
 //!
 //! A call with alternate but no reference molecules, or for a decay without a
-//! measured alternate molecule, gets no ratio and no posterior.
+//! measured alternate molecule, gets no ratio and no posterior, and so does an
+//! A-tailing call without one under the `chaff` model, which would otherwise
+//! take its prior alone.
 //!
 //! ## Priors and posteriors
 //!
@@ -128,7 +130,9 @@
 //! - **Base errors.** A base's error probability is capped at 0.75, a random
 //!   base's, so a Q0 or Q1 base cannot zero a likelihood.
 //! - **Missing evidence.** A call with alternate but no reference molecules
-//!   gets no INFO value; fgbio writes `NaN`.
+//!   gets no INFO value; fgbio writes `NaN`. Under the `chaff` model, an
+//!   A-tailing call without alternate molecules gets none either, where fgbio
+//!   writes its prior's posterior.
 //! - **Missing genotypes.** An SNV whose genotype is `.` or absent, as many
 //!   somatic callers write it, is scored as heterozygous for its first
 //!   alternate allele; fgbio scores only called heterozygous genotypes.

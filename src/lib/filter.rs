@@ -513,11 +513,13 @@ fn score_call(
                     ),
                 })
             }
-            FilterKind::ATailing => Some((
-                substitution.clone(),
-                options.a_tailing.score(molecules, ref_base, alt_base),
-                None,
-            )),
+            FilterKind::ATailing => {
+                let mut score = options.a_tailing.score(molecules, ref_base, alt_base);
+                if options.model == Model::Chaff && score.alt_molecules == 0 {
+                    score.log_likelihood_ratio = None;
+                }
+                Some((substitution.clone(), score, None))
+            }
             FilterKind::CopiedDamage => {
                 match (options.copied_damage.classify(ref_base, alt_base), context) {
                     (Some((class, strand)), Some((prev, base, next))) => {
@@ -1136,6 +1138,38 @@ mod tests {
         assert_eq!(rows.len(), 2);
         let strata: Vec<&str> = rows.iter().map(|r| r.stratum.as_str()).collect();
         assert_eq!(strata, vec!["C>T:CpG", "C>T:non-CpG"]);
+    }
+
+    /// Without an alternate molecule, A-tailing has no evidence, so under the
+    /// `chaff` model the call gets no posterior and is never filtered, while
+    /// the `fgbio` model keeps fgbio's posterior from its prior alone.
+    #[test]
+    fn test_a_tailing_without_an_alternate_molecule_has_no_chaff_posterior() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(10, &["G", "T"], vec![gt("tumor", "0/1")]));
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let mut table = MoleculeTable::new();
+        let molecules: Vec<Molecule> = (0..20).map(|d| Molecule::new(b'G', 30, d, 90)).collect();
+        table.insert("chr1", 10, molecules);
+        for (model, scored) in [(Model::Chaff, false), (Model::Fgbio, true)] {
+            let options = FilterOptions {
+                filters: vec![FilterKind::ATailing],
+                model,
+                a_tailing_threshold: Some(1.0),
+                ..FilterOptions::default()
+            };
+            let output = dir.path().join("out.vcf");
+            filter_vcf(&input, &output, &mut table.clone(), None, &options).unwrap();
+            let (_, records) = read_records(&output);
+            assert_eq!(
+                float(&records[0], ATailing::INFO).is_some(),
+                scored,
+                "{model}"
+            );
+            let filtered = records[0].filters().as_ref().contains(ATailing::FILTER);
+            assert_eq!(filtered, scored, "{model}");
+        }
     }
 
     /// An SNV whose genotype calls nothing is scored as heterozygous, while a

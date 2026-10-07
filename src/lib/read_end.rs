@@ -34,8 +34,9 @@ use crate::prior::ln_add_exp;
 pub struct Score {
     /// `ln P(molecules | artifact) - ln P(molecules | mutation)`, always
     /// finite, or `None` when alternate molecules are seen but no reference
-    /// molecule can calibrate the null, or, for the decay models, when no
-    /// alternate molecule is measured.
+    /// molecule can calibrate the null, or, for the decay models and for
+    /// A-tailing under the `chaff` model, when no alternate molecule is
+    /// measured.
     pub log_likelihood_ratio: Option<f64>,
     /// Alternate molecules measured.
     pub alt_molecules: u32,
