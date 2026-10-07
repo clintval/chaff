@@ -56,6 +56,8 @@
 //! are germline and count toward neither model.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::fs::File;
+use std::num::NonZero;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -65,6 +67,7 @@ use noodles::bam;
 use noodles::sam::alignment::record::cigar::op::Kind;
 use noodles::sam::alignment::record::data::field::value::Array;
 use noodles::sam::alignment::record::data::field::Value;
+use noodles_bgzf as bgzf;
 
 use crate::classes::{complement, Context, DamageClass};
 use crate::evidence::PileupOptions;
@@ -85,6 +88,10 @@ pub const MIN_CHANCE_CHANGES: u32 = 2;
 /// The records a library profile reads before it decides the BAM has no
 /// single-strand consensus.
 const TAG_PROBE: u64 = 1_000;
+
+/// The most threads that decompress the BAM a library profile reads, as many
+/// as the machine offers up to this.
+const MAX_DECOMPRESSION_THREADS: NonZero<usize> = NonZero::new(4).unwrap();
 
 /// The reference bases a library profile holds in memory at once.
 const REFERENCE_CHUNK: usize = 1 << 20;
@@ -1003,8 +1010,9 @@ fn integers(value: Value<'_>) -> Option<Vec<i64>> {
 }
 
 /// Profile the single-strand and duplex changes of a coordinate-sorted BAM,
-/// or `None` when its records carry no single-strand consensus, carry it
-/// unaligned, or `stop` is set before the last is read.
+/// decompressed on up to four threads, or `None`
+/// when its records carry no single-strand consensus, carry it unaligned, or
+/// `stop` is set before the last is read.
 pub fn profile_library(
     bam: &Path,
     reference: &Path,
@@ -1012,9 +1020,11 @@ pub fn profile_library(
     options: &PileupOptions,
     stop: &AtomicBool,
 ) -> Result<Option<LibraryProfile>> {
-    let mut reader = bam::io::reader::Builder
-        .build_from_path(bam)
-        .with_context(|| format!("failed to open BAM: {bam:?}"))?;
+    let file = File::open(bam).with_context(|| format!("failed to open BAM: {bam:?}"))?;
+    let workers = std::thread::available_parallelism()
+        .map_or(NonZero::<usize>::MIN, |n| n.min(MAX_DECOMPRESSION_THREADS));
+    let decoder = bgzf::io::MultithreadedReader::with_worker_count(workers, file);
+    let mut reader = bam::io::Reader::from(decoder);
     let header = reader
         .read_header()
         .context("failed to read the BAM header")?;
