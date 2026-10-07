@@ -26,16 +26,17 @@ use streampile::{RecordSource, StreamingPileupBuilder};
 use crate::call::Genotype;
 use crate::classes::{sbs6, Context};
 use crate::copied_damage::{CopiedDamage, DamageSite};
-use crate::evidence::{Evidence, Molecule, PileupEvidence, PileupOptions};
+use crate::evidence::{Evidence, Molecule, PendingLibrary, PileupEvidence, PileupOptions};
 use crate::io::{add_filter, add_info, significant, vcf_float, VariantReader, VariantWriter};
 use crate::metrics::{null_fraction, write_metrics, StratumMetrics};
 use crate::model::{Distance, Model};
 use crate::prior::{
-    fgbio_artifact_prior, learn_artifact_fraction, learn_scale, posterior_mutation, BetaPrior,
-    FILTER_PRIOR, STRATUM_PRIOR_STRENGTH,
+    chance_prior, fgbio_artifact_prior, learn_artifact_fraction, learn_scale, posterior_mutation,
+    BetaPrior, FILTER_PRIOR, STRATUM_PRIOR_STRENGTH,
 };
 use crate::read_end::{is_filtered, ATailing, Distances, EndRepairFillIn, Score};
 use crate::reference::Reference;
+use crate::simplex::{profile_library, Chance, LibraryProfile};
 
 /// One of the artifact filters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ValueEnum)]
@@ -185,6 +186,12 @@ impl FilterOptions {
         }
     }
 
+    /// Whether copied damage would score with a library's chance model: under
+    /// the `chaff` model, when it runs.
+    fn takes_chance(&self) -> bool {
+        self.model == Model::Chaff && self.enabled(FilterKind::CopiedDamage)
+    }
+
     fn threshold_text(&self, kind: FilterKind) -> String {
         match kind.threshold(self) {
             Some(t) => format!("at or below a posterior of {t}"),
@@ -193,9 +200,15 @@ impl FilterOptions {
     }
 
     /// Add the INFO and FILTER lines of every enabled filter to a header, with
-    /// the distances the filters scored with.
-    pub fn add_header_lines(&self, header: &mut vcf::Header, scales: &Scales) {
+    /// the distances the filters scored with and whether copied damage used
+    /// the library's chance model.
+    pub fn add_header_lines(&self, header: &mut vcf::Header, scales: &Scales, chance: bool) {
         let prior = self.prior_text();
+        let copied_prior = if chance {
+            "an artifact prior from the share of the library's positions with as many duplex changes that chance explains, per sample and stratum"
+        } else {
+            prior
+        };
         let decay = |distance: Distance, scale: f64, end: &str| {
             let learned = match distance {
                 Distance::Learned => ", learned from the calls,",
@@ -225,7 +238,7 @@ impl FilterOptions {
                 CopiedDamage::INFO_POSTERIOR,
                 Number::Count(1),
                 Type::Float,
-                &format!("Posterior probability that the call is a real mutation rather than damage copied onto both strands, with {model} and {prior}."),
+                &format!("Posterior probability that the call is a real mutation rather than damage copied onto both strands, with {model} and {copied_prior}."),
             );
             add_info(
                 header,
@@ -343,6 +356,8 @@ pub struct Annotation {
     pub fgbio_prior: f64,
     /// The posterior probability of a true mutation, once known.
     pub posterior: Option<f64>,
+    /// The artifact prior the posterior used, once known.
+    pub prior: Option<f64>,
 }
 
 /// The index of the sample under test, resolved as fgbio does: the named
@@ -521,6 +536,7 @@ fn score_call(
                 distances,
                 fgbio_prior,
                 posterior: None,
+                prior: None,
             });
         }
     }
@@ -622,8 +638,15 @@ struct Fractions {
 }
 
 /// Learn the priors and fill in every annotation's posterior, returning the
-/// learned artifact fractions.
-fn assign_posteriors(calls: &mut [Vec<Annotation>], model: Model) -> Fractions {
+/// learned artifact fractions. Under the `chaff` model with a library
+/// profile, copied damage takes each call's prior from the library's chance
+/// model at the call's alternate molecules, shrunk toward its stratum's
+/// learned fraction.
+fn assign_posteriors(
+    calls: &mut [Vec<Annotation>],
+    model: Model,
+    library: Option<&LibraryProfile>,
+) -> Fractions {
     let mut filters: BTreeMap<FilterKind, Vec<f64>> = BTreeMap::new();
     let mut strata: BTreeMap<Stratum, Vec<f64>> = BTreeMap::new();
     for annotation in calls.iter().flatten() {
@@ -650,14 +673,28 @@ fn assign_posteriors(calls: &mut [Vec<Annotation>], model: Model) -> Fractions {
         })
         .collect();
     let fractions = Fractions { filters, strata };
+    let mut chances: BTreeMap<String, Option<Chance>> = BTreeMap::new();
     for annotation in calls.iter_mut().flatten() {
         let Some(llr) = annotation.score.log_likelihood_ratio else {
             continue;
         };
-        let artifact_prior = match model {
-            Model::Chaff => fractions.strata[&(annotation.kind, annotation.stratum.clone())],
-            Model::Fgbio => annotation.fgbio_prior,
+        let learned = fractions.strata[&(annotation.kind, annotation.stratum.clone())];
+        let chance = match (model, annotation.kind, library) {
+            (Model::Chaff, FilterKind::CopiedDamage, Some(library)) => chances
+                .entry(annotation.stratum.clone())
+                .or_insert_with(|| library.stratum(&annotation.stratum).map(|s| s.chance()))
+                .as_ref(),
+            _ => None,
         };
+        let artifact_prior = match (model, chance) {
+            (Model::Chaff, Some(chance)) => {
+                let (expected, observed) = chance.at(annotation.score.alt_molecules);
+                chance_prior(expected, observed, learned)
+            }
+            (Model::Chaff, None) => learned,
+            (Model::Fgbio, _) => annotation.fgbio_prior,
+        };
+        annotation.prior = Some(artifact_prior);
         annotation.posterior = Some(posterior_mutation(llr, artifact_prior));
     }
     fractions
@@ -758,10 +795,16 @@ pub fn filter_vcf(
     info!("scored {} calls of sample {sample}", calls.len());
 
     let scales = score_decays(&mut calls, options);
-    let fractions = assign_posteriors(&mut calls, options.model);
+    let library = evidence.library()?;
+    let chance = library.is_some() && options.takes_chance();
+    let library = library.filter(|_| chance);
+    if let Some(library) = &library {
+        log_chance(library);
+    }
+    let fractions = assign_posteriors(&mut calls, options.model, library.as_ref());
 
     let mut out_header = header.clone();
-    options.add_header_lines(&mut out_header, &scales);
+    options.add_header_lines(&mut out_header, &scales, chance);
     let mut writer = VariantWriter::create(output)?;
     writer.write_header(&out_header)?;
     let mut reader = VariantReader::open(input)?;
@@ -777,7 +820,14 @@ pub fn filter_vcf(
     }
     writer.finish()?;
 
-    let rows = metrics_rows(&sample, &calls, &fractions, &scales, options);
+    let rows = metrics_rows(
+        &sample,
+        &calls,
+        &fractions,
+        &scales,
+        options,
+        library.as_ref(),
+    );
     for row in &rows {
         info!(
             "{} {}: {} calls, artifact fraction {}, {} filtered, {} of {} alternate molecules congruent",
@@ -794,6 +844,26 @@ pub fn filter_vcf(
     Ok(rows)
 }
 
+/// Log each stratum's chance model: how much of the library's positions
+/// with two and three changes chance explains.
+fn log_chance(library: &LibraryProfile) {
+    for (stratum, profile) in &library.strata {
+        let chance = profile.chance();
+        let shown: Vec<String> = (1..=3)
+            .map(|k| {
+                let (expected, observed) = chance.at(k);
+                format!("{expected:.1} of {observed} with {k}")
+            })
+            .collect();
+        info!(
+            "copied-damage {stratum}: {:.3e} changes per molecule by chance, dispersion {:.3}; chance explains {} change(s)",
+            chance.rate,
+            chance.dispersion,
+            shown.join(", ")
+        );
+    }
+}
+
 /// Pool every annotation into one metrics row per filter and stratum.
 fn metrics_rows(
     sample: &str,
@@ -801,9 +871,11 @@ fn metrics_rows(
     fractions: &Fractions,
     scales: &Scales,
     options: &FilterOptions,
+    library: Option<&LibraryProfile>,
 ) -> Vec<StratumMetrics> {
     let learned = options.model == Model::Chaff;
     let mut rows: BTreeMap<Stratum, (StratumMetrics, Vec<(u32, f64)>)> = BTreeMap::new();
+    let mut priors: BTreeMap<Stratum, (f64, u64)> = BTreeMap::new();
     for annotation in calls.iter().flatten() {
         let key = (annotation.kind, annotation.stratum.clone());
         let (row, trials) = rows.entry(key.clone()).or_insert_with(|| {
@@ -819,6 +891,18 @@ fn metrics_rows(
                     .flatten(),
                 distance: scales.of(annotation.kind),
                 ..StratumMetrics::default()
+            };
+            let row = match (
+                annotation.kind,
+                library.and_then(|l| l.stratum(&annotation.stratum)),
+            ) {
+                (FilterKind::CopiedDamage, Some(profile)) => StratumMetrics {
+                    change_rate: profile.change_rate(),
+                    single_strand_rate: profile.single_strand_rate(),
+                    conversion_ratio: profile.conversion_ratio(),
+                    ..row
+                },
+                _ => row,
             };
             (row, Vec::new())
         });
@@ -839,9 +923,21 @@ fn metrics_rows(
                 row.filtered += 1;
             }
         }
+        if let (Some(prior), Some(_)) = (annotation.prior, row.change_rate) {
+            let (sum, calls) = priors.entry(key).or_default();
+            *sum += prior;
+            *calls += 1;
+        }
     }
-    rows.into_values()
-        .map(|(row, trials)| row.finish(&trials))
+    rows.into_iter()
+        .map(|(key, (row, trials))| {
+            let chance_fraction = priors.get(&key).map(|(sum, calls)| sum / *calls as f64);
+            StratumMetrics {
+                chance_fraction,
+                ..row
+            }
+            .finish(&trials)
+        })
         .collect()
 }
 
@@ -888,7 +984,28 @@ pub fn run_filter(args: &FilterArgs) -> Result<()> {
         ),
         error => error.into(),
     })?;
-    run_filter_on(args, builder)
+    let options = &args.options;
+    let reference = match &args.reference {
+        Some(reference) if options.takes_chance() => reference,
+        _ => return run_filter_on(args, builder),
+    };
+    std::thread::scope(|scope| {
+        let profiling = scope.spawn(|| {
+            profile_library(
+                &args.bam,
+                reference,
+                &options.copied_damage.classes,
+                &args.pileup,
+            )
+        });
+        let pending: PendingLibrary<'_> = Box::new(move || {
+            profiling
+                .join()
+                .map_err(|_| anyhow!("profiling the BAM's single-strand consensus panicked"))?
+        });
+        let mut evidence = PileupEvidence::new(builder, &args.pileup).with_library(pending);
+        run_filter_with(args, &mut evidence)
+    })
 }
 
 #[cfg(test)]
@@ -1359,5 +1476,177 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("reference"), "{error}");
+    }
+
+    /// A duplex BAM whose reads carry both strands' single-strand consensus
+    /// is profiled beside the calls: its copied damage takes the chance prior
+    /// and its metrics the library's rates, while the same reads without the
+    /// tags score as before.
+    #[test]
+    fn test_a_duplex_bam_with_single_strand_consensus_is_profiled() {
+        use noodles::sam::alignment::record::data::field::Tag;
+        use noodles::sam::alignment::record_buf::data::field::Value as Field;
+        use streampile::testing::{Pair, SamBuilder};
+        let dir = tempfile::tempdir().unwrap();
+        let sequence = "ACGTTCAA".repeat(250);
+        let fasta = write_fasta(dir.path(), "chr1", &sequence);
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(1002, &["C", "T"], vec![gt("tumor", "0/1")]));
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let run = |tagged: bool| {
+            let (mut scratch, mut reads) = (
+                SamBuilder::new().read_length(50),
+                SamBuilder::new().read_length(50),
+            );
+            for i in 0..40usize {
+                let (start1, start2) = (961 + i, 1041 + i);
+                let mut first = sequence[start1 - 1..start1 + 49].to_string();
+                if i < 3 {
+                    first.replace_range(1002 - start1..1003 - start1, "T");
+                }
+                let second = sequence[start2 - 1..start2 + 49].to_string();
+                let pair = Pair::at(start1, start2).bases1(first).bases2(second);
+                for mut record in scratch.add_pair(pair) {
+                    if tagged {
+                        let bases = String::from_utf8(record.sequence().as_ref().to_vec()).unwrap();
+                        let data = record.data_mut();
+                        data.insert(Tag::new(b'a', b'c'), Field::from(bases.clone()));
+                        data.insert(Tag::new(b'b', b'c'), Field::from(bases));
+                    }
+                    reads.extend([record]);
+                }
+            }
+            let bam = dir.path().join("reads.bam");
+            reads.write_bam(&bam).unwrap();
+            let args = FilterArgs {
+                input: input.clone(),
+                output: dir.path().join("out.vcf"),
+                bam,
+                reference: Some(fasta.clone()),
+                metrics: Some(dir.path().join("out.tsv")),
+                pileup: PileupOptions::default(),
+                options: FilterOptions {
+                    filters: vec![FilterKind::CopiedDamage],
+                    ..FilterOptions::default()
+                },
+            };
+            run_filter(&args).unwrap();
+            let (header, _) = read_records(&args.output);
+            let description = header.infos()[CopiedDamage::INFO_POSTERIOR]
+                .description()
+                .to_string();
+            let metrics = std::fs::read_to_string(args.metrics.unwrap()).unwrap();
+            let row: Vec<String> = metrics
+                .lines()
+                .nth(1)
+                .unwrap()
+                .split('\t')
+                .map(String::from)
+                .collect();
+            (description, row)
+        };
+        let (description, row) = run(true);
+        assert!(description.contains("chance explains"), "{description}");
+        assert_eq!(row[2], "C>T:CpG");
+        assert!([18, 19, 21].iter().all(|&i| !row[i].is_empty()), "{row:?}");
+        let (description, row) = run(false);
+        assert!(
+            description.contains("learned per sample and stratum"),
+            "{description}"
+        );
+        assert!(row[18..22].iter().all(String::is_empty), "{row:?}");
+    }
+
+    /// A library whose duplex C>T changes at CpG fall together by chance at
+    /// nearly every position with two of them makes two-molecule calls
+    /// there artifacts, whatever their few molecules say; a library where
+    /// chance explains none of them leaves the learned fraction in charge,
+    /// and so does a stratum it has no profile for.
+    #[test]
+    fn test_a_library_profile_sets_copied_damage_priors_by_chance() {
+        use crate::simplex::{LibraryProfile, StratumProfile};
+        let dir = tempfile::tempdir().unwrap();
+        let reference = write_fasta(dir.path(), "chr1", &"ACGTTCAA".repeat(250));
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        let mut table = MoleculeTable::new();
+        let at = |base, d| Molecule::new(base, 40, d, 149 - d);
+        for (i, pos) in (1002..1800).step_by(8).take(20).enumerate() {
+            vcf.add(Variant::new(pos, &["C", "T"], vec![gt("tumor", "0/1")]));
+            let mut molecules: Vec<Molecule> = (0..150).map(|d| at(b'C', d)).collect();
+            molecules.extend([at(b'T', 20 + i), at(b'T', 90 + i)]);
+            table.insert("chr1", pos, molecules);
+        }
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let options = FilterOptions {
+            filters: vec![FilterKind::CopiedDamage],
+            ..FilterOptions::default()
+        };
+        let profile = |positions: [u64; 4]| {
+            let mut stratum = StratumProfile {
+                molecules: 1_000_000,
+                strand_molecules: 1_000_000,
+                single_strand_changes: 100,
+                ..StratumProfile::default()
+            };
+            for (k, count) in positions.into_iter().enumerate() {
+                stratum.changes += k as u64 * count;
+                stratum.positions.insert((1000, k as u32), count);
+            }
+            let mut library = LibraryProfile::default();
+            library.strata.insert("C>T:CpG".to_string(), stratum);
+            library
+        };
+        let run = |library: Option<LibraryProfile>| {
+            let mut table = table.clone();
+            if let Some(library) = library {
+                table.set_library(library);
+            }
+            let output = dir.path().join("out.vcf");
+            let mut reference = Reference::open(&reference).unwrap();
+            let rows =
+                filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
+            let (header, records) = read_records(&output);
+            let description = header.infos()[CopiedDamage::INFO_POSTERIOR]
+                .description()
+                .to_string();
+            let cdap: Vec<f64> = records
+                .iter()
+                .map(|r| f64::from(float(r, CopiedDamage::INFO_POSTERIOR).unwrap()))
+                .collect();
+            (
+                rows[0].clone(),
+                cdap.iter().sum::<f64>() / cdap.len() as f64,
+                description,
+            )
+        };
+        let (learned, learned_real, learned_text) = run(None);
+        assert_eq!(learned.chance_fraction, None);
+        assert_eq!(learned.change_rate, None);
+        assert!(
+            learned_text.contains("learned per sample and stratum"),
+            "{learned_text}"
+        );
+
+        let (damaged, damaged_real, damaged_text) = run(Some(profile([607, 303, 76, 14])));
+        assert!(damaged.chance_fraction.unwrap() > 0.8, "{damaged:?}");
+        assert!(
+            damaged_real < learned_real / 2.0,
+            "{damaged_real} vs {learned_real}"
+        );
+        assert_eq!(damaged.change_rate, Some(4.97e-4));
+        assert_eq!(damaged.single_strand_rate, Some(1e-4));
+        assert!((damaged.conversion_ratio.unwrap() - 4.97).abs() < 1e-9);
+        assert!(damaged_text.contains("chance explains"), "{damaged_text}");
+
+        let (clean, clean_real, _) = run(Some(profile([980, 10, 10, 0])));
+        assert!(clean.chance_fraction.unwrap() < damaged.chance_fraction.unwrap() / 2.0);
+        assert!(clean_real > damaged_real, "{clean_real} vs {damaged_real}");
+
+        let mut other = profile([607, 303, 76, 14]);
+        let stratum = other.strata.remove("C>T:CpG").unwrap();
+        other.strata.insert("G>T:CpG".to_string(), stratum);
+        let (unprofiled, unprofiled_real, _) = run(Some(other));
+        assert_eq!(unprofiled.chance_fraction, None);
+        assert!((unprofiled_real - learned_real).abs() < 1e-6);
     }
 }

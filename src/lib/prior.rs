@@ -98,6 +98,17 @@ pub fn posterior_mutation(log_likelihood_ratio: f64, artifact_prior: f64) -> f64
     sigmoid(-(log_likelihood_ratio + logit(artifact_prior)))
 }
 
+/// The artifact prior of a call from its library's chance model: the share
+/// of positions with as many changes that chance explains, `E(k) / S(k)`
+/// with `E(k)` at most `S(k)`, shrunk toward `fallback` by
+/// [`STRATUM_PRIOR_STRENGTH`] pseudo-positions, so a count few positions
+/// show keeps nearly the fraction learned from the calls.
+pub fn chance_prior(expected: f64, observed: u64, fallback: f64) -> f64 {
+    let observed = observed as f64;
+    (expected.min(observed) + STRATUM_PRIOR_STRENGTH * fallback)
+        / (observed + STRATUM_PRIOR_STRENGTH)
+}
+
 /// fgbio's artifact prior for one call: one minus `min((2 * m)^2, 0.9999)`,
 /// where `m` is the alternate molecule fraction among reference and alternate
 /// molecules, or `1 / depth` when it is zero.
@@ -253,6 +264,17 @@ mod tests {
         assert!(close(sigmoid(1000.0), 1.0, 0.0));
         assert!(close(sigmoid(-1000.0), 0.0, 0.0));
         assert!(sigmoid(-1000.0).is_finite());
+    }
+
+    /// Chance explaining 380 of 400 positions with two changes gives nearly
+    /// its own share, a count no position shows keeps the learned fraction,
+    /// and an expectation above the positions seen counts as all of them.
+    #[test]
+    fn test_the_chance_prior_shrinks_toward_the_learned_fraction() {
+        assert!(close(chance_prior(380.0, 400, 0.6), 386.0 / 410.0, 1e-12));
+        assert!(close(chance_prior(2.0, 0, 0.3), 0.3, 1e-12));
+        assert!(close(chance_prior(50.0, 10, 0.5), 15.0 / 20.0, 1e-12));
+        assert!(close(chance_prior(0.1, 10, 0.5), 5.1 / 20.0, 1e-12));
     }
 
     #[test]

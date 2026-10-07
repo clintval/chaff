@@ -81,6 +81,20 @@ pub struct StratumMetrics {
     /// The one-sided asymmetry p-value, `P(X >= alt_congruent)`.
     #[serde(serialize_with = "six_digits_or_empty")]
     pub asymmetry_p_value: Option<f64>,
+    /// Copied damage only, from the single-strand consensus of a duplex BAM:
+    /// duplex changes of the stratum's class per molecule over the library.
+    #[serde(serialize_with = "six_digits_or_empty")]
+    pub change_rate: Option<f64>,
+    /// Single-strand changes per molecule with both strands called.
+    #[serde(serialize_with = "six_digits_or_empty")]
+    pub single_strand_rate: Option<f64>,
+    /// `change_rate / single_strand_rate`.
+    #[serde(serialize_with = "six_digits_or_empty")]
+    pub conversion_ratio: Option<f64>,
+    /// The mean artifact prior of the stratum's calls under the library's
+    /// chance model.
+    #[serde(serialize_with = "six_digits_or_empty")]
+    pub chance_fraction: Option<f64>,
 }
 
 /// Serialize `value` rounded to six significant digits.

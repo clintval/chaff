@@ -60,6 +60,14 @@
 //! pseudo-calls at its filter's fraction, so a stratum of one or two calls
 //! mostly inherits `π_f` and one of hundreds keeps nearly its own.
 //!
+//! On a duplex BAM whose reads carry each strand's single-strand consensus,
+//! copied damage under the `chaff` model takes its prior from the library
+//! instead (see [`simplex`]): for a call with `k` alternate molecules, the
+//! share `E(k) / S(k)` of the library's positions with `k` duplex changes of
+//! its stratum that chance explains, as `π = (min(E(k), S(k)) + k' π_s) /
+//! (S(k) + k')` with `k' = 10` pseudo-positions at the stratum's learned
+//! fraction `π_s`.
+//!
 //! Under the `fgbio` model the prior is fgbio's per call: an artifact prior of
 //! `1 - min((2 m)^2, 0.9999)`, where `m` is the call's alternate molecule
 //! fraction, or one over its depth when no alternate molecule is seen.
@@ -145,4 +153,5 @@ pub mod model;
 pub mod prior;
 pub mod read_end;
 pub mod reference;
+pub mod simplex;
 pub mod testing;
