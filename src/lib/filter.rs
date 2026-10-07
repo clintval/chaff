@@ -1152,8 +1152,15 @@ pub fn run_filter_on<S: RecordSource>(
     run_filter_with(args, &mut evidence)
 }
 
-/// Filter the calls with the BAM named by `args`, streamed once through
-/// streampile.
+/// Whether a BAM can be opened again and read on its own: a regular file,
+/// not a stream or a descriptor such as `/dev/stdin`.
+fn rereadable(path: &Path) -> bool {
+    std::fs::canonicalize(path).is_ok_and(|path| !path.starts_with("/dev") && path.is_file())
+}
+
+/// Filter the calls with the BAM named by `args`, streamed through
+/// streampile, and, when it is a regular file and copied damage runs under
+/// the `chaff` model, read again beside it for its single-strand profile.
 pub fn run_filter(args: &FilterArgs) -> Result<()> {
     let mut reader = noodles::bam::io::reader::Builder
         .build_from_path(&args.bam)
@@ -1173,6 +1180,10 @@ pub fn run_filter(args: &FilterArgs) -> Result<()> {
         Some(reference) if options.takes_chance() => reference,
         _ => return run_filter_on(args, builder),
     };
+    if !rereadable(&args.bam) {
+        info!("the BAM is not a regular file chaff can read twice, so it learns its copied-damage priors from the calls alone");
+        return run_filter_on(args, builder);
+    }
     let stop = AtomicBool::new(false);
     std::thread::scope(|scope| {
         let profiling = scope.spawn(|| {

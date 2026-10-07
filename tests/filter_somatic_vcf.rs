@@ -564,6 +564,48 @@ fn test_a_read_without_a_mate_cigar_fails_the_run_naming_it() {
     assert!(stderr.contains("read q1 has no MC tag"), "{stderr}");
 }
 
+/// A BAM on standard input, piped or redirected from a file, is read once,
+/// so it scores as the same BAM read from its file.
+#[test]
+fn test_a_bam_on_standard_input_scores_as_the_same_file() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let dir = TempDir::new().unwrap();
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    let bam = data.join("tumor.bam");
+    let run = |source: &str| {
+        let output = dir.path().join(format!("{source}.vcf"));
+        let mut command = Command::new(assert_cmd::cargo::cargo_bin("chaff"));
+        command
+            .arg("--input")
+            .arg(data.join("calls.vcf"))
+            .arg("--ref")
+            .arg(data.join("ref.fa"))
+            .arg("--output")
+            .arg(&output)
+            .args(["--sample", "tumor"])
+            .stderr(Stdio::piped());
+        match source {
+            "file" => command.arg("--bam").arg(&bam),
+            "redirect" => command
+                .args(["--bam", "/dev/stdin"])
+                .stdin(std::fs::File::open(&bam).unwrap()),
+            _ => command.args(["--bam", "/dev/stdin"]).stdin(Stdio::piped()),
+        };
+        let mut child = command.spawn().unwrap();
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(&std::fs::read(&bam).unwrap()).unwrap();
+        }
+        let finished = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&finished.stderr);
+        assert!(finished.status.success(), "{source}: {stderr}");
+        std::fs::read(output).unwrap()
+    };
+    let file = run("file");
+    assert_eq!(run("pipe"), file);
+    assert_eq!(run("redirect"), file);
+}
+
 /// A spanning deletion `*` is no called allele, so `0/2` and `1/2` over
 /// `A,*` are not heterozygous, and a `1/2` of two SNVs is scored by its first
 /// alternate allele, under end repair fill-in only. The values are fgbio
