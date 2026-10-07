@@ -58,24 +58,25 @@ A *template* is one DNA fragment as its two mates, reads or consensus, hold it, 
 A *lesion* is a damaged base on one strand that a polymerase copies as another base:
 
 - **5-methylcytosine deaminates to thymine**, so a methylated CpG reads C>T.
-- **Cytosine deaminates to uracil**, so any C can read C>T, but proofreading polymerases of the Pfu family stall at template uracil and often leave it uncopied, so most deamination that survives such a PCR is 5-methylcytosine at CpG, and copied damage learns CpG and other contexts apart.
+- **Cytosine deaminates to uracil**, so any C can read C>T. Proofreading polymerases of the Pfu family stall at template uracil and often leave it uncopied, so most deamination that survives such a PCR is 5-methylcytosine at CpG; copied damage learns CpG and other contexts apart.
 - **Guanine oxidizes to 8-oxoguanine**, which pairs with A, so a G reads G>T, a C>A on the other strand.
 
 Duplex Sequencing [[2]](#references) ligates UMI-bearing adapters to both ends of each fragment and keeps a base only where its two strands agree.
 A duplex consensus therefore removes an error on one strand, such as a lesion left uncopied, but not damage copied onto both strands before the adapters were ligated.
-End repair's polymerase does that copying before the adapters are ligated: it extends each recessed 3′ end across the 5′ overhang opposite it, and from any nick, and copies a lesion it passes onto the partner strand, so copied damage reads as a real change on both strands:
+End repair's polymerase does that copying before the adapters are ligated: it extends each recessed 3′ end across the 5′ overhang opposite it, and, where it displaces strands, from a nick, and copies a lesion it passes onto the partner strand, so copied damage reads as a real change on both strands:
 
 ![A lesion, a methylated C at a CpG deaminated to T, sits near one strand's 5′ end; end repair fill-in copies it onto the partner strand as an A; UMI-bearing adapters are ligated after the copy; and the duplex consensus of both strands agrees on a C>T.](.github/img/copied-damage.svg)
 
 ## The Filters
 
-Each filter compares where a call's alternate molecules sit on their templates with where the reference molecules sit, then writes the posterior probability that the call is real, given how common the artifact is in that sample.
+Each filter compares where a call's alternate molecules sit on their templates with where the reference molecules sit, then writes the posterior probability that the call is real, given the sample's *artifact fraction*, the share of its calls that are the artifact, learned from all of them.
+Under `--model fgbio`, which only reproduces fgbio's values, each call's artifact fraction comes from its own alternate allele fraction instead.
 A low posterior marks a likely artifact, and a threshold filters calls at or below it.
 Each filter models one library-preparation step that leaves an artifact near a known end of the fragment:
 
 ![One fragment with the end each artifact sits near: copied damage, a methylated C deaminated to T and its copy, near the lesion strand's 5′ end, end repair fill-in errors in the new bases near the extended strand's 3′ end, and an A that fills a base end repair removed at the last base of a 3′ end.](.github/img/reference-points.svg)
 
-The length a polymerase fills in varies from fragment to fragment, so the evidence for copied damage and end repair fill-in fades with distance from the end, by a *decay* whose *scale* the tool learns per sample, while A-tailing changes only the last base or two of a 3′ end and is scored within a 2 bp window.
+The length a polymerase fills in varies from fragment to fragment, so the evidence for copied damage and end repair fill-in fades with distance from the end, by an exponential *decay* whose *scale*, the mean fill-in length, is learned per sample, while A-tailing changes only the last base of a 3′ end and is scored within a 2 bp window.
 All three filters run by default, but they apply no FILTER until given a threshold.
 The filters score SNVs whose genotype is heterozygous, or missing as many somatic callers write it; homozygous, haploid, and indel calls pass unscored, since the filters weigh alternate molecules against the sample's reference molecules at the site.
 Copied damage scores the SNVs in its damage classes on either strand: C>T covers C>T and G>A calls, and G>T covers G>T and C>A calls.
@@ -105,11 +106,11 @@ A lesion copied from an internal nick, by nick translation or strand displacemen
 
 ![End repair fill-in makes an error: a polymerase fills in a recessed 3′ end and misincorporates a C opposite a T, the UMI-bearing adapters are ligated, and only the filled-in strand carries the error, so the two strands disagree and a duplex consensus masks it.](.github/img/end-repair-fill-in.svg)
 
-End repair's polymerase can misincorporate a base as it fills in a recessed 3′ end, so the error sits only on the strand it extended, near that strand's 3′ end, and a duplex consensus removes it.
-Copying a lesion from the overhang instead puts the change on both strands, which is copied damage.
+End repair's polymerase can misincorporate a base as it fills in a recessed 3′ end, or copy a lesion in the overhang, and in reads or simplex consensus either change sits on the strand it extended, near that strand's 3′ end.
+A misincorporation is on that strand alone, so a duplex consensus removes it, while a copied lesion is on both strands, which is copied damage.
 A call near an end can be flagged by both filters, as the call at position 100 is below; for a Duplex Sequencing library, trust copied damage, since the duplex consensus has already removed end repair's errors on one strand.
 
-- **Measured from:** the 3′ end of the strand each template was copied from, the strand its first of pair copies: forward for an F1R2 pair and reverse for an F2R1 pair.
+- **Measured from:** the 3′ end of the strand read 1 reports, which end repair extended: the higher-coordinate end of an F1R2 pair, whose read 1 is forward, and the lower-coordinate end of an F2R1 pair.
 - **Scored with:** a decay whose scale is learned per sample, from a default of 15 bp.
 - **Writes:** the posterior `ERFAP` and the FILTER `EndRepairFillInArtifact`.
 - **Use it when:** a polymerase end-repaired the library before adapter ligation, as in most ligation preps after mechanical or enzymatic fragmentation, and its BAM is not a duplex consensus.
@@ -119,11 +120,11 @@ A call near an end can be flagged by both filters, as the call at position 100 i
 ![A-tailing makes an error: end repair trims a 3′ end one base too far, A-tailing adds a non-templated A where a C belongs, the UMI-bearing adapters are ligated, and only that strand reads A at the last base of its 3′ end, so the two strands disagree.](.github/img/a-tailing.svg)
 
 A-tailing adds a non-templated A to each 3′ end, for adapters with a T overhang to be ligated to.
-Where end repair trimmed a 3′ end one base too far, that A stands in for the lost base, so copies of the strand read a T near the template's left end or, from the other strand, an A near its right end.
+Where end repair over-digested a 3′ end by one base, that A stands in for the lost base on that strand alone, which reads as an A near the template's higher-coordinate end when it is the forward strand and as a T near its lower-coordinate end when it is the reverse.
 Only one strand carries it, so a duplex consensus mostly removes it.
 
-- **Measured from:** the template end where the added A reads, the left end for a T and the right end for an A.
-- **Scored with:** a 2 bp window, since the artifact changes only the last base or two of a 3′ end.
+- **Measured from:** the template end where the added A reads, the lower-coordinate end for a T and the higher-coordinate end for an A.
+- **Scored with:** a 2 bp window, as in fgbio, since the artifact changes only the last base of a 3′ end.
 - **Writes:** the posterior `ATAP` and the FILTER `ATailingArtifact`.
 - **Use it when:** the library was A-tailed for T-overhang adapters, unlike blunt-end ligation or transposase (tagmentation) preps, and its BAM is not a duplex consensus.
 
@@ -146,7 +147,7 @@ Damage copied onto both strands before the adapters were ligated looks the same 
 
 ### 2. Measure
 
-Run the filters without thresholds, so they annotate the calls without filtering them, and write the metrics; each prior is learned from every scored call, whatever its FILTER, so remove heavily rejected caller output first:
+Run the filters without thresholds, so they annotate the calls without filtering them, and write the metrics; each stratum's artifact fraction is learned from every scored call, whatever its FILTER, so first drop calls your caller rejected:
 
 ```console
 chaff \
@@ -162,7 +163,7 @@ Each row of the metrics describes one filter and *stratum*, a group of calls tha
 Its columns are:
 
 - **Calls:** `calls`, the calls scored, and `filtered`, the calls given the FILTER.
-- **Fractions:** `artifact_fraction`, the stratum's learned share of artifacts, and `filter_artifact_fraction`, the filter's over all its strata, which each stratum's is drawn toward, and `expected_artifacts` and `expected_mutations`, the sums of each call's chance of being an artifact and a real mutation, a call without a posterior counting as real.
+- **Fractions:** `artifact_fraction`, the stratum's learned share of artifacts, which stays near `filter_artifact_fraction`, the filter's over all its strata, until the stratum has many calls; `expected_artifacts` and `expected_mutations`, each call's chance of being either summed, a call without a posterior counting as real.
 - **Distance:** `distance`, the decay scale or window in bases.
 - **Molecules:** `alt_molecules` and `ref_molecules`, the molecules measured, and their `_congruent` counts and fractions, those within the distance of the artifact's end.
 - **Asymmetry:** `expected_alt_congruent`, the alternate molecules each call's own reference molecules predict within the distance, and `asymmetry_p_value`, a one-sided test of whether more sit there; a small value says the library has the artifact.
@@ -185,7 +186,7 @@ end-repair-fill-in  T>A          0.301492           12.1865   1.0
 ```
 
 With one call per stratum, each stratum's fraction stays near its filter's, learned from only 2 to 4 calls, so the fractions say little here; the p-values carry the signal, small for copied damage's G>T:CpG, A-tailing's C>A and T>A, and end repair fill-in's C>A.
-The scales, 23.1 bp from 2 copied-damage calls and 12.2 bp from 4 end repair calls, sit between the alternate molecules' 3 bp and the defaults of 30 and 15 bp.
+The scales, 23.1 bp from 2 copied-damage calls and 12.2 bp from 4 end repair calls, sit between the defaults of 30 and 15 bp and the 3 bp from the end within which the call at position 100 has all its alternate molecules.
 The counts behind a p-value are in the row:
 
 ```console
@@ -228,7 +229,7 @@ gzip -dc calls.chaff.vcf.gz | grep -v '^#' | cut -f 2,4,5,7 | column -t
 ```
 
 The call at position 100 is filtered as copied damage and end repair fill-in.
-The calls at positions 400 and 500 pass: their alternate molecules sit at the 5′ end of the strand each template was copied from, where end repair adds no bases, and 2 of the A>T's 5 alternate molecules sit where A-tailing cannot put them.
+The calls at positions 400 and 500 pass: their alternate molecules sit at the 5′ end of the strand read 1 reports, where end repair adds no bases, and 2 of the A>T's 5 alternate molecules sit where A-tailing cannot put them.
 The deletion at position 300 is not scored.
 
 To check what a threshold costs, score calls known to be real at the alternate-molecule counts of your somatic calls, such as a few germline heterozygous SNVs of the same sample down-sampled to those counts, in the same run so they share its learned prior, and count how many it filters.
@@ -277,15 +278,15 @@ The tool learns per sample how common each artifact is and how far it reaches, s
 | `--ref` | The reference FASTA, with its `.fai`, which copied damage and `--spectrum` need (short `-r`). |
 | `--sample` | The sample the BAM holds, required when the VCF has more than one (short `-s`). |
 | `--metrics` | The per-sample metrics TSV, one row per filter and stratum (default none). |
-| `--spectrum` | A PDF of the sample's heterozygous SNVs, whatever their FILTER, by trinucleotide context on one scale: every SNV, the expected real SNVs, each weighted by the product of the posteriors of the filters `--filters` enables, and, with a threshold, the passing SNVs (default none). |
-| `--filters` | The filters to run (default all three). |
-| `--model` | The model, either `chaff`, which learns each sample's artifact fractions and decay scales, or `fgbio`, which uses fgbio's per-call prior and windows to reproduce its values (default `chaff`). |
+| `--spectrum` | A PDF of the sample's heterozygous SNVs by trinucleotide context, whatever their FILTER, in panels on one scale: every SNV, the expected real SNVs, each weighted by the product of its posteriors, and, with a threshold, the SNVs that pass (default none). |
+| `--filters` | The filters to run, comma-separated, from `copied-damage`, `end-repair-fill-in`, and `a-tailing` (default `copied-damage,a-tailing,end-repair-fill-in`). |
+| `--model` | The model, either `chaff`, which learns each sample's artifact fractions and decay scales, or `fgbio`, which sets each call's artifact fraction from its alternate allele fraction and uses fgbio's windows, to reproduce its values (default `chaff`). |
 | `--copied-damage-threshold` | The posterior at or below which copied damage applies its FILTER (default none). |
 | `--end-repair-fill-in-threshold` | The posterior at or below which end repair fill-in applies its FILTER (default none). |
 | `--a-tailing-threshold` | The posterior at or below which A-tailing applies its FILTER (default none). |
 | `--copied-damage-classes` | The damage classes, damaged base `>` read base: `C>T` for deamination from heat, storage, or formalin, and `G>T` for oxidation from shearing or heat (default `C>T,G>T`). |
 | `--copied-damage-distance` | The decay scale in bases from the lesion strand's 5′ end, the mean length over which a polymerase copies a lesion strand onto its partner, or `learned` (default `learned`). |
-| `--end-repair-fill-in-distance` | The decay scale in bases from the 3′ end of the strand each template was copied from, or `learned` (default `learned`); under `--model fgbio`, the window from the nearest template end (default 15). |
+| `--end-repair-fill-in-distance` | The decay scale in bases from the 3′ end of the strand read 1 reports, or `learned` (default `learned`); under `--model fgbio`, the window from the nearest template end (default 15). |
 | `--a-tailing-distance` | The window from the template end, in bases (default 2). |
 | `--min-mapping-quality` | The mapping quality floor of a read or consensus (short `-m`; default 20). |
 | `--min-base-quality` | The base quality floor at the call (short `-q`; default 20). |
