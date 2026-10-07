@@ -45,7 +45,7 @@ pub enum FilterKind {
     CopiedDamage,
     /// Adenines added to an over-digested recessed 3' end during A-tailing.
     ATailing,
-    /// Damage copied into a filled-in recessed 3' end during end repair.
+    /// Errors in a recessed 3' end that end repair fills in.
     EndRepairFillIn,
 }
 
