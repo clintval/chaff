@@ -55,6 +55,11 @@ pub struct StratumMetrics {
     /// The sum over calls of the posterior probability of an artifact.
     #[serde(serialize_with = "six_digits")]
     pub expected_artifacts: f64,
+    /// The sum over calls of the posterior probability of a real mutation:
+    /// the stratum's expected count of real mutations, a burden that weighs
+    /// each call by how likely it is real rather than filtering it.
+    #[serde(serialize_with = "six_digits")]
+    pub expected_mutations: f64,
     /// Alternate molecules measured.
     pub alt_molecules: u64,
     /// Alternate molecules congruent with the artifact.
@@ -253,6 +258,7 @@ mod tests {
         let learned = StratumMetrics {
             artifact_fraction: Some(1.0 / 3.0),
             expected_artifacts: 2.0 / 3.0,
+            expected_mutations: 7.0 / 3.0,
             ..row()
         };
         let fgbio = StratumMetrics {
@@ -266,9 +272,12 @@ mod tests {
             .skip(1)
             .map(|l| l.split('\t').collect())
             .collect();
-        assert_eq!(rows[0][5..9], ["0.333333", "", "30.0", "0.666667"]);
-        assert_eq!(rows[0][11], "5.0");
-        assert_eq!(rows[0][16], "0.0107422");
+        assert_eq!(
+            rows[0][5..10],
+            ["0.333333", "", "30.0", "0.666667", "2.33333"]
+        );
+        assert_eq!(rows[0][12], "5.0");
+        assert_eq!(rows[0][17], "0.0107422");
         assert_eq!(rows[1][5], "");
     }
 

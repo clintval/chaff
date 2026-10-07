@@ -834,6 +834,7 @@ fn metrics_rows(
         }
         if let Some(posterior) = annotation.posterior {
             row.expected_artifacts += 1.0 - posterior;
+            row.expected_mutations += posterior;
             if is_filtered(posterior, annotation.kind.threshold(options)) {
                 row.filtered += 1;
             }
@@ -1228,6 +1229,54 @@ mod tests {
         assert!((scale - 20.0).abs() < 3.0, "{scale}");
         let fraction = rows[0].artifact_fraction.unwrap();
         assert!((fraction - 0.5).abs() < 0.1, "{fraction}");
+    }
+
+    /// Each stratum's expected mutations and expected artifacts are the sums of
+    /// its calls' posteriors and their complements, so together they count its
+    /// calls with a posterior, and the expected mutations match the calls'
+    /// own `CDAP` values.
+    #[test]
+    fn test_expected_mutations_sum_the_posteriors() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = write_fasta(dir.path(), "chr1", &"ACGTTCAA".repeat(250));
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        let mut table = MoleculeTable::new();
+        let at = |base, d| Molecule::new(base, 40, d, 149 - d);
+        let alternates = [[0, 1, 2, 3], [10, 50, 90, 130], [20, 60, 100, 140]];
+        for (pos, distances) in [1002, 1010, 1018].into_iter().zip(alternates) {
+            vcf.add(Variant::new(pos, &["C", "T"], vec![gt("tumor", "0/1")]));
+            let mut molecules: Vec<Molecule> = (0..150).map(|d| at(b'C', d)).collect();
+            molecules.extend(distances.map(|d| at(b'T', d)));
+            table.insert("chr1", pos, molecules);
+        }
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let output = dir.path().join("out.vcf");
+        let options = FilterOptions {
+            filters: vec![FilterKind::CopiedDamage],
+            ..FilterOptions::default()
+        };
+        let mut reference = Reference::open(&reference).unwrap();
+        let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
+        let (_, records) = read_records(&output);
+        let cdap: f64 = records
+            .iter()
+            .map(|r| f64::from(float(r, CopiedDamage::INFO_POSTERIOR).unwrap()))
+            .sum();
+        let row = &rows[0];
+        assert_eq!(row.calls, 3);
+        assert!(
+            (row.expected_mutations + row.expected_artifacts - 3.0).abs() < 1e-9,
+            "{row:?}"
+        );
+        assert!(
+            (row.expected_mutations - cdap).abs() < 0.01,
+            "{} vs {cdap}",
+            row.expected_mutations
+        );
+        assert!(
+            row.expected_mutations > 0.5 && row.expected_mutations < 2.5,
+            "{row:?}"
+        );
     }
 
     /// A second run on a first run's output would keep the first run's FILTERs

@@ -157,13 +157,13 @@ Each row of the metrics describes one filter and *stratum*, a group of calls tha
 Its columns are:
 
 - **Calls:** `calls`, the calls scored, and `filtered`, the calls given the FILTER.
-- **Fractions:** `artifact_fraction`, the stratum's learned share of artifacts, and `filter_artifact_fraction`, the filter's over all its strata, which each stratum's is drawn toward, and `expected_artifacts`, the sum of each call's chance of being one.
+- **Fractions:** `artifact_fraction`, the stratum's learned share of artifacts, and `filter_artifact_fraction`, the filter's over all its strata, which each stratum's is drawn toward, and `expected_artifacts` and `expected_mutations`, the sums of each call's chance of being an artifact and a real mutation.
 - **Distance:** `distance`, the decay scale or window in bases.
 - **Molecules:** `alt_molecules` and `ref_molecules`, the molecules measured, and their `_congruent` counts and fractions, those within the distance of the artifact's end.
 - **Asymmetry:** `expected_alt_congruent`, the alternate molecules each call's own reference molecules predict within the distance, and `asymmetry_p_value`, a one-sided test of whether more sit there; a small value says the library has the artifact.
 
 ```console
-cut -f 2,3,6,8,17 tumor.chaff.tsv | column -t
+cut -f 2,3,6,8,18 tumor.chaff.tsv | column -t
 ```
 
 ```text
@@ -184,7 +184,7 @@ The scales, 23.1 bp from 2 copied-damage calls and 12.2 bp from 4 end repair cal
 The counts behind a p-value are in the row:
 
 ```console
-grep -e ^sample -e a-tailing tumor.chaff.tsv | cut -f 3,10,11,12,17 | column -t
+grep -e ^sample -e a-tailing tumor.chaff.tsv | cut -f 3,11,12,13,18 | column -t
 ```
 
 ```text
