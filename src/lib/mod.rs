@@ -145,4 +145,5 @@ pub mod model;
 pub mod prior;
 pub mod read_end;
 pub mod reference;
+pub mod spectrum;
 pub mod testing;

@@ -109,3 +109,22 @@ Feature: CLI contract
     When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --sample tumor --filters a-tailing --ref ref.fa`
     Then the exit code is 2
     And stderr contains "error: the argument '--ref <FASTA>' applies only to the copied-damage filter, which '--filters' leaves out"
+
+  Scenario: the spectrum needs a reference
+    When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --sample tumor --filters a-tailing --spectrum spectrum.pdf`
+    Then the exit code is 2
+    And stderr contains "error: '--spectrum' needs a reference FASTA: '--ref <FASTA>'"
+
+  Scenario: the spectrum is written as a PDF
+    Given a file "ref.fa" containing:
+      """
+      >chr1
+      AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACGAAAAAAAAAAAAAAAAAAA
+      """
+    And a file "ref.fa.fai" containing:
+      """
+      chr1\t120\t6\t120\t121
+      """
+    When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --sample tumor --filters a-tailing --ref ref.fa --spectrum spectrum.pdf`
+    Then the exit code is 0
+    And the file "spectrum.pdf" is a PDF

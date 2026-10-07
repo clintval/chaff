@@ -36,6 +36,7 @@ use crate::prior::{
 };
 use crate::read_end::{is_filtered, ATailing, Distances, EndRepairFillIn, Score};
 use crate::reference::Reference;
+use crate::spectrum::{channel, After, Spectrum};
 
 /// One of the artifact filters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ValueEnum)]
@@ -319,6 +320,9 @@ pub struct FilterArgs {
     pub reference: Option<PathBuf>,
     /// The per-sample metrics TSV.
     pub metrics: Option<PathBuf>,
+    /// The PDF of the sample's trinucleotide spectrum before and after
+    /// filtering, which needs the reference FASTA.
+    pub spectrum: Option<PathBuf>,
     /// The read and base floors.
     pub pileup: PileupOptions,
     /// The scoring and filtering options.
@@ -417,14 +421,46 @@ impl CoordinateOrder {
     }
 }
 
-/// Score one call under every enabled filter that applies to it.
+/// The upper-cased REF and first alternate base of a heterozygous call whose
+/// every called allele is one base: an SNV the filters can score.
+fn snv(gt: &Genotype) -> Option<(u8, u8)> {
+    if !(gt.is_het() && gt.calls_are_single_bases()) {
+        return None;
+    }
+    let ref_base = gt.reference().bytes().next()?;
+    let alt_base = gt.first_alt()?.bytes().next()?;
+    Some((ref_base.to_ascii_uppercase(), alt_base.to_ascii_uppercase()))
+}
+
+/// The reference bases before, at, and after an SNV, refusing a REF that
+/// disagrees with the FASTA.
+fn snv_context(
+    reference: &mut Reference,
+    gt: &Genotype,
+    contig: &str,
+    pos: usize,
+    ref_base: u8,
+) -> Result<(Option<u8>, u8, Option<u8>)> {
+    let context = reference.context(contig, pos)?;
+    if context.1 != ref_base {
+        bail!(
+            "the call at {contig}:{pos} has REF {}, but the reference FASTA has {} there",
+            gt.reference(),
+            context.1 as char
+        );
+    }
+    Ok(context)
+}
+
+/// Score one call, with its reference context when known, under every enabled
+/// filter that applies to it.
 fn score_call(
     gt: &Genotype,
     contig: &str,
     pos: usize,
     options: &FilterOptions,
     evidence: &mut dyn Evidence,
-    reference: &mut Option<&mut Reference>,
+    context: Option<(Option<u8>, u8, Option<u8>)>,
     cache: &mut Option<((String, usize), Vec<Molecule>)>,
 ) -> Result<Vec<Annotation>> {
     let kinds: Vec<FilterKind> = FilterKind::ALL
@@ -445,20 +481,6 @@ fn score_call(
         ref_allele.to_ascii_uppercase(),
         alt_allele.to_ascii_uppercase(),
     );
-    let context = match reference.as_deref_mut() {
-        Some(reference) => {
-            let context = reference.context(contig, pos)?;
-            if context.1 != ref_base {
-                bail!(
-                    "the call at {contig}:{pos} has REF {}, but the reference FASTA has {} there",
-                    gt.reference(),
-                    context.1 as char
-                );
-            }
-            Some(context)
-        }
-        None => None,
-    };
     let key = (contig.to_string(), pos);
     if cache.as_ref().map(|(k, _)| k) != Some(&key) {
         let position = Position::try_from(pos).context("a VCF position must be at least 1")?;
@@ -717,11 +739,39 @@ pub fn filter_vcf(
     input: &Path,
     output: &Path,
     evidence: &mut dyn Evidence,
-    mut reference: Option<&mut Reference>,
+    reference: Option<&mut Reference>,
     options: &FilterOptions,
 ) -> Result<Vec<StratumMetrics>> {
+    let report = filter_vcf_report(input, output, evidence, reference, options, false)?;
+    Ok(report.metrics)
+}
+
+/// What one run reports about the sample it filtered.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Report {
+    /// The sample under test.
+    pub sample: String,
+    /// One row per filter and stratum.
+    pub metrics: Vec<StratumMetrics>,
+    /// The trinucleotide spectrum of the scored SNVs, when asked for.
+    pub spectrum: Option<Spectrum>,
+}
+
+/// As [`filter_vcf`], also tallying the sample's trinucleotide spectrum when
+/// `spectrum` is set, which needs the reference.
+pub fn filter_vcf_report(
+    input: &Path,
+    output: &Path,
+    evidence: &mut dyn Evidence,
+    mut reference: Option<&mut Reference>,
+    options: &FilterOptions,
+    spectrum: bool,
+) -> Result<Report> {
     if options.enabled(FilterKind::CopiedDamage) && reference.is_none() {
         bail!("the copied damage filter needs a reference FASTA (--ref)");
+    }
+    if spectrum && reference.is_none() {
+        bail!("the spectrum needs a reference FASTA (--ref)");
     }
     if options.filters.is_empty() {
         log::warn!("every filter is disabled, so chaff will copy the input unchanged");
@@ -736,24 +786,34 @@ pub fn filter_vcf(
     let mut order = CoordinateOrder::new(&header);
     let mut cache = None;
     let mut calls: Vec<Vec<Annotation>> = Vec::new();
+    let mut channels: Vec<Option<usize>> = Vec::new();
     let mut record = RecordBuf::default();
     while reader.read_record(&header, &mut record)? != 0 {
         let contig = record.reference_sequence_name().to_string();
         let pos = record.variant_start().map(usize::from).unwrap_or(0);
         order.check(&contig, pos)?;
-        let annotations = match Genotype::from_record(&record, sample_index) {
-            Some(gt) if pos > 0 => score_call(
-                &gt,
-                &contig,
-                pos,
-                options,
-                evidence,
-                &mut reference,
-                &mut cache,
-            )?,
-            _ => Vec::new(),
+        let Some(gt) = Genotype::from_record(&record, sample_index).filter(|_| pos > 0) else {
+            calls.push(Vec::new());
+            channels.push(None);
+            continue;
         };
-        calls.push(annotations);
+        let bases = snv(&gt);
+        let context = match (bases, reference.as_deref_mut()) {
+            (Some((ref_base, _)), Some(reference)) => {
+                Some(snv_context(reference, &gt, &contig, pos, ref_base)?)
+            }
+            _ => None,
+        };
+        channels.push(
+            bases
+                .zip(context)
+                .and_then(|((_, alt_base), (prev, base, next))| {
+                    channel(prev, base, alt_base, next)
+                }),
+        );
+        calls.push(score_call(
+            &gt, &contig, pos, options, evidence, context, &mut cache,
+        )?);
     }
     info!("scored {} calls of sample {sample}", calls.len());
 
@@ -791,7 +851,45 @@ pub fn filter_vcf(
             row.alt_molecules,
         );
     }
-    Ok(rows)
+    let spectrum = spectrum.then(|| tally_spectrum(&calls, &channels, options));
+    Ok(Report {
+        sample,
+        metrics: rows,
+        spectrum,
+    })
+}
+
+/// The trinucleotide spectrum of the calls with a channel: every one before
+/// filtering, and after it the ones no filter flagged when any enabled filter
+/// has a threshold, or else each weighed by the product of its posteriors.
+fn tally_spectrum(
+    calls: &[Vec<Annotation>],
+    channels: &[Option<usize>],
+    options: &FilterOptions,
+) -> Spectrum {
+    let thresholded = options
+        .filters
+        .iter()
+        .any(|k| k.threshold(options).is_some());
+    let mut spectrum = Spectrum::new(if thresholded {
+        After::Passing
+    } else {
+        After::Weighted
+    });
+    for (annotations, channel) in calls.iter().zip(channels) {
+        let Some(channel) = *channel else {
+            continue;
+        };
+        let posteriors = annotations
+            .iter()
+            .filter_map(|a| a.posterior.map(|p| (a.kind, p)));
+        let flagged = posteriors
+            .clone()
+            .any(|(kind, p)| is_filtered(p, kind.threshold(options)));
+        let weight = posteriors.map(|(_, p)| p).product();
+        spectrum.add(channel, flagged, weight);
+    }
+    spectrum
 }
 
 /// Pool every annotation into one metrics row per filter and stratum.
@@ -845,19 +943,23 @@ fn metrics_rows(
         .collect()
 }
 
-/// Filter the calls with molecules from `evidence`, writing the metrics when
-/// asked.
+/// Filter the calls with molecules from `evidence`, writing the metrics and
+/// the spectrum when asked.
 pub fn run_filter_with(args: &FilterArgs, evidence: &mut dyn Evidence) -> Result<()> {
     let mut reference = args.reference.as_deref().map(Reference::open).transpose()?;
-    let rows = filter_vcf(
+    let report = filter_vcf_report(
         &args.input,
         &args.output,
         evidence,
         reference.as_mut(),
         &args.options,
+        args.spectrum.is_some(),
     )?;
     if let Some(path) = &args.metrics {
-        write_metrics(path, &rows)?;
+        write_metrics(path, &report.metrics)?;
+    }
+    if let (Some(path), Some(spectrum)) = (&args.spectrum, &report.spectrum) {
+        spectrum.write_pdf(path, &report.sample)?;
     }
     Ok(())
 }
@@ -1359,5 +1461,89 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("reference"), "{error}");
+    }
+
+    /// The spectrum counts each heterozygous SNV in its channel, read from the
+    /// pyrimidine, and after filtering keeps the calls no threshold flags or,
+    /// without a threshold, weighs each by its posterior.
+    #[test]
+    fn test_the_spectrum_counts_scored_snvs_before_and_after_filtering() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = write_fasta(dir.path(), "chr1", &"ACGTTCAA".repeat(250));
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(1002, &["C", "T"], vec![gt("tumor", "0/1")]));
+        vcf.add(Variant::new(1006, &["C", "T"], vec![gt("tumor", "0/1")]));
+        vcf.add(Variant::new(1010, &["C", "T"], vec![gt("tumor", "1/1")]));
+        vcf.add(Variant::new(1014, &["C", "CA"], vec![gt("tumor", "0/1")]));
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let output = dir.path().join("out.vcf");
+        let mut table = MoleculeTable::new();
+        let at = |base, d| Molecule::new(base, 90, d, 149 - d);
+        for pos in [1002, 1006] {
+            let mut molecules: Vec<Molecule> = (0..150).map(|d| at(b'C', d)).collect();
+            if pos == 1002 {
+                molecules.extend((0..6).map(|d| at(b'T', d)));
+            } else {
+                molecules.extend((0..150).step_by(25).map(|d| at(b'T', d)));
+            }
+            table.insert("chr1", pos, molecules);
+        }
+        let mut reference = Reference::open(&reference).unwrap();
+        let (acg, tca) = (16 * 2 + 2, 16 * 2 + 12);
+        for threshold in [Some(0.05), None] {
+            let options = FilterOptions {
+                filters: vec![FilterKind::CopiedDamage],
+                copied_damage: CopiedDamage {
+                    distance: Distance::Bases(30.0),
+                    ..CopiedDamage::default()
+                },
+                copied_damage_threshold: threshold,
+                ..FilterOptions::default()
+            };
+            let report = filter_vcf_report(
+                &input,
+                &output,
+                &mut table.clone(),
+                Some(&mut reference),
+                &options,
+                true,
+            )
+            .unwrap();
+            let spectrum = report.spectrum.unwrap();
+            assert_eq!(spectrum.before.iter().sum::<f64>(), 2.0);
+            assert_eq!((spectrum.before[acg], spectrum.before[tca]), (1.0, 1.0));
+            let others: f64 =
+                spectrum.after.iter().sum::<f64>() - spectrum.after[acg] - spectrum.after[tca];
+            assert_eq!(others, 0.0);
+            let (_, records) = read_records(&output);
+            let cdap =
+                |i: usize| f64::from(float(&records[i], CopiedDamage::INFO_POSTERIOR).unwrap());
+            if threshold.is_some() {
+                assert_eq!(spectrum.after_kind, After::Passing);
+                assert_eq!((spectrum.after[acg], spectrum.after[tca]), (0.0, 1.0));
+            } else {
+                assert_eq!(spectrum.after_kind, After::Weighted);
+                assert!((spectrum.after[acg] - cdap(0)).abs() < 1e-3, "{spectrum:?}");
+                assert!((spectrum.after[tca] - cdap(1)).abs() < 1e-3, "{spectrum:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_the_spectrum_requires_a_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = VcfBuilder::new(&["tumor"]).write(&dir.path().join("in.vcf"));
+        let options = FilterOptions {
+            filters: vec![FilterKind::ATailing],
+            ..FilterOptions::default()
+        };
+        let output = dir.path().join("out.vcf");
+        let mut table = MoleculeTable::new();
+        let error =
+            filter_vcf_report(&input, &output, &mut table, None, &options, true).unwrap_err();
+        assert!(
+            error.to_string().contains("the spectrum needs a reference"),
+            "{error}"
+        );
     }
 }

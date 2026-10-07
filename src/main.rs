@@ -146,7 +146,8 @@ struct Cli {
 
     /// Indexed reference FASTA (`.fai` alongside) for CpG context.
     ///
-    /// Required by the `copied-damage` filter, and an error without it.
+    /// Required by the `copied-damage` filter and by `--spectrum`, and an
+    /// error without either.
     #[arg(short = 'r', long = "ref", value_name = "FASTA", verbatim_doc_comment)]
     reference: Option<PathBuf>,
 
@@ -159,6 +160,14 @@ struct Cli {
     /// Per-sample metrics TSV: one row per filter and stratum.
     #[arg(long, value_name = "TSV", verbatim_doc_comment)]
     metrics: Option<PathBuf>,
+
+    /// PDF of the sample's SNVs by trinucleotide context, before and after
+    /// filtering.
+    ///
+    /// After filtering, it counts the calls no filter flagged when a filter
+    /// has a threshold, or else weighs each call by its posteriors.
+    #[arg(long, value_name = "PDF", verbatim_doc_comment)]
+    spectrum: Option<PathBuf>,
 
     /// Minimum mapping quality of a read.
     #[arg(
@@ -321,16 +330,18 @@ fn probability(text: &str) -> Result<f64, String> {
 
 impl Cli {
     /// Reject, as usage errors of `cmd`, an option typed on the command line for
-    /// a filter `--filters` leaves out, the copied damage filter without a
-    /// reference, an input and outputs that name one file, and damage classes
-    /// that repeat a change.
+    /// a filter `--filters` leaves out, the copied damage filter or the
+    /// spectrum without a reference, an input and outputs that name one file,
+    /// and damage classes that repeat a change.
     fn validate(&self, matches: &ArgMatches, cmd: &mut Command) -> Result<(), clap::Error> {
         for kind in FilterKind::ALL {
             if self.filters.contains(&kind) {
                 continue;
             }
             for id in kind.arguments() {
-                if matches.value_source(id) != Some(ValueSource::CommandLine) {
+                if matches.value_source(id) != Some(ValueSource::CommandLine)
+                    || (*id == "reference" && self.spectrum.is_some())
+                {
                     continue;
                 }
                 let arg = cmd
@@ -359,6 +370,12 @@ impl Cli {
                 "the copied-damage filter needs a reference FASTA: '--ref <FASTA>'",
             ));
         }
+        if self.spectrum.is_some() && self.reference.is_none() {
+            return Err(cmd.error(
+                ErrorKind::MissingRequiredArgument,
+                "'--spectrum' needs a reference FASTA: '--ref <FASTA>'",
+            ));
+        }
         let files = [
             ("--input", Some(&self.input)),
             (
@@ -366,6 +383,7 @@ impl Cli {
                 Some(&self.output).filter(|p| *p != Path::new("-")),
             ),
             ("--metrics", self.metrics.as_ref()),
+            ("--spectrum", self.spectrum.as_ref()),
         ];
         for (i, (a, first)) in files.iter().enumerate() {
             for (b, second) in &files[i + 1..] {
@@ -407,6 +425,7 @@ impl Cli {
             bam: self.bam,
             reference: self.reference,
             metrics: self.metrics,
+            spectrum: self.spectrum,
             pileup: PileupOptions {
                 min_mapping_quality: self.min_mapping_quality,
                 min_base_quality: self.min_base_quality,
@@ -583,7 +602,7 @@ fn decorate_help(cmd: clap::Command, color: bool) -> clap::Command {
 fn main() -> Result<(), Error> {
     let color = std::env::var_os("NO_COLOR").is_none();
 
-    let env = Env::default().default_filter_or("info");
+    let env = Env::default().default_filter_or("info,usvg=error");
     let write_style = if color {
         env_logger::WriteStyle::Auto
     } else {
@@ -659,6 +678,26 @@ mod tests {
     }
 
     #[test]
+    fn test_the_spectrum_without_a_reference_is_a_usage_error() {
+        let error = args(&["--filters", "a-tailing", "--spectrum", "out.pdf"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+        let message = "'--spectrum' needs a reference FASTA: '--ref <FASTA>'";
+        assert!(error.to_string().contains(message), "{error}");
+        let extra = [
+            "--filters",
+            "a-tailing",
+            "--spectrum",
+            "out.pdf",
+            "--ref",
+            "ref.fa",
+        ];
+        assert_eq!(
+            args(&extra).unwrap().spectrum,
+            Some(PathBuf::from("out.pdf"))
+        );
+    }
+
+    #[test]
     fn test_standard_input_is_a_usage_error() {
         let error = args(&["-i", "-", "--ref", "ref.fa"]).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::ValueValidation);
@@ -694,6 +733,17 @@ mod tests {
             (
                 vec!["-o", &metrics, "--metrics", &metrics],
                 "'--output' and '--metrics' name the same file",
+            ),
+            (
+                vec![
+                    "--metrics",
+                    &metrics,
+                    "--spectrum",
+                    &metrics,
+                    "--ref",
+                    "ref.fa",
+                ],
+                "'--metrics' and '--spectrum' name the same file",
             ),
         ] {
             let error = args(&[&["-i", &input][..], &filters, &extra].concat()).unwrap_err();
