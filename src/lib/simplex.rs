@@ -33,11 +33,7 @@
 //! variation free of real mutations, which only duplex changes carry: their
 //! counts at each position follow a negative binomial, a Poisson whose rate
 //! varies as a gamma of shape `a`, fitted so the positions expected with no
-//! change and with one both match those observed. Copying adds variation of
-//! its own that single-strand changes cannot show, since a lesion is copied
-//! only near where a fragment ends or a nick opens, so the chance model
-//! takes `a` at most [`MAX_DISPERSION`], a rate at least as varied as an
-//! exponential's. With `n_j` molecules at
+//! change and with one both match those observed. With `n_j` molecules at
 //! position `j` and `S(k)` positions holding `k` duplex changes, the duplex
 //! rate `r` solves `sum_j NB(1; n_j r, a) = S(1)`, and chance puts `k`
 //! changes on
@@ -48,8 +44,13 @@
 //!
 //! positions. `E(k) / S(k)` is the share of positions with `k` changes that
 //! chance explains: few of a clean library's positions with two or more, and
-//! most of a damaged library's. Positions whose changes are at least 2 and
-//! 20% of their molecules are germline and count toward neither model.
+//! most of a damaged library's. Chance cannot explain more positions than
+//! there are, so when `a` has `E(k)` exceed `S(k)` for some `k` of two or
+//! more by more than [`FIT_TOLERANCE`] standard deviations of a Poisson
+//! count, the model raises `a` toward a Poisson's until it no longer does,
+//! and reports what still exceeds `S(k)` as its misfit. Positions whose
+//! changes are at least 2 and 20% of their molecules are germline and count
+//! toward neither model.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
@@ -89,11 +90,13 @@ const REFERENCE_CHUNK: usize = 1 << 20;
 /// is skipped rather than held.
 const MAX_SPAN: usize = 100_000;
 
-/// The largest gamma shape the chance model takes: copying a lesion varies
-/// across positions at least as much as an exponential does, more than the
-/// single-strand changes alone show, since it also depends on where
-/// fragments end.
-pub const MAX_DISPERSION: f64 = 1.0;
+/// The standard deviations of a Poisson count by which the positions chance
+/// expects with a count of changes may exceed those observed before the
+/// chance model takes its gamma shape to vary too much.
+pub const FIT_TOLERANCE: f64 = 3.0;
+
+/// The least and greatest finite gamma shapes the models search.
+const DISPERSIONS: (f64, f64) = (0.05, 1e4);
 
 /// The fewest changes that, with [`CLONAL_FRACTION`], make a position
 /// germline or clonal, left out of the rates.
@@ -152,11 +155,33 @@ impl StratumProfile {
     }
 
     /// The stratum's chance model: the dispersion fitted to its single-strand
-    /// changes, at most [`MAX_DISPERSION`], the rate of duplex changes it
-    /// matches to the positions with one, and the positions expected and
-    /// observed with each count.
+    /// changes, raised toward a Poisson's until chance expects no more
+    /// positions with any count of two or more than were observed, the rate
+    /// of duplex changes it matches to the positions with one, and the
+    /// positions expected and observed with each count.
     pub fn chance(&self) -> Chance {
-        self.chance_at(self.single_strand_dispersion().min(MAX_DISPERSION))
+        let fitted = self.single_strand_dispersion();
+        let fit = |dispersion: f64| Chance {
+            fitted,
+            ..self.chance_at(dispersion)
+        };
+        let chance = fit(fitted);
+        if chance.fits() || fitted.is_infinite() {
+            return chance;
+        }
+        if !fit(DISPERSIONS.1).fits() {
+            return fit(f64::INFINITY);
+        }
+        let (mut low, mut high) = (fitted.ln(), DISPERSIONS.1.ln());
+        for _ in 0..30 {
+            let mid = (low + high) / 2.0;
+            if fit(mid.exp()).fits() {
+                high = mid;
+            } else {
+                low = mid;
+            }
+        }
+        fit(high.exp())
     }
 
     /// The gamma shape of the single-strand change rate's variation across
@@ -179,14 +204,23 @@ impl StratumProfile {
             }
             expected[MAX_CHANGES as usize] += count as f64 * (1.0 - below).max(0.0);
         }
-        let observed = (0..=MAX_CHANGES)
+        let observed: Vec<u64> = (0..=MAX_CHANGES)
             .map(|k| observed(&self.positions, k))
             .collect();
+        let several = MIN_CHANCE_CHANGES as usize;
+        let beyond: f64 = expected[several..]
+            .iter()
+            .zip(&observed[several..])
+            .map(|(&e, &s)| (e - s as f64).max(0.0))
+            .sum();
+        let seen: u64 = observed[several..].iter().sum();
         Chance {
             rate,
             dispersion,
+            fitted: dispersion,
             expected,
             observed,
+            excess: beyond / seen.max(1) as f64,
         }
     }
 }
@@ -199,10 +233,18 @@ pub struct Chance {
     /// The gamma shape of the rate's variation across positions, infinite
     /// when it does not vary.
     pub dispersion: f64,
+    /// The gamma shape fitted to the single-strand changes, which
+    /// `dispersion` raises when it makes chance explain more positions than
+    /// there are.
+    pub fitted: f64,
     /// `E(k)` for `k` from 0 to [`MAX_CHANGES`], the last pooling deeper ones.
     pub expected: Vec<f64>,
     /// `S(k)` likewise.
     pub observed: Vec<u64>,
+    /// The positions with two or more changes that chance expects beyond
+    /// those observed, as a share of those observed, or of one when none
+    /// are: zero when the model fits.
+    pub excess: f64,
 }
 
 impl Chance {
@@ -210,6 +252,16 @@ impl Chance {
     pub fn at(&self, changes: u32) -> (f64, u64) {
         let k = changes.min(MAX_CHANGES) as usize;
         (self.expected[k], self.observed[k])
+    }
+
+    /// Whether chance expects no more positions with any count of two or
+    /// more than were observed, within [`FIT_TOLERANCE`] standard deviations
+    /// of a Poisson count.
+    pub fn fits(&self) -> bool {
+        (MIN_CHANCE_CHANGES..=MAX_CHANGES).all(|k| {
+            let (expected, observed) = self.at(k);
+            expected <= observed as f64 + FIT_TOLERANCE * expected.sqrt()
+        })
     }
 }
 
@@ -303,7 +355,6 @@ fn matched_rate(positions: &Positions, dispersion: f64) -> f64 {
 /// from a Poisson's until the rate can no longer match the ones, so the
 /// shape is the first crossing on the way down.
 fn fitted_dispersion(positions: &Positions) -> f64 {
-    const RANGE: (f64, f64) = (0.05, 1e4);
     const STEPS: usize = 48;
     let zeros = observed(positions, 0) as f64;
     if observed(positions, 1) == 0 {
@@ -318,7 +369,7 @@ fn fitted_dispersion(positions: &Positions) -> f64 {
             dispersion,
         ) - zeros
     };
-    let (top, bottom) = (RANGE.1.ln(), RANGE.0.ln());
+    let (top, bottom) = (DISPERSIONS.1.ln(), DISPERSIONS.0.ln());
     if excess(top) <= 0.0 {
         return f64::INFINITY;
     }
@@ -340,7 +391,7 @@ fn fitted_dispersion(positions: &Positions) -> f64 {
         }
         high = low;
     }
-    RANGE.0
+    DISPERSIONS.0
 }
 
 /// The single-strand and duplex changes of a library, per damage stratum,
@@ -1115,8 +1166,8 @@ mod tests {
     }
 
     /// Single-strand changes that vary no more than a Poisson leave the
-    /// chance model at the cap, and a Poisson chance model's rate reproduces
-    /// the positions with one change.
+    /// chance model a Poisson, whose rate reproduces the positions with one
+    /// change.
     #[test]
     fn test_the_chance_model_matches_the_positions_with_one_change() {
         let mut stratum = StratumProfile::default();
@@ -1126,7 +1177,7 @@ mod tests {
         stratum.strand_positions.insert((100, 0), 990);
         stratum.strand_positions.insert((100, 1), 10);
         assert!(stratum.single_strand_dispersion().is_infinite());
-        assert_eq!(stratum.chance().dispersion, MAX_DISPERSION);
+        assert!(stratum.chance().dispersion.is_infinite());
         let chance = stratum.chance_at(f64::INFINITY);
         let mean = 100.0 * chance.rate;
         assert!(
@@ -1143,9 +1194,8 @@ mod tests {
     }
 
     /// Single-strand changes drawn from a gamma-varying rate give back its
-    /// shape, duplex changes sharing it fall together more often than a
-    /// Poisson allows, and the chance model varies at least as much as the
-    /// cap.
+    /// shape, and duplex changes sharing it fall together more often than a
+    /// Poisson allows, as the chance model takes them to.
     #[test]
     fn test_the_dispersion_of_single_strand_changes_widens_the_chance_model() {
         let mut stratum = StratumProfile::default();
@@ -1153,8 +1203,11 @@ mod tests {
             let count = (100_000.0 * negative_binomial(u, 0.3, 1.5)).round() as u64;
             stratum.strand_positions.insert((1000, u), count);
         }
-        for (k, count) in [(0, 70_000), (1, 21_000), (2, 6_000), (3, 3_000)] {
-            stratum.positions.insert((1000, k), count);
+        for k in 0..=MAX_CHANGES {
+            let count = (100_000.0 * negative_binomial(k, 0.3, 1.5)).round() as u64;
+            stratum
+                .positions
+                .insert((1000, k), count + if k == 2 { 500 } else { 0 });
         }
         let dispersion = stratum.single_strand_dispersion();
         assert!((dispersion - 1.5).abs() < 0.05, "{dispersion}");
@@ -1164,10 +1217,53 @@ mod tests {
             chance.at(2).0 > 1.3 * poisson.at(2).0,
             "{chance:?} {poisson:?}"
         );
-        assert!((chance.at(1).0 - 21_000.0).abs() < 1e-3);
-        let capped = stratum.chance();
-        assert_eq!(capped.dispersion, MAX_DISPERSION);
-        assert!(capped.at(2).0 > chance.at(2).0);
+        assert!((chance.at(1).0 - chance.at(1).1 as f64).abs() < 1e-3);
+        assert!(chance.fits(), "{chance:?}");
+        assert_eq!(stratum.chance(), chance);
+    }
+
+    /// Poisson damage at 1e-4 per molecule over 100,000 positions of 1,000
+    /// molecules, with 200 real mutations of 2 molecules each, leaves chance
+    /// explaining 69% of the positions with 2 changes.
+    #[test]
+    fn test_the_chance_model_leaves_real_mutations_to_the_positions_beyond_chance() {
+        let mut stratum = StratumProfile::default();
+        for k in 0..=MAX_CHANGES {
+            let count = (100_000.0 * negative_binomial(k, 0.1, f64::INFINITY)).round() as u64;
+            let real = if k == 2 { 200 } else { 0 };
+            stratum.positions.insert((1000, k), count + real);
+            stratum.strand_positions.insert((1000, k), count);
+        }
+        let chance = stratum.chance();
+        let (expected, observed) = chance.at(2);
+        let share = expected / observed as f64;
+        assert!((share - 0.694).abs() < 0.01, "{share} {chance:?}");
+        assert!(chance.fits() && chance.excess < 0.01, "{chance:?}");
+    }
+
+    /// Single-strand changes that vary more than the duplex changes allow
+    /// would have chance explain more positions than there are, so the model
+    /// raises their shape until it does not, and reports the misfit of any
+    /// shape that still would.
+    #[test]
+    fn test_the_chance_model_varies_no_more_than_the_duplex_changes_allow() {
+        let mut stratum = StratumProfile::default();
+        for k in 0..=MAX_CHANGES {
+            let poisson = (100_000.0 * negative_binomial(k, 0.1, f64::INFINITY)).round();
+            stratum.positions.insert((1000, k), poisson as u64);
+            let varied = (100_000.0 * negative_binomial(k, 0.1, 0.2)).round();
+            stratum.strand_positions.insert((1000, k), varied as u64);
+        }
+        let fitted = stratum.single_strand_dispersion();
+        assert!((fitted - 0.2).abs() < 0.02, "{fitted}");
+        let wide = stratum.chance_at(fitted);
+        assert!(!wide.fits() && wide.excess > 1.0, "{wide:?}");
+        let chance = stratum.chance();
+        assert!(chance.fits(), "{chance:?}");
+        assert_eq!(chance.fitted, fitted);
+        assert!(chance.dispersion > 10.0 * fitted, "{chance:?}");
+        let (expected, observed) = chance.at(2);
+        assert!(expected <= observed as f64 + FIT_TOLERANCE * expected.sqrt());
     }
 
     #[test]

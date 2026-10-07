@@ -167,7 +167,7 @@ Its columns are:
 - **Distance:** `distance`, the decay scale or window in bases.
 - **Molecules:** `alt_molecules` and `ref_molecules`, the molecules measured, and their `_congruent` counts and fractions, those within the distance of the artifact's end.
 - **Asymmetry:** `expected_alt_congruent`, the alternate molecules each call's own reference molecules predict within the distance, and `asymmetry_p_value`, a one-sided test of whether more sit there; a small value says the library has the artifact.
-- **Single strand:** for copied damage on a BAM with single-strand consensus, `change_rate` and `single_strand_rate`, the duplex and single-strand changes of the class per molecule, their `conversion_ratio`, and `chance_fraction`, the mean prior of its calls.
+- **Single strand:** for copied damage on a BAM with single-strand consensus, `change_rate` and `single_strand_rate`, the duplex and single-strand changes of the class per molecule, their `conversion_ratio`, `chance_fraction`, the mean prior of its calls, and `chance_excess`, the positions with two or more changes that chance expects beyond those seen, as a share of them.
 
 ```console
 cut -f 2,3,6,8,18 tumor.chaff.tsv | column -t

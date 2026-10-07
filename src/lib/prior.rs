@@ -99,10 +99,11 @@ pub fn posterior_mutation(log_likelihood_ratio: f64, artifact_prior: f64) -> f64
 }
 
 /// The artifact prior of a call from its library's chance model: the share
-/// of positions with as many changes that chance explains, `E(k) / S(k)`
-/// with `E(k)` at most `S(k)`, shrunk toward `fallback` by
+/// of positions with as many changes that chance explains, `E(k) / S(k)`,
+/// which is at most one, shrunk toward `fallback` by
 /// [`STRATUM_PRIOR_STRENGTH`] pseudo-positions, so a count few positions
-/// show keeps nearly the fraction learned from the calls.
+/// show keeps nearly the fraction learned from the calls. The chance model
+/// keeps `E(k)` within noise of `S(k)` and reports any excess.
 pub fn chance_prior(expected: f64, observed: u64, fallback: f64) -> f64 {
     let observed = observed as f64;
     (expected.min(observed) + STRATUM_PRIOR_STRENGTH * fallback)

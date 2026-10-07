@@ -939,6 +939,7 @@ pub fn filter_vcf_report(
         &scales,
         options,
         library.as_ref(),
+        &chances,
     );
     for row in &rows {
         info!(
@@ -1033,11 +1034,18 @@ fn log_chance(chances: &BTreeMap<String, Chance>) {
             })
             .collect();
         info!(
-            "copied-damage {stratum}: {:.3e} changes per molecule by chance, dispersion {:.3}; chance explains {} change(s)",
+            "copied-damage {stratum}: {:.3e} changes per molecule by chance, dispersion {:.3} (single strand {:.3}); chance explains {} change(s)",
             chance.rate,
             chance.dispersion,
+            chance.fitted,
             shown.join(", ")
         );
+        if !chance.fits() {
+            log::warn!(
+                "copied-damage {stratum}: chance expects more positions with two or more changes than were observed, by {:.1}% of them, even varying no more than a Poisson",
+                100.0 * chance.excess
+            );
+        }
     }
 }
 
@@ -1049,6 +1057,7 @@ fn metrics_rows(
     scales: &Scales,
     options: &FilterOptions,
     library: Option<&LibraryProfile>,
+    chances: &BTreeMap<String, Chance>,
 ) -> Vec<StratumMetrics> {
     let learned = options.model == Model::Chaff;
     let mut rows: BTreeMap<Stratum, (StratumMetrics, Vec<(u32, f64)>)> = BTreeMap::new();
@@ -1077,6 +1086,7 @@ fn metrics_rows(
                     change_rate: profile.change_rate(),
                     single_strand_rate: profile.single_strand_rate(),
                     conversion_ratio: profile.conversion_ratio(),
+                    chance_excess: chances.get(&annotation.stratum).map(|c| c.excess),
                     ..row
                 },
                 _ => row,
@@ -1852,13 +1862,16 @@ mod tests {
         let (description, row) = run(true);
         assert!(description.contains("chance explains"), "{description}");
         assert_eq!(row[2], "C>T:CpG");
-        assert!([18, 19, 21].iter().all(|&i| !row[i].is_empty()), "{row:?}");
+        assert!(
+            [18, 19, 21, 22].iter().all(|&i| !row[i].is_empty()),
+            "{row:?}"
+        );
         let (description, row) = run(false);
         assert!(
             description.contains("learned per sample and stratum"),
             "{description}"
         );
-        assert!(row[18..22].iter().all(String::is_empty), "{row:?}");
+        assert!(row[18..23].iter().all(String::is_empty), "{row:?}");
     }
 
     /// A library whose duplex C>T changes at CpG fall together by chance at
@@ -1940,6 +1953,7 @@ mod tests {
         assert_eq!(damaged.change_rate, Some(4.97e-4));
         assert_eq!(damaged.single_strand_rate, Some(1e-4));
         assert!((damaged.conversion_ratio.unwrap() - 4.97).abs() < 1e-9);
+        assert!(damaged.chance_excess.unwrap() < 0.05, "{damaged:?}");
         assert!(damaged_text.contains("chance explains"), "{damaged_text}");
 
         let (clean, clean_real, _) = run(Some(profile([980, 10, 10, 0])));

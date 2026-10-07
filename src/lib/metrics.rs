@@ -100,6 +100,11 @@ pub struct StratumMetrics {
     /// chance model.
     #[serde(serialize_with = "six_digits_or_empty")]
     pub chance_fraction: Option<f64>,
+    /// The positions with two or more changes that the library's chance
+    /// model expects beyond those observed, as a share of those observed:
+    /// zero when the model fits.
+    #[serde(serialize_with = "six_digits_or_empty")]
+    pub chance_excess: Option<f64>,
 }
 
 /// Serialize `value` rounded to six significant digits.
