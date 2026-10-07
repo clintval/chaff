@@ -317,11 +317,11 @@ fn file(text: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// Parse a path to a report file, refusing `-`, since standard output carries
-/// the VCF.
+/// Parse a path to a report file, refusing `-`: a report is never written to
+/// standard output.
 fn report_file(text: &str) -> Result<PathBuf, String> {
     match text {
-        "-" => Err("standard output carries the VCF, so name a file".into()),
+        "-" => Err("a report cannot go to standard output; name a file".into()),
         _ => Ok(PathBuf::from(text)),
     }
 }
@@ -754,8 +754,9 @@ mod tests {
     ) {
         let error = args(&["--ref", "ref.fa", option, "-"]).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::ValueValidation);
-        let message =
-            format!("invalid value '-' for '{option} {value}': standard output carries the VCF");
+        let message = format!(
+            "invalid value '-' for '{option} {value}': a report cannot go to standard output"
+        );
         assert!(error.to_string().contains(&message), "{error}");
     }
 
