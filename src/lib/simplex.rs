@@ -52,13 +52,13 @@
 //! within depth bins, one per doubling of `n_j`. Chance cannot explain more
 //! positions than there are, so when `a` has `E(k)` exceed `S(k)` in some
 //! bin, for some `k` of two or more, by more than [`FIT_TOLERANCE`] standard
-//! deviations of a Poisson count, the model raises `a` toward a Poisson's
-//! until it no longer does, and reports what still exceeds `S(k)` as its
-//! misfit. Deep counts are sparse, so from [`MAX_CHANGES`] on a count takes
-//! the positions with it or more. Positions whose changes are at least 2 and
-//! 20% of their molecules are germline and count toward neither model, nor
-//! do positions so shallow that 2 changes would make them germline, where a
-//! germline variant shows as one change, as damage would.
+//! deviations of a Poisson count, the model raises `a` until `E(k)` is
+//! `S(k)` there, as far as a Poisson's, and reports what still exceeds
+//! `S(k)` as its misfit. Deep counts are sparse, so from [`MAX_CHANGES`] on
+//! a count takes the positions with it or more. Positions whose changes are
+//! at least 2 and 20% of their molecules are germline and count toward
+//! neither model, nor do positions so shallow that 2 changes would make them
+//! germline, where a germline variant shows as one change, as damage would.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::File;
@@ -182,33 +182,42 @@ impl StratumProfile {
     }
 
     /// The stratum's chance model: the dispersion fitted to its single-strand
-    /// changes, raised toward a Poisson's until chance expects no more
-    /// positions with any count of two or more than were observed, the rate
-    /// of duplex changes it matches to the positions with none, and the
-    /// positions expected and observed with each count.
+    /// changes, the rate of duplex changes it matches to the positions with
+    /// none, and the positions expected and observed with each count. When
+    /// the fitted dispersion has chance expect more positions with some count
+    /// of two or more, in some depth bin, than were observed beyond their
+    /// noise, it is raised until chance expects exactly the positions
+    /// observed with that count there, and again while any count still
+    /// exceeds its noise; a Poisson's is as far as it goes, and the misfit
+    /// left there is reported.
     pub fn chance(&self) -> Chance {
         let fitted = self.single_strand_dispersion();
         let fit = |dispersion: f64| Chance {
             fitted,
             ..self.chance_at(dispersion)
         };
-        let chance = fit(fitted);
-        if chance.fits() || fitted.is_infinite() {
-            return chance;
-        }
-        if !fit(DISPERSIONS.1).fits() {
-            return fit(f64::INFINITY);
-        }
-        let (mut low, mut high) = (fitted.ln(), DISPERSIONS.1.ln());
-        for _ in 0..20 {
-            let mid = (low + high) / 2.0;
-            if fit(mid.exp()).fits() {
-                high = mid;
-            } else {
-                low = mid;
+        let mut chance = fit(fitted);
+        while !chance.fits() && chance.dispersion.is_finite() {
+            let Some((bin, changes)) = chance.binding() else {
+                break;
+            };
+            let expected = |dispersion: f64| fit(dispersion).at_depth(1 << bin, changes).0;
+            let observed = chance.at_depth(1 << bin, changes).1 as f64;
+            if expected(DISPERSIONS.1) > observed {
+                return fit(f64::INFINITY);
             }
+            let (mut low, mut high) = (chance.dispersion.ln(), DISPERSIONS.1.ln());
+            for _ in 0..30 {
+                let mid = (low + high) / 2.0;
+                if expected(mid.exp()) > observed {
+                    low = mid;
+                } else {
+                    high = mid;
+                }
+            }
+            chance = fit(high.exp());
         }
-        fit(high.exp())
+        chance
     }
 
     /// The gamma shape of the single-strand change rate's variation across
@@ -367,6 +376,22 @@ impl Tally {
         (MIN_CHANCE_CHANGES..=MAX_CHANGES).map(|k| self.at(k))
     }
 
+    /// The count of changes whose expected positions exceed those observed
+    /// and [`FIT_TOLERANCE`] standard deviations of a Poisson count by the
+    /// most, and that excess, when any does.
+    fn binding(&self) -> Option<(u32, f64)> {
+        (MIN_CHANCE_CHANGES..=MAX_CHANGES)
+            .map(|k| {
+                let (expected, observed) = self.at(k);
+                (
+                    k,
+                    expected - observed as f64 - FIT_TOLERANCE * expected.sqrt(),
+                )
+            })
+            .filter(|&(_, beyond)| beyond > 0.0)
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
     /// The positions with two or more changes that chance expects beyond
     /// those observed and [`FIT_TOLERANCE`] standard deviations of a Poisson
     /// count, and those observed.
@@ -432,6 +457,17 @@ impl Chance {
     /// standard deviations of a Poisson count.
     pub fn fits(&self) -> bool {
         self.bins.values().all(Tally::fits)
+    }
+
+    /// The depth bin and count of changes where chance expects the most
+    /// positions beyond those observed and their noise, when it does
+    /// anywhere.
+    fn binding(&self) -> Option<(u32, u32)> {
+        self.bins
+            .iter()
+            .filter_map(|(&bin, tally)| tally.binding().map(|(k, beyond)| (bin, k, beyond)))
+            .max_by(|a, b| a.2.total_cmp(&b.2))
+            .map(|(bin, k, _)| (bin, k))
     }
 }
 
@@ -1550,27 +1586,58 @@ mod tests {
 
     /// Single-strand changes that vary more than the duplex changes allow
     /// would have chance explain more positions than there are, so the model
-    /// raises their shape until it does not, and reports the misfit of any
-    /// shape that still would.
+    /// raises their shape until chance expects exactly the positions observed
+    /// with the count it overshot by the most; duplex changes that vary no
+    /// more than a Poisson take a Poisson's shape, and a library whose
+    /// positions with two changes even a Poisson overshoots takes it too and
+    /// reports the misfit.
     #[test]
     fn test_the_chance_model_varies_no_more_than_the_duplex_changes_allow() {
-        let mut stratum = StratumProfile::default();
-        for k in 0..=MAX_CHANGES {
-            let poisson = (100_000.0 * negative_binomial(k, 0.1, f64::INFINITY)).round();
-            stratum.positions.insert((1000, k), poisson as u64);
-            let varied = (100_000.0 * negative_binomial(k, 0.1, 0.2)).round();
-            stratum.strand_positions.insert((1000, k), varied as u64);
-        }
-        let fitted = stratum.single_strand_dispersion();
+        let stratum = |duplex: f64| {
+            let mut stratum = StratumProfile::default();
+            for k in 0..=MAX_CHANGES {
+                let count = (100_000.0 * negative_binomial(k, 0.1, duplex)).round();
+                stratum.positions.insert((1000, k), count as u64);
+                let varied = (100_000.0 * negative_binomial(k, 0.1, 0.2)).round();
+                stratum.strand_positions.insert((1000, k), varied as u64);
+            }
+            stratum
+        };
+        let exact = |chance: &Chance| {
+            chance.bins.values().any(|tally| {
+                (MIN_CHANCE_CHANGES..=MAX_CHANGES).any(|k| {
+                    let (expected, observed) = tally.at(k);
+                    observed > 0 && (expected - observed as f64).abs() < 1e-3
+                })
+            })
+        };
+        let stratum_2 = stratum(2.0);
+        let fitted = stratum_2.single_strand_dispersion();
         assert!((fitted - 0.2).abs() < 0.02, "{fitted}");
-        let wide = stratum.chance_at(fitted);
+        let wide = stratum_2.chance_at(fitted);
         assert!(!wide.fits() && wide.excess > 1.0, "{wide:?}");
-        let chance = stratum.chance();
-        assert!(chance.fits(), "{chance:?}");
+        let chance = stratum_2.chance();
+        assert!(chance.fits() && chance.excess == 0.0, "{chance:?}");
         assert_eq!(chance.fitted, fitted);
-        assert!(chance.dispersion > 10.0 * fitted, "{chance:?}");
-        let (expected, observed) = chance.at(2);
-        assert!(expected <= observed as f64 + FIT_TOLERANCE * expected.sqrt());
+        assert!((chance.dispersion - 2.0).abs() < 0.2, "{chance:?}");
+        assert!(exact(&chance), "{chance:?}");
+
+        let chance = stratum(f64::INFINITY).chance();
+        assert!(
+            chance.fits() && chance.dispersion.is_infinite(),
+            "{chance:?}"
+        );
+        assert!(!exact(&chance), "{chance:?}");
+
+        let mut stratum = StratumProfile::default();
+        stratum.positions.insert((1000, 0), 90_000);
+        stratum.positions.insert((1000, 1), 9_900);
+        let chance = stratum.chance();
+        assert!(
+            chance.dispersion.is_infinite() && !chance.fits(),
+            "{chance:?}"
+        );
+        assert!(chance.excess > 0.0, "{chance:?}");
     }
 
     /// The rate is where the positions expected with no change meet those
