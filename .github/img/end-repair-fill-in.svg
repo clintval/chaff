@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="870" height="172" viewBox="0 0 870 172" role="img" aria-labelledby="title">
+  <title id="title">How end repair fill-in makes an error: a recessed 3′ end is filled in with a wrong C opposite a T, the UMI-bearing adapters are ligated, and only the filled-in strand reads G, so a duplex consensus masks it.</title>
+  <style>
+    text { font-family: Helvetica, Arial, sans-serif; }
+    .head { fill: #57606a; font-size: 13px; font-weight: 700; }
+    .ink { fill: #57606a; font-size: 12.5px; }
+    .end { fill: #12875c; font-size: 12px; }
+    .base { fill: #8c8b86; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 15px; }
+    .alt { fill: #e34948; font-weight: 700; }
+    .new { fill: #2a78d6; font-weight: 700; }
+    .fill { fill: #2a78d6; fill-opacity: 0.14; }
+    .umi { fill: #12875c; }
+    .arrow { stroke: #8c8b86; stroke-width: 1.5; fill: none; }
+    .read { fill: #8c8b86; fill-opacity: 0.11; }
+    @media (prefers-color-scheme: dark) {
+      .head, .ink { fill: #9198a1; }
+      .end, .umi { fill: #1baf7a; }
+      .read { fill: #ffffff; fill-opacity: 0.12; }
+    }
+  </style>
+
+  <text class="head" x="28" y="24">1. A Recessed 3′ End</text>
+  <text class="ink" x="28" y="42">the bottom strand is short</text>
+  <text class="ink" x="28" y="160">its 3′ end is recessed</text>
+  <rect class="read" x="36" y="81" width="151" height="23" rx="4"/>
+  <rect class="read" x="111" y="107" width="76" height="23" rx="4"/>
+  <text class="end" x="28" y="98" text-anchor="middle">5′</text>
+  <text class="end" x="196" y="98" text-anchor="middle">3′</text>
+  <text class="end" x="103" y="124" text-anchor="middle">3′</text>
+  <text class="end" x="196" y="124" text-anchor="middle">5′</text>
+  <text class="base" y="98" text-anchor="middle"><tspan x="44 59 74 89 104 119 134 149 164 179">CTGCGAGGAT</tspan></text>
+  <text class="base" y="124" text-anchor="middle"><tspan x="119 134 149 164 179">TCCTA</tspan></text>
+  <path class="arrow" d="M209 111 h16 m-5 -4 l5 4 l-5 4"/>
+
+  <text class="head" x="243" y="24">2. Fill-In Adds a Wrong C</text>
+  <text class="ink" x="243" y="42">a polymerase extends the 3′ end</text>
+  <text class="ink" x="243" y="160">and misincorporates a C</text>
+  <rect class="read" x="251" y="81" width="151" height="23" rx="4"/>
+  <rect class="read" x="251" y="107" width="151" height="23" rx="4"/>
+  <rect class="fill" x="251" y="107" width="76" height="23" rx="4"/>
+  <text class="end" x="243" y="98" text-anchor="middle">5′</text>
+  <text class="end" x="411" y="98" text-anchor="middle">3′</text>
+  <text class="end" x="243" y="124" text-anchor="middle">3′</text>
+  <text class="end" x="411" y="124" text-anchor="middle">5′</text>
+  <text class="base" y="98" text-anchor="middle"><tspan x="259 274 289 304 319 334 349 364 379 394">CTGCGAGGAT</tspan></text>
+  <text class="base" y="124" text-anchor="middle"><tspan class="new" x="259">G</tspan><tspan class="alt" x="274">C</tspan><tspan class="new" x="289 304 319">CGC</tspan><tspan x="334 349 364 379 394">TCCTA</tspan></text>
+  <path class="arrow" d="M424 111 h16 m-5 -4 l5 4 l-5 4"/>
+
+  <text class="head" x="458" y="24">3. Adapters Are Ligated</text>
+  <text class="ink" x="458" y="42">each carries a UMI</text>
+  <text class="ink" x="458" y="160">the error is on one strand</text>
+  <rect class="umi" x="451" y="86" width="14" height="15" rx="3"/>
+  <rect class="umi" x="618" y="86" width="14" height="15" rx="3"/>
+  <rect class="umi" x="451" y="112" width="14" height="15" rx="3"/>
+  <rect class="umi" x="618" y="112" width="14" height="15" rx="3"/>
+  <rect class="read" x="466" y="81" width="151" height="23" rx="4"/>
+  <rect class="read" x="466" y="107" width="151" height="23" rx="4"/>
+  <text class="base" y="98" text-anchor="middle"><tspan x="474 489 504 519 534 549 564 579 594 609">CTGCGAGGAT</tspan></text>
+  <text class="base" y="124" text-anchor="middle"><tspan x="474">G</tspan><tspan class="alt" x="489">C</tspan><tspan x="504 519 534 549 564 579 594 609">CGCTCCTA</tspan></text>
+  <path class="arrow" d="M639 111 h16 m-5 -4 l5 4 l-5 4"/>
+
+  <text class="head" x="673" y="24">4. Only One Strand Reads G</text>
+  <text class="ink" x="673" y="42">the other strand reads T</text>
+  <text class="ink" x="673" y="160">so a duplex consensus masks it</text>
+  <rect class="read" x="681" y="81" width="151" height="23" rx="4"/>
+  <rect class="read" x="681" y="107" width="151" height="23" rx="4"/>
+  <text class="base" y="98" text-anchor="middle"><tspan x="689 704 719 734 749 764 779 794 809 824">CTGCGAGGAT</tspan></text>
+  <text class="base" y="124" text-anchor="middle"><tspan x="689">C</tspan><tspan class="alt" x="704">G</tspan><tspan x="719 734 749 764 779 794 809 824">GCGAGGAT</tspan></text>
+</svg>

@@ -1,0 +1,41 @@
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=200000000>
+##contig=<ID=chr2,length=200000000>
+##contig=<ID=chr3,length=200000000>
+##contig=<ID=chr4,length=200000000>
+##contig=<ID=chr5,length=200000000>
+##contig=<ID=chr6,length=200000000>
+##contig=<ID=chr7,length=200000000>
+##contig=<ID=chr8,length=200000000>
+##contig=<ID=chr9,length=200000000>
+##contig=<ID=chr10,length=200000000>
+##contig=<ID=chr11,length=200000000>
+##contig=<ID=chr12,length=200000000>
+##contig=<ID=chr13,length=200000000>
+##contig=<ID=chr14,length=200000000>
+##contig=<ID=chr15,length=200000000>
+##contig=<ID=chr16,length=200000000>
+##contig=<ID=chr17,length=200000000>
+##contig=<ID=chr18,length=200000000>
+##contig=<ID=chr19,length=200000000>
+##contig=<ID=chr20,length=200000000>
+##contig=<ID=chr21,length=200000000>
+##contig=<ID=chr22,length=200000000>
+##contig=<ID=chrX,length=200000000>
+##contig=<ID=chrY,length=200000000>
+##contig=<ID=chrM,length=200000000>
+##INFO=<ID=AC,Number=A,Type=Integer,Description="Alternate allele counts in genotypes.">
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Depth across all samples.">
+##FILTER=<ID=LowQD,Description="Low Quality/Depth value">
+##FILTER=<ID=LowAB,Description="Low/poor allele balance.">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype string.">
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Depth per allele.">
+##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Genotype quality.">
+##FORMAT=<ID=PL,Number=G,Type=Integer,Description="Phred scaled genotype likelihoods.">
+##ALT=<ID=NON_REF,Description="Represents any non-reference allele.">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	tumor	normal
+chr1	100	.	C	A	.	.	.	GT	0/1	0/0
+chr1	200	.	G	A	.	.	.	GT	0/1	0/0
+chr1	300	.	AAA	A	.	.	.	GT	0/1	0/0
+chr1	400	.	A	T	.	.	.	GT	0/1	0/0
+chr1	500	.	C	G	.	.	.	GT	0/1	0/0

@@ -1,0 +1,159 @@
+name: publish chaff
+
+on:
+  push:
+    tags: '[0-9]+.[0-9]+.[0-9]+'
+
+permissions: {}
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  on-main-branch-check:
+    name: on-main-branch-check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read  # to check out the repository and its history
+    outputs:
+      on_main: ${{ steps.contains_tag.outputs.retval }}
+    steps:
+      - name: Stop following the remote HEAD so the tag check sees every branch
+        run: git config --global remote.origin.followRemoteHEAD never
+
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check that the tag is on the main branch
+        uses: rickstaa/action-contains-tag@a9ff27d505ba2bf074a2ebb48b208e76d35ff308 # v1.2.10
+        id: contains_tag
+        with:
+          reference: "main"
+          tag: "${{ github.ref_name }}"
+
+      - name: Check that the tag matches the package version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          if [ "$TAG" != "$version" ]; then
+            echo "::error::The tag $TAG does not match the version $version in Cargo.toml"
+            exit 1
+          fi
+
+  tests:
+    name: tests
+    needs: on-main-branch-check
+    if: ${{ needs.on-main-branch-check.outputs.on_main == 'true' }}
+    permissions:
+      checks: write  # for the Coveralls upload in the called workflow
+      contents: read  # to check out the repository in the called workflow
+    uses: ./.github/workflows/ci.yml # zizmor: ignore[self-repository] GitHub does not document $/ for reusable workflows
+
+  check-package:
+    name: check-package
+    needs: tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read  # to check out the tagged commit
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the stable Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Package the crate as crates.io would publish it
+        run: |
+          cargo package --list --locked
+          cargo publish --dry-run --locked
+
+  publish-to-crates-io:
+    name: publish-to-crates-io
+    runs-on: ubuntu-latest
+    needs: check-package
+    environment: crates-io
+    permissions:
+      contents: read  # to check out the tagged commit
+      id-token: write  # to publish to crates.io as a trusted publisher
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the stable Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Check whether crates.io already has this version
+        id: published
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --user-agent "chaff release (https://github.com/clintval/chaff)" \
+            "https://crates.io/api/v1/crates/chaff/$version")
+          echo "exists=$([ "$status" = 200 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Get a short-lived crates.io token
+        if: ${{ steps.published.outputs.exists != 'true' }}
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        id: auth
+
+      - name: Publish to crates.io
+        if: ${{ steps.published.outputs.exists != 'true' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --locked
+
+  make-changelog:
+    name: make-changelog
+    runs-on: ubuntu-latest
+    needs: publish-to-crates-io
+    permissions:
+      contents: read  # to check out the tagged commit and its history
+    outputs:
+      release_body: ${{ steps.git-cliff.outputs.content }}
+    steps:
+      - name: Check out the repository at the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref_name }}
+          persist-credentials: false
+
+      - name: Generate a changelog
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
+        id: git-cliff
+        with:
+          config: Cargo.toml
+          args: --latest --verbose
+        env:
+          GITHUB_REPO: ${{ github.repository }}
+
+  make-github-release:
+    name: make-github-release
+    runs-on: ubuntu-latest
+    environment: github
+    permissions:
+      contents: write  # to create the GitHub release
+    needs: make-changelog
+    steps:
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          NOTES: ${{ needs.make-changelog.outputs.release_body }}
+        run: gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "$NOTES"
