@@ -352,7 +352,7 @@ impl ATailing {
     /// the distance of its nearest template end, and that end is where the
     /// alternate allele would appear by A addition (the leftmost end for a
     /// forward-strand `T`, the rightmost for an `A`). At a tie the nearest end
-    /// is the kept read's own, as fgbio has it.
+    /// is the kept mate's own, as fgbio has it.
     pub fn is_congruent(&self, alt_base: u8, m: &Molecule) -> bool {
         let left = m.left.map(|d| d + 1);
         let right = m.right.map(|d| d + 1);
@@ -975,7 +975,7 @@ mod tests {
     }
 
     /// fgbio takes the other end only when it is strictly nearer than the kept
-    /// read's own 5' end.
+    /// mate's own 5' end.
     #[test]
     fn test_a_tailing_tie_goes_to_the_kept_read_s_own_end() {
         let filter = ATailing::default();

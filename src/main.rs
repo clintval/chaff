@@ -136,11 +136,12 @@ struct Cli {
     #[arg(short = 'o', long, value_name = "VCF", verbatim_doc_comment)]
     output: PathBuf,
 
-    /// Coordinate-sorted BAM of the sample under test; no index needed.
+    /// Coordinate-sorted BAM of the sample under test, reads or consensus;
+    /// no index needed.
     ///
-    /// Distances from template ends count template bases through both reads'
-    /// CIGARs, so a read whose mate maps to the same contig needs the mate
-    /// CIGAR (`MC`) tag; the insert size (`TLEN`) is never read.
+    /// Distances from template ends count template bases through both mates'
+    /// CIGARs, so each mate of a pair on one contig needs its mate's CIGAR
+    /// (`MC`) tag; the insert size (`TLEN`) is never read.
     #[arg(short = 'b', long, value_name = "BAM", verbatim_doc_comment)]
     bam: PathBuf,
 
@@ -151,7 +152,7 @@ struct Cli {
     #[arg(short = 'r', long = "ref", value_name = "FASTA", verbatim_doc_comment)]
     reference: Option<PathBuf>,
 
-    /// The sample whose reads are in the BAM.
+    /// The sample the BAM holds.
     ///
     /// Required when the VCF has more than one sample.
     #[arg(short = 's', long, value_name = "NAME", verbatim_doc_comment)]
@@ -172,7 +173,7 @@ struct Cli {
     #[arg(long, value_name = "PDF", value_parser = report_file, verbatim_doc_comment)]
     spectrum: Option<PathBuf>,
 
-    /// Minimum mapping quality of a read.
+    /// Minimum mapping quality of a read or consensus.
     #[arg(
         short = 'm',
         long,
@@ -192,9 +193,9 @@ struct Cli {
     )]
     min_base_quality: u8,
 
-    /// Use only paired reads whose mate is also mapped.
+    /// Use only paired reads or consensus whose mate is also mapped.
     ///
-    /// Duplicate, secondary, and supplementary reads are always left out.
+    /// Duplicate, secondary, and supplementary records are always left out.
     #[arg(short = 'p', long, verbatim_doc_comment)]
     paired_reads_only: bool,
 

@@ -2,18 +2,20 @@
 //!
 //! The statistics see each template once, as a [`Molecule`]: the base it holds
 //! at the site, that base's quality, and the site's distances from the
-//! template ends its reads reveal. [`Evidence`] separates the statistics from
-//! the reads. [`PileupEvidence`] fills it from a streampile pileup builder that
-//! leaves out the reads [`PileupOptions`] reject and calls the bases of
+//! template ends its mates reveal, whether they are reads or consensus.
+//! [`Evidence`] separates the statistics from the BAM. [`PileupEvidence`]
+//! fills it from a streampile pileup builder that leaves out the records
+//! [`PileupOptions`] reject and calls the bases of
 //! overlapping mates into one: mates that agree keep the higher quality, and
 //! mates that disagree become an `N`, which counts as neither allele. A
 //! template that holds a deletion at the site is a [`DELETION`], which counts
 //! as neither allele but in the depth, as fgbio counts it. Each molecule also
-//! names the strand its reads were copied from, by pair orientation as GATK's
-//! `LearnReadOrientationModel` reads it: read 1 is a copy of the original
-//! strand from its 5' end, so an F1R2 template comes from the forward strand
-//! and an F2R1 template from the reverse. A duplex consensus, whose reads
-//! carry fgbio's `aD` and `bD` depths of both strands, comes from both.
+//! names the strand its mates were copied from, by pair orientation as GATK's
+//! `LearnReadOrientationModel` reads it: the first of pair is a copy of the
+//! original strand from its 5' end, so an F1R2 template comes from the forward
+//! strand and an F2R1 template from the reverse. A duplex consensus, whose
+//! records carry fgbio's `aD` and `bD` depths of both strands, comes from
+//! both.
 
 use std::collections::HashMap;
 
@@ -52,11 +54,11 @@ pub struct Molecule {
     /// The template's bases between the site and its rightmost base, the
     /// reverse strand's 5' end, when known: 0 at that base.
     pub right: Option<usize>,
-    /// Whether the read fgbio keeps for the template, its first read here at
+    /// Whether the mate fgbio keeps for the template, its first mate here at
     /// the quality floor, is reverse: a site equally far from both ends is
-    /// nearer that read's own 5' end.
+    /// nearer that mate's own 5' end.
     pub reverse: bool,
-    /// The strand the template's reads were copied from, or `None` for a
+    /// The strand the template's mates were copied from, or `None` for a
     /// duplex consensus, which holds both.
     pub origin: Option<Strand>,
 }
@@ -103,15 +105,15 @@ pub trait Evidence {
 /// A library profile still being made, which [`Evidence::library`] waits for.
 pub type PendingLibrary<'f> = Box<dyn FnOnce() -> Result<Option<LibraryProfile>> + 'f>;
 
-/// Which reads and bases count as evidence.
+/// Which records and bases count as evidence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PileupOptions {
-    /// Reads below this mapping quality are left out.
+    /// Records below this mapping quality are left out.
     pub min_mapping_quality: u8,
-    /// Reads whose base is below this quality take no part in their
+    /// Records whose base is below this quality take no part in their
     /// template's base.
     pub min_base_quality: u8,
-    /// Keep only paired reads whose mate is also mapped.
+    /// Keep only paired records whose mate is also mapped.
     pub paired_reads_only: bool,
 }
 
@@ -126,11 +128,11 @@ impl Default for PileupOptions {
 }
 
 impl PileupOptions {
-    /// A builder that piles up only the reads these options accept: mapped,
+    /// A builder that piles up only the records these options accept: mapped,
     /// primary, not duplicates, at or above the mapping quality floor, and
-    /// paired with a mapped mate when only pairs are kept. QC-failed reads are
-    /// kept, as fgbio keeps them, and a read without a mapping quality (255)
-    /// passes the floor, as in htsjdk.
+    /// paired with a mapped mate when only pairs are kept. QC-failed records
+    /// are kept, as fgbio keeps them, and a record without a mapping quality
+    /// (255) passes the floor, as in htsjdk.
     pub fn configure<'f, S: RecordSource>(
         &self,
         builder: StreamingPileupBuilder<'f, S>,
@@ -149,7 +151,7 @@ impl PileupOptions {
     }
 }
 
-/// [`Evidence`] from a streampile pileup builder over coordinate-sorted reads.
+/// [`Evidence`] from a streampile pileup builder over a coordinate-sorted BAM.
 pub struct PileupEvidence<'f, S: RecordSource> {
     builder: StreamingPileupBuilder<'f, S>,
     library: Option<PendingLibrary<'f>>,
@@ -214,8 +216,8 @@ impl<S: RecordSource> Evidence for PileupEvidence<'_, S> {
     }
 }
 
-/// The molecule a template shows: the base its reads at the quality floor
-/// call, or else a deletion any of its reads holds, and the site's distances
+/// The molecule a template shows: the base its mates at the quality floor
+/// call, or else a deletion any of its mates holds, and the site's distances
 /// from the template's ends, or `None` for a template with neither or a site
 /// outside it.
 fn molecule<R: AlignmentRecord>(
@@ -244,8 +246,9 @@ fn molecule<R: AlignmentRecord>(
     }))
 }
 
-/// The strand a read's template was copied from: read 1's strand, which for a
-/// read 2 is its mate's, or `None` for a duplex consensus, which holds both.
+/// The strand a mate's template was copied from: the first of pair's strand,
+/// which for a second of pair is its mate's, or `None` for a duplex consensus,
+/// which holds both.
 fn origin<R: AlignmentRecord>(entry: PileupEntry<'_, R>) -> Option<Strand> {
     let depth = |tag: &[u8; 2]| {
         entry
@@ -274,11 +277,11 @@ fn origin<R: AlignmentRecord>(entry: PileupEntry<'_, R>) -> Option<Strand> {
 /// The site's distances from a template's leftmost and rightmost bases, as
 /// `(left, right)`, or `None` for a site outside the template.
 ///
-/// Each distance is counted along the read sequenced from that end where it
-/// holds a base here, and otherwise by a read of the other strand, which walks
-/// its mate's CIGAR from the `MC` tag. A read of an FR pair, as htsjdk 5.0.0
+/// Each distance is counted along the mate sequenced from that end where it
+/// holds a base here, and otherwise by a mate of the other strand, which walks
+/// its mate's CIGAR from the `MC` tag. A mate of an FR pair, as htsjdk 5.0.0
 /// classifies it, is outside its template wherever a distance is unknown: past
-/// its mate's 5' end. A read of a pair whose reads face away from each other
+/// its mate's 5' end. A mate of a pair whose mates face away from each other
 /// knows only its own end, as fgbio has it.
 fn distances<R: AlignmentRecord>(
     template: &PileupTemplate<'_, R>,
