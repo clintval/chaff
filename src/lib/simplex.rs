@@ -5,9 +5,10 @@
 //! strands: `ac` and `bc` hold their bases and `ad` and `bd` the raw reads
 //! behind them. Once aligned, as by `ZipperBams`, the bases are reverse
 //! complemented with the consensus, so they sit in the reference's
-//! orientation. A consensus whose mate overlaps it counts only outside its
-//! mate's span,
-//! from the mate's `MC` tag, so each molecule counts once.
+//! orientation. A consensus counts only with all four tags, read past any
+//! hard clip they still hold. A consensus whose mate overlaps it counts only
+//! outside its mate's span, from the mate's `MC` tag, so each molecule counts
+//! once.
 //!
 //! A library profile reads every consensus once and counts, at each reference base
 //! a damage class can change, two kinds of molecule:
@@ -374,6 +375,41 @@ fn index(base: u8) -> Option<usize> {
     }
 }
 
+/// One consensus's single-strand bases and raw-read depths, from its first
+/// base on.
+struct Strands<'a> {
+    a_bases: &'a [u8],
+    b_bases: &'a [u8],
+    a_reads: &'a [i64],
+    b_reads: &'a [i64],
+}
+
+/// Where a consensus's first base sits in its per-base tags of `length`: at
+/// 0 when they match its bases, past its leading hard clip when they still
+/// hold the clipped bases, or `None` when they fit neither.
+fn tag_offset(record: &bam::Record, length: usize) -> Result<Option<usize>> {
+    let bases = record.sequence().len();
+    if length == bases {
+        return Ok(Some(0));
+    }
+    let kinds = record
+        .cigar()
+        .iter()
+        .map(|op| op.map(|op| (op.kind(), op.len())))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let hard = |op: Option<&(Kind, usize)>| match op {
+        Some(&(Kind::HardClip, len)) => len,
+        _ => 0,
+    };
+    let leading = hard(kinds.first());
+    let trailing = if kinds.len() > 1 {
+        hard(kinds.last())
+    } else {
+        0
+    };
+    Ok((length == bases + leading + trailing).then_some(leading))
+}
+
 /// A contig's reference bases, read a chunk at a time as the consensus advances.
 struct Window {
     contig: String,
@@ -517,6 +553,22 @@ impl<'a> Scanner<'a> {
 
     /// Count one consensus.
     fn add(&mut self, record: &bam::Record, header: &noodles::sam::Header) -> Result<()> {
+        let data = record.data();
+        let strand_bases = |tag: &[u8; 2]| match data.get(tag) {
+            Some(Ok(Value::String(s))) => Some(s.to_vec()),
+            _ => None,
+        };
+        let strand_reads = |tag: &[u8; 2]| data.get(tag).and_then(Result::ok).and_then(integers);
+        let (Some(a_bases), Some(b_bases), Some(a_reads), Some(b_reads)) = (
+            strand_bases(b"ac"),
+            strand_bases(b"bc"),
+            strand_reads(b"ad"),
+            strand_reads(b"bd"),
+        ) else {
+            return Ok(());
+        };
+        self.tagged += 1;
+
         let flags = record.flags();
         if flags.is_unmapped()
             || flags.is_secondary()
@@ -533,17 +585,13 @@ impl<'a> Scanner<'a> {
         {
             return Ok(());
         }
-        let data = record.data();
-        let strand_bases = |tag: &[u8; 2]| match data.get(tag) {
-            Some(Ok(Value::String(s))) => Some(s.to_vec()),
-            _ => None,
-        };
-        let (Some(a_bases), Some(b_bases)) = (strand_bases(b"ac"), strand_bases(b"bc")) else {
+        let length = a_bases.len();
+        if [b_bases.len(), a_reads.len(), b_reads.len()] != [length; 3] {
+            return Ok(());
+        }
+        let Some(offset) = tag_offset(record, length)? else {
             return Ok(());
         };
-        let a_reads = data.get(b"ad").and_then(Result::ok).and_then(integers);
-        let b_reads = data.get(b"bd").and_then(Result::ok).and_then(integers);
-        self.tagged += 1;
 
         let (Some(Ok(contig_id)), Some(Ok(start))) =
             (record.reference_sequence_id(), record.alignment_start())
@@ -558,7 +606,7 @@ impl<'a> Scanner<'a> {
                 .reference_sequences()
                 .get_index(contig_id)
                 .map(|(name, _)| name.to_string())
-                .context("a read's contig is not in the BAM header")?;
+                .context("a record's contig is not in the BAM header")?;
             self.contig = Some((contig_id, name));
             self.head = start;
         }
@@ -586,6 +634,12 @@ impl<'a> Scanner<'a> {
         let qualities = record.quality_scores();
         let qualities = qualities.as_ref();
         let reverse = flags.is_reverse_complemented();
+        let strands = Strands {
+            a_bases: &a_bases[offset..],
+            b_bases: &b_bases[offset..],
+            a_reads: &a_reads[offset..],
+            b_reads: &b_reads[offset..],
+        };
 
         let (mut query, mut pos) = (0usize, start);
         for op in record.cigar().iter() {
@@ -598,10 +652,7 @@ impl<'a> Scanner<'a> {
                         if mate_span.is_some_and(|(s, e)| s <= p && p < e) {
                             continue;
                         }
-                        self.add_base(
-                            &contig, p, q, &sequence, qualities, &a_bases, &b_bases, &a_reads,
-                            &b_reads, reverse,
-                        )?;
+                        self.add_base(&contig, p, q, &sequence, qualities, &strands, reverse)?;
                     }
                     query += len;
                     pos += len;
@@ -622,18 +673,15 @@ impl<'a> Scanner<'a> {
         query: usize,
         sequence: &bam::record::Sequence<'_>,
         qualities: &[u8],
-        a_bases: &[u8],
-        b_bases: &[u8],
-        a_reads: &Option<Vec<i64>>,
-        b_reads: &Option<Vec<i64>>,
+        strands: &Strands<'_>,
         reverse: bool,
     ) -> Result<()> {
         let Some(reference) = self.reference_base(contig, pos)? else {
             return Ok(());
         };
         let seq = sequence.get(query).map(|b| b.to_ascii_uppercase());
-        let a = a_bases.get(query).map(u8::to_ascii_uppercase);
-        let b = b_bases.get(query).map(u8::to_ascii_uppercase);
+        let a = strands.a_bases.get(query).map(u8::to_ascii_uppercase);
+        let b = strands.b_bases.get(query).map(u8::to_ascii_uppercase);
         if let (Some(seq), Some(a)) = (seq, a) {
             if index(seq).is_some() && index(a).is_some() {
                 let tally = &mut self.agreement[usize::from(reverse)];
@@ -669,14 +717,10 @@ impl<'a> Scanner<'a> {
             return Ok(());
         };
         site.strand_molecules += 1;
-        let reads = |r: &Option<Vec<i64>>| r.as_ref().and_then(|r| r.get(query).copied());
-        if b == reference && a != reference && reads(a_reads).is_some_and(|n| n >= MIN_STRAND_READS)
-        {
+        let reads = |r: &[i64]| r.get(query).is_some_and(|&n| n >= MIN_STRAND_READS);
+        if b == reference && a != reference && reads(strands.a_reads) {
             site.single_strand[ia] += 1;
-        } else if a == reference
-            && b != reference
-            && reads(b_reads).is_some_and(|n| n >= MIN_STRAND_READS)
-        {
+        } else if a == reference && b != reference && reads(strands.b_reads) {
             site.single_strand[ib] += 1;
         }
         Ok(())
@@ -788,7 +832,7 @@ pub fn profile_library(
             "profiled the single-strand consensus of {reads} records in {} strata",
             profile.strata.len()
         ),
-        None => info!("the BAM's records carry no single-strand consensus (ac and bc), so chaff learns its priors from the calls alone"),
+        None => info!("the BAM's records carry no single-strand consensus (ac, bc, ad and bd), so chaff learns its priors from the calls alone"),
     }
     Ok(profile)
 }
@@ -835,10 +879,37 @@ mod tests {
                 Tag::new(b'a', b'd'),
                 BufValue::Array(BufArray::Int16(a_reads)),
             )
-            .attr(
-                Tag::new(b'b', b'd'),
-                BufValue::Array(BufArray::Int16(vec![3; 40])),
-            )
+            .attr(Tag::new(b'b', b'd'), depths(40))
+    }
+
+    /// Raw-read depths of 3 at each of `length` bases.
+    fn depths(length: usize) -> BufValue {
+        BufValue::Array(BufArray::Int16(vec![3; length]))
+    }
+
+    /// The four tags of a consensus whose strands both read `bases`, but for
+    /// strand A's `(offset, base)` change.
+    fn tags(bases: &str, change: Option<(usize, u8)>) -> [(Tag, BufValue); 4] {
+        let mut a = bases.as_bytes().to_vec();
+        if let Some((i, base)) = change {
+            a[i] = base;
+        }
+        [
+            (
+                Tag::new(b'a', b'c'),
+                BufValue::from(String::from_utf8(a).unwrap()),
+            ),
+            (Tag::new(b'b', b'c'), BufValue::from(bases.to_string())),
+            (Tag::new(b'a', b'd'), depths(bases.len())),
+            (Tag::new(b'b', b'd'), depths(bases.len())),
+        ]
+    }
+
+    fn tagged(mut frag: Frag, tags: [(Tag, BufValue); 4]) -> Frag {
+        for (tag, value) in tags {
+            frag = frag.attr(tag, value);
+        }
+        frag
     }
 
     fn profile(reads: &SamBuilder) -> Option<LibraryProfile> {
@@ -903,14 +974,10 @@ mod tests {
             .bytes()
             .map(|b| complement(b) as char)
             .collect();
-        let text = BufValue::from(complemented);
-        reads.add_frag(
-            Frag::at(1)
-                .bases(&reference()[..40])
-                .strand(Strand::Minus)
-                .attr(Tag::new(b'a', b'c'), text.clone())
-                .attr(Tag::new(b'b', b'c'), text),
-        );
+        reads.add_frag(tagged(
+            Frag::at(1).bases(&reference()[..40]).strand(Strand::Minus),
+            tags(&complemented, None),
+        ));
         assert_eq!(profile(&reads), None);
     }
 
@@ -919,14 +986,104 @@ mod tests {
     #[test]
     fn test_overlapping_mates_count_once() {
         let mut reads = SamBuilder::new().read_length(40);
-        let text = BufValue::from(reference()[..40].to_string());
-        reads.add_pair(
-            Pair::at(1, 1)
-                .bases1(&reference()[..40])
-                .bases2(&reference()[..40])
-                .attr(Tag::new(b'a', b'c'), text.clone())
-                .attr(Tag::new(b'b', b'c'), text),
+        let mut pair = Pair::at(1, 1)
+            .bases1(&reference()[..40])
+            .bases2(&reference()[..40]);
+        for (tag, value) in tags(&reference()[..40], None) {
+            pair = pair.attr(tag, value);
+        }
+        reads.add_pair(pair);
+        let profile = profile(&reads).unwrap();
+        assert_eq!(profile.stratum("C>T:CpG").unwrap().molecules, 10);
+    }
+
+    /// A strand change on a reverse consensus, its tags reverse complemented
+    /// with it, counts at the reference base it sits on: a G>A at the G of a
+    /// CpG is a C>T there.
+    #[test]
+    fn test_a_reverse_consensus_counts_its_strand_changes_where_they_align() {
+        let mut reads = SamBuilder::new().read_length(40);
+        reads.add_frag(frag(&[(3, b'N', 2, b'A', b'G', 3)], Strand::Minus));
+        let profile = profile(&reads).unwrap();
+        assert_eq!(profile.stratum("C>T:CpG").unwrap().single_strand_changes, 1);
+        assert_eq!(profile.stratum("G>T:CpG").unwrap().single_strand_changes, 0);
+    }
+
+    /// A strand change after an insertion and a deletion counts at its own
+    /// reference base, the C at position 31, outside CpG.
+    #[test]
+    fn test_strand_changes_follow_insertions_and_deletions() {
+        let reference = reference();
+        let bases = format!(
+            "{}GG{}{}",
+            &reference[..10],
+            &reference[10..20],
+            &reference[23..41]
         );
+        let mut reads = SamBuilder::new();
+        reads.add_frag(tagged(
+            Frag::at(1).bases(&bases).cigar("10M2I10M3D18M"),
+            tags(&bases, Some((29, b'T'))),
+        ));
+        let profile = profile(&reads).unwrap();
+        let other = profile.stratum("C>T:non-CpG").unwrap();
+        assert_eq!(other.single_strand_changes, 1);
+        assert_eq!(profile.stratum("C>T:CpG").unwrap().single_strand_changes, 0);
+    }
+
+    /// A hard-clipped consensus whose tags still hold the clipped bases reads
+    /// them past the clip, as does one whose tags were clipped with it, while
+    /// tags that fit neither leave the consensus out, and a BAM whose tags
+    /// lack the raw-read depths has no profile.
+    #[test]
+    fn test_hard_clipped_consensus_reads_its_tags_past_the_clip() {
+        let reference = reference();
+        let full = &reference[..40];
+        let clipped = |tags: [(Tag, BufValue); 4]| {
+            let mut reads = SamBuilder::new();
+            reads.add_frag(tagged(
+                Frag::at(6).bases(&full[5..38]).cigar("5H33M2H"),
+                tags,
+            ));
+            profile(&reads).unwrap()
+        };
+        for tags in [
+            tags(full, Some((6, b'T'))),
+            tags(&full[5..38], Some((1, b'T'))),
+        ] {
+            let other = clipped(tags);
+            let other = other.stratum("C>T:non-CpG").unwrap();
+            assert_eq!(
+                (other.single_strand_changes, other.strand_molecules),
+                (1, 4)
+            );
+        }
+        let misfit = clipped(tags(&full[..39], Some((6, b'T'))));
+        assert!(misfit.strata.is_empty(), "{misfit:?}");
+
+        let mut reads = SamBuilder::new().read_length(40);
+        let [ac, bc, _, _] = tags(full, None);
+        reads.add_frag(Frag::at(1).bases(full).attr(ac.0, ac.1).attr(bc.0, bc.1));
+        assert_eq!(profile(&reads), None);
+    }
+
+    /// Secondary, supplementary, duplicate, and poorly mapped consensus are
+    /// left out, and a BAM that opens with more poorly mapped consensus than
+    /// the probe reads is still profiled.
+    #[test]
+    fn test_only_primary_well_mapped_consensus_counts() {
+        let full = &reference()[..40];
+        let mut reads = SamBuilder::new().read_length(40);
+        for _ in 0..TAG_PROBE {
+            reads.add_frag(tagged(Frag::at(1).bases(full).mapq(5), tags(full, None)));
+        }
+        let mut scratch = SamBuilder::new().read_length(40);
+        for bits in [0x100, 0x400, 0x800, 0] {
+            let record = scratch
+                .add_frag(tagged(Frag::at(2).bases(full), tags(full, None)))
+                .remove(0);
+            reads.extend([SamBuilder::with_flags(record, bits)]);
+        }
         let profile = profile(&reads).unwrap();
         assert_eq!(profile.stratum("C>T:CpG").unwrap().molecules, 10);
     }

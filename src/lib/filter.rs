@@ -1762,6 +1762,7 @@ mod tests {
     #[test]
     fn test_a_duplex_bam_with_single_strand_consensus_is_profiled() {
         use noodles::sam::alignment::record::data::field::Tag;
+        use noodles::sam::alignment::record_buf::data::field::value::Array;
         use noodles::sam::alignment::record_buf::data::field::Value as Field;
         use streampile::testing::{Pair, SamBuilder};
         let dir = tempfile::tempdir().unwrap();
@@ -1786,9 +1787,12 @@ mod tests {
                 for mut record in scratch.add_pair(pair) {
                     if tagged {
                         let bases = String::from_utf8(record.sequence().as_ref().to_vec()).unwrap();
+                        let depths = Field::Array(Array::Int16(vec![3; bases.len()]));
                         let data = record.data_mut();
                         data.insert(Tag::new(b'a', b'c'), Field::from(bases.clone()));
                         data.insert(Tag::new(b'b', b'c'), Field::from(bases));
+                        data.insert(Tag::new(b'a', b'd'), depths.clone());
+                        data.insert(Tag::new(b'b', b'd'), depths);
                     }
                     reads.extend([record]);
                 }
