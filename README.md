@@ -81,6 +81,8 @@ A-tailing scores those whose alternate base is A or T, and end repair fill-in al
 
 ### Copied Damage
 
+![Copied damage makes a call: a methylated C at a CpG is deaminated to T near one strand's 5′ end, a polymerase fills in the partner's recessed 3′ end and copies the T as an A, the UMI-bearing adapters are ligated, and both strands carry the change, so they agree and Duplex Sequencing calls it.](.github/img/copied-damage-steps.svg)
+
 Copied damage carries its change on both strands, so the duplex consensus agrees on it, which makes this the filter for Duplex Sequencing.
 Fragmenting with a restriction enzyme that leaves blunt ends, as NanoSeq does [[3]](#references), or repairing lesions before end repair, as Duplex-Repair does [[4]](#references), keeps lesions from being copied.
 
