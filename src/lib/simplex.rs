@@ -98,6 +98,12 @@ const MAX_SPAN: usize = 100_000;
 /// chance model takes its gamma shape to vary too much.
 pub const FIT_TOLERANCE: f64 = 3.0;
 
+/// The deepest positions the chance model keeps at their own depth.
+const EXACT_DEPTH: u32 = 64;
+
+/// The steps per doubling within which deeper positions pool.
+const DEPTH_STEPS: f64 = 64.0;
+
 /// The least and greatest finite gamma shapes the models search.
 const DISPERSIONS: (f64, f64) = (0.05, 1e4);
 
@@ -177,7 +183,7 @@ impl StratumProfile {
             return fit(f64::INFINITY);
         }
         let (mut low, mut high) = (fitted.ln(), DISPERSIONS.1.ln());
-        for _ in 0..30 {
+        for _ in 0..20 {
             let mid = (low + high) / 2.0;
             if fit(mid.exp()).fits() {
                 high = mid;
@@ -263,11 +269,27 @@ fn probabilities(mean: f64, dispersion: f64) -> impl Iterator<Item = f64> {
     .map(|(_, p)| p)
 }
 
-/// Each depth's positions, whatever their changes.
+/// Each depth's positions, whatever their changes. Depths above
+/// [`EXACT_DEPTH`] pool, within steps of 1/[`DEPTH_STEPS`] of a doubling, at
+/// their mean, which moves a position's chance of a change by far less than
+/// its noise and spares the fits most of their depths.
 fn depths(positions: &Positions) -> BTreeMap<u32, f64> {
-    let mut depths = BTreeMap::new();
+    let mut steps: BTreeMap<(bool, u32), (f64, f64)> = BTreeMap::new();
     for (&(n, _), &count) in positions {
-        *depths.entry(n).or_default() += count as f64;
+        let step = if n <= EXACT_DEPTH {
+            (false, n)
+        } else {
+            (true, (DEPTH_STEPS * f64::from(n).log2()) as u32)
+        };
+        let (molecules, positions) = steps.entry(step).or_default();
+        *molecules += f64::from(n) * count as f64;
+        *positions += count as f64;
+    }
+    let mut depths = BTreeMap::new();
+    for (molecules, positions) in steps.into_values() {
+        *depths
+            .entry((molecules / positions).round() as u32)
+            .or_default() += positions;
     }
     depths
 }
@@ -430,7 +452,7 @@ fn matched_rate(depths: &BTreeMap<u32, f64>, ones: f64, dispersion: f64) -> f64 
         let value = singles(high);
         if value >= ones {
             let (mut low, mut high) = (low.ln(), high.ln());
-            for _ in 0..40 {
+            for _ in 0..30 {
                 let mid = (low + high) / 2.0;
                 if singles(mid.exp()) < ones {
                     low = mid;
@@ -456,7 +478,7 @@ fn matched_rate(depths: &BTreeMap<u32, f64>, ones: f64, dispersion: f64) -> f64 
 /// from a Poisson's until the rate can no longer match the ones, so the
 /// shape is the first crossing on the way down.
 fn fitted_dispersion(positions: &Positions) -> f64 {
-    const STEPS: usize = 48;
+    const STEPS: usize = 24;
     let depths = depths(positions);
     let (zeros, ones) = (observed(positions, 0) as f64, observed(positions, 1) as f64);
     if ones == 0.0 {
@@ -477,7 +499,7 @@ fn fitted_dispersion(positions: &Positions) -> f64 {
         let low = top - step * i as f64;
         if excess(low) < 0.0 {
             let (mut low, mut high) = (low, high);
-            for _ in 0..50 {
+            for _ in 0..30 {
                 let mid = (low + high) / 2.0;
                 if excess(mid) < 0.0 {
                     low = mid;
@@ -1473,6 +1495,21 @@ mod tests {
         assert!((expected_at(&depths, 1, rate, f64::INFINITY) - 300.0).abs() < 1e-6);
         let peak = matched_rate(&depths, 1e6, f64::INFINITY);
         assert!((peak - 1.0).abs() < 0.2, "{peak}");
+    }
+
+    /// Positions deeper than 64 molecules pool at their mean depth within
+    /// steps of a 64th of a doubling, keeping every position.
+    #[test]
+    fn test_deep_positions_pool_at_their_mean_depth() {
+        let positions = Positions::from([
+            ((10, 0), 3),
+            ((10, 1), 1),
+            ((1000, 0), 1),
+            ((1001, 2), 3),
+            ((2000, 0), 2),
+        ]);
+        let expected = BTreeMap::from([(10, 4.0), (1001, 4.0), (2000, 2.0)]);
+        assert_eq!(super::depths(&positions), expected);
     }
 
     #[test]
