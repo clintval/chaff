@@ -129,6 +129,9 @@
 //!   base's, so a Q0 or Q1 base cannot zero a likelihood.
 //! - **Missing evidence.** A call with alternate but no reference molecules
 //!   gets no INFO value; fgbio writes `NaN`.
+//! - **Missing genotypes.** An SNV whose genotype is `.` or absent, as many
+//!   somatic callers write it, is scored as heterozygous for its first
+//!   alternate allele; fgbio scores only called heterozygous genotypes.
 //! - **Streaming.** The BAM is always streamed, never queried by index.
 //! - **Number format.** Values keep htsjdk's rounding but are written in
 //!   decimal: `0.00003218` for fgbio's `3.218e-05`.

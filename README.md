@@ -75,6 +75,7 @@ Each filter models one library-preparation step that leaves an artifact near a k
 
 The length a polymerase fills in varies from fragment to fragment, so the evidence for copied damage and end repair fill-in fades with distance from the end, by a *decay* whose *scale* the tool learns per sample, while A-tailing changes only the last base or two of a 3′ end and is scored within a 2 bp window.
 All three filters run by default, but they apply no FILTER until given a threshold.
+The filters score SNVs whose genotype is heterozygous, or missing as many somatic callers write it; homozygous, haploid, and indel calls pass unscored, since the filters weigh alternate molecules against the sample's reference molecules at the site.
 Copied damage scores the SNVs in its damage classes on either strand: C>T covers C>T and G>A calls, and G>T covers G>T and C>A calls.
 A-tailing scores those whose alternate base is A or T, and end repair fill-in all of them.
 

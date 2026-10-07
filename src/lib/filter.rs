@@ -23,7 +23,7 @@ use noodles::vcf::variant::record_buf::Filters;
 use noodles::vcf::variant::RecordBuf;
 use streampile::{RecordSource, StreamingPileupBuilder};
 
-use crate::call::Genotype;
+use crate::call::{Genotype, Skip};
 use crate::classes::{sbs6, Context};
 use crate::copied_damage::{CopiedDamage, DamageSite};
 use crate::evidence::{Evidence, Molecule, PileupEvidence, PileupOptions};
@@ -623,8 +623,8 @@ fn score_decays(calls: &mut [Vec<Annotation>], options: &FilterOptions) -> Scale
         }
         if distance == Distance::Learned {
             info!(
-                "{kind}: learned a decay scale of {scale:.2} bp from {} calls",
-                held.len()
+                "{kind}: learned a decay scale of {scale:.2} bp from {}",
+                plural(held.len(), "call")
             );
         }
         for annotation in calls.iter_mut().flatten().filter(|a| a.kind == kind) {
@@ -787,15 +787,22 @@ pub fn filter_vcf_report(
     let mut cache = None;
     let mut calls: Vec<Vec<Annotation>> = Vec::new();
     let mut channels: Vec<Option<usize>> = Vec::new();
+    let mut skipped: BTreeMap<Skip, u64> = BTreeMap::new();
     let mut record = RecordBuf::default();
     while reader.read_record(&header, &mut record)? != 0 {
         let contig = record.reference_sequence_name().to_string();
         let pos = record.variant_start().map(usize::from).unwrap_or(0);
         order.check(&contig, pos)?;
-        let Some(gt) = Genotype::from_record(&record, sample_index).filter(|_| pos > 0) else {
-            calls.push(Vec::new());
-            channels.push(None);
-            continue;
+        let gt = match Genotype::scored(&record, sample_index) {
+            Ok(gt) if pos > 0 => gt,
+            scored => {
+                *skipped
+                    .entry(scored.err().unwrap_or(Skip::NotSnv))
+                    .or_default() += 1;
+                calls.push(Vec::new());
+                channels.push(None);
+                continue;
+            }
         };
         let bases = snv(&gt);
         let context = match (bases, reference.as_deref_mut()) {
@@ -811,11 +818,13 @@ pub fn filter_vcf_report(
                     channel(prev, base, alt_base, next)
                 }),
         );
-        calls.push(score_call(
-            &gt, &contig, pos, options, evidence, context, &mut cache,
-        )?);
+        let annotations = score_call(&gt, &contig, pos, options, evidence, context, &mut cache)?;
+        if annotations.is_empty() {
+            *skipped.entry(Skip::NoFilter).or_default() += 1;
+        }
+        calls.push(annotations);
     }
-    info!("scored {} calls of sample {sample}", calls.len());
+    log_scored(&sample, &calls, &skipped);
 
     let scales = score_decays(&mut calls, options);
     let fractions = assign_posteriors(&mut calls, options.model);
@@ -840,15 +849,15 @@ pub fn filter_vcf_report(
     let rows = metrics_rows(&sample, &calls, &fractions, &scales, options);
     for row in &rows {
         info!(
-            "{} {}: {} calls, artifact fraction {}, {} filtered, {} of {} alternate molecules congruent",
+            "{} {}: {}, artifact fraction {}, {} filtered, {} of {} congruent",
             row.filter,
             row.stratum,
-            row.calls,
+            plural(row.calls as usize, "call"),
             row.artifact_fraction
                 .map_or_else(|| "per call".to_string(), |f| format!("{f:.4}")),
             row.filtered,
             row.alt_congruent,
-            row.alt_molecules,
+            plural(row.alt_molecules as usize, "alternate molecule"),
         );
     }
     let spectrum = spectrum.then(|| tally_spectrum(&calls, &channels, options));
@@ -857,6 +866,37 @@ pub fn filter_vcf_report(
         metrics: rows,
         spectrum,
     })
+}
+
+/// Log how many of a sample's calls were scored, and why the others were
+/// not, warning when none was.
+fn log_scored(sample: &str, calls: &[Vec<Annotation>], skipped: &BTreeMap<Skip, u64>) {
+    let scored = calls.iter().filter(|a| !a.is_empty()).count();
+    info!(
+        "scored {} of {} of sample {sample}",
+        scored,
+        plural(calls.len(), "call")
+    );
+    for (skip, count) in skipped {
+        info!(
+            "skipped {}: {}",
+            plural(*count as usize, "call"),
+            skip.reason()
+        );
+    }
+    if scored == 0 {
+        log::warn!(
+            "no call of sample {sample} was scored: the filters score heterozygous SNVs, and SNVs without a genotype"
+        );
+    }
+}
+
+/// A count and a noun, the noun plural unless the count is one.
+pub(crate) fn plural(count: usize, noun: &str) -> String {
+    match count {
+        1 => format!("1 {noun}"),
+        n => format!("{n} {noun}s"),
+    }
 }
 
 /// The trinucleotide spectrum of the calls with a channel: every one before
@@ -1096,6 +1136,41 @@ mod tests {
         assert_eq!(rows.len(), 2);
         let strata: Vec<&str> = rows.iter().map(|r| r.stratum.as_str()).collect();
         assert_eq!(strata, vec!["C>T:CpG", "C>T:non-CpG"]);
+    }
+
+    /// An SNV whose genotype calls nothing is scored as heterozygous, while a
+    /// homozygous alternate SNV is left as it was.
+    #[test]
+    fn test_an_snv_without_a_called_genotype_is_scored() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(10, &["G", "T"], vec![gt("tumor", ".")]));
+        vcf.add(Variant::new(20, &["G", "T"], vec![gt("tumor", "1/1")]));
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let mut table = MoleculeTable::new();
+        for pos in [10, 20] {
+            let mut molecules: Vec<Molecule> =
+                (0..20).map(|d| Molecule::new(b'G', 30, d, 90)).collect();
+            molecules.push(Molecule::new(b'T', 30, 0, 90));
+            table.insert("chr1", pos, molecules);
+        }
+        let options = FilterOptions {
+            filters: vec![FilterKind::EndRepairFillIn],
+            ..FilterOptions::default()
+        };
+        for name in ["out.vcf", "out.bcf"] {
+            let output = dir.path().join(name);
+            filter_vcf(&input, &output, &mut table.clone(), None, &options).unwrap();
+            let (_, records) = read_records(&output);
+            assert!(
+                float(&records[0], EndRepairFillIn::INFO).is_some(),
+                "{name}"
+            );
+            assert!(
+                float(&records[1], EndRepairFillIn::INFO).is_none(),
+                "{name}"
+            );
+        }
     }
 
     #[test]

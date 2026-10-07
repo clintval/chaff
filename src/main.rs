@@ -58,10 +58,11 @@ pub(crate) const CARGO_STYLING: Styles = Styles::styled()
 /// Library preparation can turn DNA damage into a base change that both
 /// strands of a duplex agree on. chaff reads a coordinate-sorted VCF/BCF of
 /// somatic calls and the coordinate-sorted BAM of one of its samples,
-/// merge-joins them without an index, and scores each call by where its
-/// alternate molecules sit compared with the reference molecules at the same
-/// site. It writes the calls with INFO annotations and, past a threshold,
-/// FILTERs.
+/// merge-joins them without an index, and scores each SNV whose genotype is
+/// heterozygous or missing by where its alternate molecules sit compared with
+/// the reference molecules at the same site; homozygous, haploid, and indel
+/// calls pass unscored. It writes the calls with INFO annotations and, past a
+/// threshold, FILTERs.
 ///
 /// MENTAL MODEL
 ///
