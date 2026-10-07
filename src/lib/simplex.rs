@@ -1,14 +1,15 @@
 //! What a duplex BAM's single-strand consensus says about a library's damage.
 //!
-//! A duplex consensus read from fgbio's or fgumi's `CallDuplexConsensusReads`
+//! A duplex consensus from fgbio's or fgumi's `CallDuplexConsensusReads`
 //! carries, per base, the single-strand consensus of each of the molecule's two
 //! strands: `ac` and `bc` hold their bases and `ad` and `bd` the raw reads
 //! behind them. Once aligned, as by `ZipperBams`, the bases are reverse
-//! complemented with the read, so they sit in the reference's orientation. A
-//! read of a pair that its mate overlaps counts only outside its mate's span,
+//! complemented with the consensus, so they sit in the reference's
+//! orientation. A consensus whose mate overlaps it counts only outside its
+//! mate's span,
 //! from the mate's `MC` tag, so each molecule counts once.
 //!
-//! A library profile reads every read once and counts, at each reference base
+//! A library profile reads every consensus once and counts, at each reference base
 //! a damage class can change, two kinds of molecule:
 //!
 //! - **Single-strand changes:** one strand holds the reference base and the
@@ -71,14 +72,14 @@ pub const MIN_STRAND_READS: i64 = 2;
 /// with more pool with it.
 pub const MAX_CHANGES: u32 = 8;
 
-/// The reads a library profile reads before it decides the BAM has no
+/// The records a library profile reads before it decides the BAM has no
 /// single-strand consensus.
 const TAG_PROBE: u64 = 1_000;
 
 /// The reference bases a library profile holds in memory at once.
 const REFERENCE_CHUNK: usize = 1 << 20;
 
-/// The longest reference span of a read the profile counts, beyond which it
+/// The longest reference span of a consensus the profile counts, beyond which it
 /// is skipped rather than held.
 const MAX_READ_SPAN: usize = 100_000;
 
@@ -101,7 +102,8 @@ const CLONAL_FRACTION: f64 = 0.01;
 const GERMLINE_FRACTION: f64 = 0.2;
 
 /// The lowest agreement of the strands' bases with the consensus base, over
-/// reverse reads, for the tags to be taken as aligned with their reads.
+/// consensus on the reverse strand, for the tags to be taken as aligned with
+/// their consensus.
 const MIN_ORIENTATION_AGREEMENT: f64 = 0.9;
 
 /// Positions by their molecules and their changes among them.
@@ -350,7 +352,7 @@ impl LibraryProfile {
     }
 }
 
-/// One reference position's molecules while reads still cover it.
+/// One reference position's molecules while consensus still covers it.
 #[derive(Clone, Copy, Debug, Default)]
 struct Site {
     reference: u8,
@@ -372,7 +374,7 @@ fn index(base: u8) -> Option<usize> {
     }
 }
 
-/// A contig's reference bases, read a chunk at a time as the reads advance.
+/// A contig's reference bases, read a chunk at a time as the consensus advances.
 struct Window {
     contig: String,
     start: usize,
@@ -513,7 +515,7 @@ impl<'a> Scanner<'a> {
         &mut self.sites[offset]
     }
 
-    /// Count one read.
+    /// Count one consensus.
     fn add(&mut self, record: &bam::Record, header: &noodles::sam::Header) -> Result<()> {
         let flags = record.flags();
         if flags.is_unmapped()
@@ -688,8 +690,8 @@ impl<'a> Scanner<'a> {
         let (agree, total) = self.agreement[1];
         if total > 0 && (agree as f64) < MIN_ORIENTATION_AGREEMENT * total as f64 {
             warn!(
-                "the single-strand consensus bases of reverse reads agree with the consensus base at only {agree} of {total} bases, \
-                 so they were not reverse complemented when the reads were aligned and chaff leaves them out"
+                "the single-strand consensus bases of reverse-strand consensus agree with its base at only {agree} of {total} bases, \
+                 so they were not reverse complemented when the consensus was aligned and chaff leaves them out"
             );
             return None;
         }
@@ -714,9 +716,9 @@ fn integers(value: Value<'_>) -> Option<Vec<i64>> {
     values.ok()
 }
 
-/// The 0-based, half-open reference span of a second read's mate, from its
-/// position and `MC` tag, which the read leaves to its mate so a molecule
-/// counts once where its reads overlap.
+/// The 0-based, half-open reference span of a second of pair's mate, from
+/// its position and `MC` tag, which the consensus leaves to its mate so a
+/// molecule counts once where its mates overlap.
 fn mate_span(record: &bam::Record, contig_id: usize) -> Result<Option<(usize, usize)>> {
     let flags = record.flags();
     if !flags.is_segmented() || flags.is_mate_unmapped() || !flags.is_last_segment() {
@@ -756,7 +758,7 @@ fn reference_length(cigar: &[u8]) -> usize {
 }
 
 /// Profile the single-strand and duplex changes of a coordinate-sorted BAM,
-/// or `None` when its reads carry no single-strand consensus, or carry it
+/// or `None` when its records carry no single-strand consensus, or carry it
 /// unaligned.
 pub fn profile_library(
     bam: &Path,
@@ -783,10 +785,10 @@ pub fn profile_library(
     let profile = scanner.finish();
     match &profile {
         Some(profile) => info!(
-            "profiled the single-strand consensus of {reads} reads in {} strata",
+            "profiled the single-strand consensus of {reads} records in {} strata",
             profile.strata.len()
         ),
-        None => info!("the BAM's reads carry no single-strand consensus (ac and bc), so chaff learns its priors from the calls alone"),
+        None => info!("the BAM's records carry no single-strand consensus (ac and bc), so chaff learns its priors from the calls alone"),
     }
     Ok(profile)
 }
@@ -807,8 +809,9 @@ mod tests {
         UNIT.repeat(50)
     }
 
-    /// A read of the reference's first 40 bases with both strands' bases, and
-    /// any changes `(0-based offset, consensus base, quality, a, b, a reads)`.
+    /// A consensus of the reference's first 40 bases with both strands' bases,
+    /// and any changes `(0-based offset, consensus base, quality, a, b, a raw
+    /// reads)`.
     fn frag(changes: &[(usize, u8, u8, u8, u8, i16)], strand: Strand) -> Frag {
         let mut seq = reference().as_bytes()[..40].to_vec();
         let mut quals = vec![30u8; 40];
@@ -847,7 +850,7 @@ mod tests {
         profile_library(&bam, &fasta, &classes, &PileupOptions::default()).unwrap()
     }
 
-    /// Of ten reads over positions 1 to 40, one holds a duplex C>T at the C of
+    /// Of ten consensus over positions 1 to 40, one holds a duplex C>T at the C of
     /// a CpG, one a C>T on one strand at a C outside CpG, and one the same
     /// change read by a single raw read, which does not count.
     #[test]
@@ -888,8 +891,8 @@ mod tests {
         assert_eq!(profile(&reads), None);
     }
 
-    /// Strand bases left in the read's sequencing orientation disagree with a
-    /// reverse read's consensus base, so the profile leaves them out.
+    /// Strand bases left in the sequencing orientation disagree with a reverse
+    /// strand consensus's base, so the profile leaves them out.
     #[test]
     fn test_unaligned_strand_bases_of_reverse_reads_have_no_profile() {
         let mut reads = SamBuilder::new().read_length(40);
@@ -911,7 +914,7 @@ mod tests {
         assert_eq!(profile(&reads), None);
     }
 
-    /// Mates over the same positions are one molecule there: the second read
+    /// Mates over the same positions are one molecule there: the second of pair
     /// leaves its mate's span to it.
     #[test]
     fn test_overlapping_mates_count_once() {

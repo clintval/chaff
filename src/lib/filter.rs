@@ -1755,10 +1755,10 @@ mod tests {
         assert!(error.to_string().contains("reference"), "{error}");
     }
 
-    /// A duplex BAM whose reads carry both strands' single-strand consensus
+    /// A duplex consensus BAM that carries both strands' single-strand consensus
     /// is profiled beside the calls: its copied damage takes the chance prior
-    /// and its metrics the library's rates, while the same reads without the
-    /// tags score as before.
+    /// and its metrics the library's rates, while the same consensus without the
+    /// tags scores as before.
     #[test]
     fn test_a_duplex_bam_with_single_strand_consensus_is_profiled() {
         use noodles::sam::alignment::record::data::field::Tag;

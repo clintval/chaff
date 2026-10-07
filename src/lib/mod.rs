@@ -66,7 +66,7 @@
 //! pseudo-calls at its filter's fraction, so a stratum of one or two calls
 //! mostly inherits `π_f` and one of hundreds keeps nearly its own.
 //!
-//! On a duplex BAM whose reads carry each strand's single-strand consensus,
+//! On a duplex consensus BAM that carries each strand's single-strand consensus,
 //! copied damage under the `chaff` model takes its prior from the library
 //! instead (see [`simplex`]): for a call with `k` alternate molecules, the
 //! share `E(k) / S(k)` of the library's positions with `k` duplex changes of
