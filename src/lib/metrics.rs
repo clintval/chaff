@@ -55,9 +55,11 @@ pub struct StratumMetrics {
     /// The sum over calls of the posterior probability of an artifact.
     #[serde(serialize_with = "six_digits")]
     pub expected_artifacts: f64,
-    /// The sum over calls of the posterior probability of a real mutation:
-    /// the stratum's expected count of real mutations, a burden that weighs
-    /// each call by how likely it is real rather than filtering it.
+    /// The sum over calls of the posterior probability of a real mutation,
+    /// a call without a posterior counting as one: the stratum's expected
+    /// count of real mutations, a burden that weighs each call by how likely
+    /// it is real rather than filtering it. With `expected_artifacts` it sums
+    /// to `calls`.
     #[serde(serialize_with = "six_digits")]
     pub expected_mutations: f64,
     /// Alternate molecules measured.

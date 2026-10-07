@@ -158,7 +158,7 @@ Each row of the metrics describes one filter and *stratum*, a group of calls tha
 Its columns are:
 
 - **Calls:** `calls`, the calls scored, and `filtered`, the calls given the FILTER.
-- **Fractions:** `artifact_fraction`, the stratum's learned share of artifacts, and `filter_artifact_fraction`, the filter's over all its strata, which each stratum's is drawn toward, and `expected_artifacts` and `expected_mutations`, the sums of each call's chance of being an artifact and a real mutation.
+- **Fractions:** `artifact_fraction`, the stratum's learned share of artifacts, and `filter_artifact_fraction`, the filter's over all its strata, which each stratum's is drawn toward, and `expected_artifacts` and `expected_mutations`, the sums of each call's chance of being an artifact and a real mutation, a call without a posterior counting as real.
 - **Distance:** `distance`, the decay scale or window in bases.
 - **Molecules:** `alt_molecules` and `ref_molecules`, the molecules measured, and their `_congruent` counts and fractions, those within the distance of the artifact's end.
 - **Asymmetry:** `expected_alt_congruent`, the alternate molecules each call's own reference molecules predict within the distance, and `asymmetry_p_value`, a one-sided test of whether more sit there; a small value says the library has the artifact.

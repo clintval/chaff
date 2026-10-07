@@ -980,12 +980,15 @@ fn metrics_rows(
             let null = null_fraction(score.ref_congruent, score.ref_molecules);
             trials.push((score.alt_molecules, null));
         }
-        if let Some(posterior) = annotation.posterior {
-            row.expected_artifacts += 1.0 - posterior;
-            row.expected_mutations += posterior;
-            if is_filtered(posterior, annotation.kind.threshold(options)) {
-                row.filtered += 1;
+        match annotation.posterior {
+            Some(posterior) => {
+                row.expected_artifacts += 1.0 - posterior;
+                row.expected_mutations += posterior;
+                if is_filtered(posterior, annotation.kind.threshold(options)) {
+                    row.filtered += 1;
+                }
             }
+            None => row.expected_mutations += 1.0,
         }
     }
     rows.into_values()
@@ -1451,9 +1454,10 @@ mod tests {
     }
 
     /// Each stratum's expected mutations and expected artifacts are the sums of
-    /// its calls' posteriors and their complements, so together they count its
-    /// calls with a posterior, and the expected mutations match the calls'
-    /// own `CDAP` values.
+    /// its calls' posteriors and their complements, a call without a
+    /// posterior counting as a mutation, so together they count its calls,
+    /// and the expected mutations match the calls' own `CDAP` values plus
+    /// one per call without one.
     #[test]
     fn test_expected_mutations_sum_the_posteriors() {
         let dir = tempfile::tempdir().unwrap();
@@ -1468,6 +1472,8 @@ mod tests {
             molecules.extend(distances.map(|d| at(b'T', d)));
             table.insert("chr1", pos, molecules);
         }
+        vcf.add(Variant::new(1026, &["C", "T"], vec![gt("tumor", "0/1")]));
+        table.insert("chr1", 1026, (0..4).map(|d| at(b'T', d)).collect());
         let input = vcf.write(&dir.path().join("in.vcf"));
         let output = dir.path().join("out.vcf");
         let options = FilterOptions {
@@ -1477,24 +1483,22 @@ mod tests {
         let mut reference = Reference::open(&reference).unwrap();
         let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
         let (_, records) = read_records(&output);
-        let cdap: f64 = records
+        let cdap: Vec<f64> = records
             .iter()
-            .map(|r| f64::from(float(r, CopiedDamage::INFO_POSTERIOR).unwrap()))
-            .sum();
+            .filter_map(|r| float(r, CopiedDamage::INFO_POSTERIOR).map(f64::from))
+            .collect();
+        assert_eq!(cdap.len(), 3);
         let row = &rows[0];
-        assert_eq!(row.calls, 3);
+        assert_eq!(row.calls, 4);
         assert!(
-            (row.expected_mutations + row.expected_artifacts - 3.0).abs() < 1e-9,
+            (row.expected_mutations + row.expected_artifacts - 4.0).abs() < 1e-9,
             "{row:?}"
         );
+        let expected = cdap.iter().sum::<f64>() + 1.0;
         assert!(
-            (row.expected_mutations - cdap).abs() < 0.01,
-            "{} vs {cdap}",
+            (row.expected_mutations - expected).abs() < 0.01,
+            "{} vs {expected}",
             row.expected_mutations
-        );
-        assert!(
-            row.expected_mutations > 0.5 && row.expected_mutations < 2.5,
-            "{row:?}"
         );
     }
 
