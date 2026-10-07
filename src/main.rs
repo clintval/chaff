@@ -162,12 +162,13 @@ struct Cli {
     metrics: Option<PathBuf>,
 
     /// PDF of the sample's SNVs by trinucleotide context, before and after
-    /// filtering.
+    /// filtering, its panels on one scale.
     ///
-    /// Before filtering, it counts every heterozygous SNV, whatever its
-    /// FILTER. After filtering, it counts the calls no filter flagged when a
-    /// filter has a threshold, or else weighs each call by the product of the
-    /// posteriors of the filters `--filters` enables.
+    ///   SNVs                 every heterozygous SNV, whatever its FILTER
+    ///   Expected Real SNVs   each weighed by the product of the posteriors
+    ///                        of the filters --filters enables
+    ///   Passing SNVs         those no filter flagged, when a filter has a
+    ///                        threshold
     #[arg(long, value_name = "PDF", value_parser = report_file, verbatim_doc_comment)]
     spectrum: Option<PathBuf>,
 
