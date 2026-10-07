@@ -203,7 +203,7 @@ struct Cli {
         value_enum,
         value_delimiter = ',',
         value_name = "FILTER",
-        default_values_t = FilterKind::ALL,
+        default_value = "copied-damage,a-tailing,end-repair-fill-in",
         hide_possible_values = true,
         verbatim_doc_comment
     )]
@@ -235,7 +235,7 @@ struct Cli {
         long,
         value_delimiter = ',',
         value_name = "CLASS",
-        default_values = ["C>T", "G>T"],
+        default_value = "C>T,G>T",
         verbatim_doc_comment
     )]
     copied_damage_classes: Vec<DamageClass>,
@@ -817,5 +817,16 @@ mod tests {
     #[case(&["--ref", "ref.fa", "--model", "fgbio", "--copied-damage-distance", "20"])]
     fn test_options_of_enabled_filters_and_defaults_are_accepted(#[case] extra: &[&str]) {
         args(extra).unwrap();
+    }
+
+    #[test]
+    fn test_list_defaults_are_every_filter_and_both_classes_shown_comma_separated() {
+        let options = args(&["--ref", "ref.fa"]).unwrap().options;
+        assert_eq!(options.filters, FilterKind::ALL);
+        let classes = [DamageClass::DEAMINATION, DamageClass::OXIDATION];
+        assert_eq!(options.copied_damage.classes, classes);
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("[default: copied-damage,a-tailing,end-repair-fill-in]"));
+        assert!(help.contains("[default: C>T,G>T]"));
     }
 }
