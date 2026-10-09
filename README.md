@@ -126,6 +126,10 @@ Where end repair over-digested a 3′ end by one base, that A stands in for the 
 - **Writes:** the posterior `ATAP` and the FILTER `ATailingArtifact`.
 - **Use it when:** the library was A-tailed for T-overhang adapters, unlike blunt-end ligation or transposase (tagmentation) preps, and its BAM is not a duplex consensus.
 
+> [!NOTE]
+> Where read trimming leaves the A-tail in place, the non-templated A can show on both strands, so a duplex consensus does not always remove it: it stays at the last base of a 3′ end.
+> Before dropping A-tailing for a Duplex Sequencing library, measure it as in [2. Measure](#2-measure): a small `asymmetry_p_value` in its rows of the metrics says the library has the artifact.
+
 ## Setting and Tuning
 
 Every filter runs by default and only annotates calls until given a threshold, so choosing a filter means giving it a threshold.
