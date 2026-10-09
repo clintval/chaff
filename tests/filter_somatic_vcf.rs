@@ -470,10 +470,10 @@ fn test_apply_filters_with_thresholds_under_the_chaff_model_ignores_alternates_a
 /// The same reads as a duplex consensus, every record carrying fgbio's `aD`
 /// and `bD` depths of both strands. A duplex consensus holds both strands, so
 /// end repair fill-in measures from the nearer template end and starts from
-/// its 3 bp duplex scale: the calls at 100, 400, and 500, whose alternate
-/// molecules all sit within 3 bases of a template end, are filtered, where
-/// the read-pair test above spares 400 and 500, and the spread G>A at 200 is
-/// not.
+/// its 5 bp duplex scale: at a threshold of 0.001, the calls at 400 and 500,
+/// whose alternate molecules all sit within 3 bases of a template end, are
+/// filtered, where the read-pair test above spares them, and the spread G>A
+/// at 200 is not.
 #[test]
 fn test_end_repair_fill_in_on_a_duplex_consensus_measures_from_the_nearer_end() {
     let dir = TempDir::new().unwrap();
@@ -491,7 +491,7 @@ fn test_end_repair_fill_in_on_a_duplex_consensus_measures_from_the_nearer_end() 
         .iter()
         .map(|r| has_filter(r, EndRepairFillIn::FILTER))
         .collect();
-    assert_eq!(erfap, vec![true, false, false, true, true]);
+    assert_eq!(erfap, vec![false, false, false, true, true]);
     assert_eq!(float(&records[1], EndRepairFillIn::INFO), Some(1.0));
 }
 

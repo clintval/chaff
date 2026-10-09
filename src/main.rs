@@ -283,7 +283,7 @@ struct Cli {
     ///
     ///   --model chaff   the decay scale from the 3' end of the strand read 1
     ///                   reports, or the nearer end of a duplex consensus,
-    ///                   learned from 15, or 3 on a duplex consensus, unless
+    ///                   learned from 15, or 5 on a duplex consensus, unless
     ///                   fixed
     ///   --model fgbio   fgbio's window from the nearest template end, 15
     ///                   unless fixed

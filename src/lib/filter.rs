@@ -1733,7 +1733,7 @@ mod tests {
         assert!((fraction - 0.5).abs() < 0.1, "{fraction}");
     }
 
-    /// End repair fill-in starts from 3 bases on a duplex consensus and from
+    /// End repair fill-in starts from 5 bases on a duplex consensus and from
     /// 15 on templates copied from one strand: real mutations alone, their
     /// alternate molecules far from either end, hold no artifact to move it.
     #[test]

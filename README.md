@@ -110,12 +110,12 @@ A misincorporation is on that strand alone, so a duplex consensus removes it, wh
 A call near an end can be flagged by both filters, as the call at position 100 is below.
 
 - **Measured from:** the 3′ end of the strand read 1 reports, which end repair extended: the higher-coordinate end of an F1R2 pair, whose read 1 is forward, and the lower-coordinate end of an F2R1 pair; on a duplex consensus, the nearer template end.
-- **Scored with:** a decay whose scale is learned per sample, from a default of 15 bp, or 3 bp on a duplex consensus.
+- **Scored with:** a decay whose scale is learned per sample, from a default of 15 bp, or 5 bp on a duplex consensus.
 - **Writes:** the posterior `ERFAP` and the FILTER `EndRepairFillInArtifact`.
 - **Use it when:** a polymerase end-repaired the library before adapter ligation, as in most ligation preps after mechanical or enzymatic fragmentation, or, on a duplex consensus, to filter changes that crowd the fragment ends.
 
 A duplex consensus, whose records carry fgbio's `aD` and `bD` depths of both strands, holds both strands, so the filter measures each of its templates from the nearer end.
-The consensus has already removed the errors made on one strand, so the changes the filter finds there are ones both strands agree on, of any substitution class, and they sit within a few bases of the end, so its decay starts from 3 bp.
+The consensus has already removed the errors made on one strand, so the changes the filter finds there are ones both strands agree on, of any substitution class, and they sit within a few bases of the end, so its decay starts from 5 bp.
 That makes it the fragment-end filter for Duplex Sequencing, in place of a caller's filter on the mean distance from a call to the nearer read end: once overlapping mates are clipped, each clip point in the middle of a fragment is a read end too, so such a filter also flags real calls whose few alternate molecules happen to sit near one.
 The examples' reads are in `tests/data/duplex.bam` as a duplex consensus, tagged with those depths:
 
@@ -131,14 +131,14 @@ gzip -dc calls.duplex.vcf.gz | grep -v '^#' | cut -f 2,4,5,7,8 | column -t
 ```
 
 ```text
-100  C    A  EndRepairFillInArtifact  ERFAP=0.0006404
+100  C    A  EndRepairFillInArtifact  ERFAP=0.001182
 200  G    A  .                        ERFAP=1
 300  AAA  A  .                        .
-400  A    T  EndRepairFillInArtifact  ERFAP=0.000008292
-500  C    G  EndRepairFillInArtifact  ERFAP=0.000008292
+400  A    T  EndRepairFillInArtifact  ERFAP=0.00002302
+500  C    G  EndRepairFillInArtifact  ERFAP=0.00002302
 ```
 
-Each call whose alternate molecules sit within 3 bases of a template end is filtered, from a learned scale of 2.5 bp, including the A>T at position 400 and the C>G at position 500, whose molecules sit at the 5′ end of the strand read 1 reports, where end repair adds no bases, so the read pairs spare them in [3. Set and Check](#3-set-and-check).
+Each call whose alternate molecules sit within 3 bases of a template end is filtered, from a learned scale of 3.75 bp, including the A>T at position 400 and the C>G at position 500, whose molecules sit at the 5′ end of the strand read 1 reports, where end repair adds no bases, so the read pairs spare them in [3. Set and Check](#3-set-and-check).
 
 ### A-Tailing
 

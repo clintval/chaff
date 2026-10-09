@@ -277,7 +277,7 @@ impl EndRepairFillIn {
     /// The decay scale of a duplex consensus without a call to learn it from,
     /// in bases: the changes both of its strands agree on crowd the last few
     /// bases of a template.
-    pub const DUPLEX_FALLBACK_SCALE: f64 = 3.0;
+    pub const DUPLEX_FALLBACK_SCALE: f64 = 5.0;
 
     /// The decay scale to learn from, and to shrink a learned scale toward,
     /// for calls that are mostly a duplex consensus or not.

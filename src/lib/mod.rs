@@ -93,7 +93,7 @@
 //! filter's marginal likelihood `sum ln(1 - π + π exp(l_i(s)))`, with `π`
 //! solved exactly at each `s`, over a log grid of 1 to 1,000 bases refined by
 //! golden-section search. It is then shrunk toward the filter's default `s_0`,
-//! 30 bases for copied damage and 15 for end repair fill-in, or 3 when most
+//! 30 bases for copied damage and 15 for end repair fill-in, or 5 when most
 //! of its calls are a duplex consensus, whose ends carry changes both strands
 //! agree on within a few bases, as
 //! `ln s = (sum r_i ln s_mle + k ln s_0) / (sum r_i + k)` with `k = 10`: only
