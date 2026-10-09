@@ -16,6 +16,8 @@ use chaff::io::VariantReader;
 use chaff::model::Model;
 use chaff::read_end::{ATailing, EndRepairFillIn};
 use chaff::testing::{gt, Variant, VcfBuilder};
+use noodles::sam::alignment::record::data::field::Tag;
+use noodles::sam::alignment::record_buf::data::field::Value as Field;
 use noodles::vcf::variant::record_buf::info::field::Value;
 use noodles::vcf::variant::RecordBuf;
 use streampile::testing::{Frag, Pair, SamBuilder, Strand};
@@ -463,6 +465,34 @@ fn test_apply_filters_with_thresholds_under_the_chaff_model_ignores_alternates_a
         assert_eq!(float(record, EndRepairFillIn::INFO), Some(1.0));
         assert!(!has_filter(record, EndRepairFillIn::FILTER));
     }
+}
+
+/// The same reads as a duplex consensus, every record carrying fgbio's `aD`
+/// and `bD` depths of both strands. A duplex consensus holds both strands, so
+/// end repair fill-in measures from the nearer template end and starts from
+/// its 5 bp duplex scale: at a threshold of 0.001, the calls at 400 and 500,
+/// whose alternate molecules all sit within 3 bases of a template end, are
+/// filtered, where the read-pair test above spares them, and the spread G>A
+/// at 200 is not.
+#[test]
+fn test_end_repair_fill_in_on_a_duplex_consensus_measures_from_the_nearer_end() {
+    let dir = TempDir::new().unwrap();
+    let (tumor, _) = tumor_vcfs(dir.path());
+    let mut duplex = SamBuilder::new().read_length(RLEN).base_quality(40);
+    duplex.extend(tumor_bam().records().iter().cloned().map(|mut record| {
+        let data = record.data_mut();
+        data.insert(Tag::new(b'a', b'D'), Field::from(2));
+        data.insert(Tag::new(b'b', b'D'), Field::from(1));
+        record
+    }));
+    let records = run(&dir, &tumor, &duplex, thresholded(Model::Chaff)).unwrap();
+    assert_annotated_as_fgbio(&records);
+    let erfap: Vec<bool> = records
+        .iter()
+        .map(|r| has_filter(r, EndRepairFillIn::FILTER))
+        .collect();
+    assert_eq!(erfap, vec![false, false, false, true, true]);
+    assert_eq!(float(&records[1], EndRepairFillIn::INFO), Some(1.0));
 }
 
 /// The metrics rows of the thresholded run: one per filter and substitution

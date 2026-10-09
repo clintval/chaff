@@ -194,6 +194,9 @@ pub struct Distances {
     pub reference: Vec<usize>,
     /// The alternate molecules' distances and base qualities.
     pub alternate: Vec<(usize, u8)>,
+    /// Whether most of the call's molecules are a duplex consensus, which
+    /// holds both strands.
+    pub duplex: bool,
 }
 
 impl Distances {
@@ -213,6 +216,8 @@ impl Distances {
                 _ => {}
             }
         }
+        let duplex = molecules.iter().filter(|m| m.origin.is_none()).count();
+        distances.duplex = 2 * duplex > molecules.len();
         distances
     }
 
@@ -268,6 +273,21 @@ impl EndRepairFillIn {
 
     /// The decay scale without a call to learn it from, in bases.
     pub const FALLBACK_SCALE: f64 = 15.0;
+
+    /// The decay scale of a duplex consensus without a call to learn it from,
+    /// in bases: the changes both of its strands agree on crowd the last few
+    /// bases of a template.
+    pub const DUPLEX_FALLBACK_SCALE: f64 = 5.0;
+
+    /// The decay scale to learn from, and to shrink a learned scale toward,
+    /// for calls that are mostly a duplex consensus or not.
+    pub fn fallback_scale(duplex: bool) -> f64 {
+        if duplex {
+            Self::DUPLEX_FALLBACK_SCALE
+        } else {
+            Self::FALLBACK_SCALE
+        }
+    }
 
     /// A filter at a fixed `distance` in bases.
     pub fn new(distance: f64) -> Self {
