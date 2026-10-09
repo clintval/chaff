@@ -301,7 +301,7 @@ impl FilterOptions {
                     FilterKind::EndRepairFillIn,
                     self.end_repair_fill_in.distance,
                     scales.end_repair_fill_in,
-                    "the 3' end of the strand each template was copied from",
+                    "the 3' end of the strand each template was copied from, or the nearer end of a duplex consensus",
                 ),
                 Model::Fgbio => format!(
                     "a {} bp window from the nearest template end",
@@ -647,18 +647,13 @@ fn score_decays(calls: &mut [Vec<Annotation>], options: &FilterOptions) -> Scale
         end_repair_fill_in_learned: false,
     };
     let decays = [
-        (
-            FilterKind::CopiedDamage,
-            options.copied_damage.distance,
-            CopiedDamage::FALLBACK_SCALE,
-        ),
+        (FilterKind::CopiedDamage, options.copied_damage.distance),
         (
             FilterKind::EndRepairFillIn,
             options.end_repair_fill_in.distance,
-            EndRepairFillIn::FALLBACK_SCALE,
         ),
     ];
-    for (kind, distance, fallback) in decays {
+    for (kind, distance) in decays {
         let mut pools: BTreeMap<String, ReferencePool> = BTreeMap::new();
         let mut held: Vec<(&Distances, &str)> = Vec::new();
         for annotation in calls.iter().flatten().filter(|a| a.kind == kind) {
@@ -673,6 +668,12 @@ fn score_decays(calls: &mut [Vec<Annotation>], options: &FilterOptions) -> Scale
         if held.is_empty() {
             continue;
         }
+        let duplex = kind == FilterKind::EndRepairFillIn
+            && 2 * held.iter().filter(|(d, _)| d.duplex).count() > held.len();
+        let fallback = match kind {
+            FilterKind::CopiedDamage => CopiedDamage::FALLBACK_SCALE,
+            _ => EndRepairFillIn::fallback_scale(duplex),
+        };
         let weights = |scale: f64| -> BTreeMap<&str, f64> {
             pools
                 .iter()
@@ -701,8 +702,9 @@ fn score_decays(calls: &mut [Vec<Annotation>], options: &FilterOptions) -> Scale
                 FilterKind::CopiedDamage => scales.copied_damage_learned = true,
                 _ => scales.end_repair_fill_in_learned = true,
             }
+            let of = if duplex { " of a duplex consensus" } else { "" };
             info!(
-                "{kind}: learned a decay scale of {scale:.2} bp from {}",
+                "{kind}: learned a decay scale of {scale:.2} bp from {}{of}",
                 plural(teaching, "call")
             );
         }
@@ -1729,6 +1731,44 @@ mod tests {
         assert!((scale - 20.0).abs() < 3.0, "{scale}");
         let fraction = rows[0].artifact_fraction.unwrap();
         assert!((fraction - 0.5).abs() < 0.1, "{fraction}");
+    }
+
+    /// End repair fill-in starts from 3 bases on a duplex consensus and from
+    /// 15 on templates copied from one strand: real mutations alone, their
+    /// alternate molecules far from either end, hold no artifact to move it.
+    #[test]
+    fn test_a_duplex_consensus_starts_end_repair_fill_in_from_its_own_scale() {
+        use crate::classes::Strand;
+        let dir = tempfile::tempdir().unwrap();
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        let sites: Vec<usize> = (0..40).map(|call| 1002 + 8 * call).collect();
+        for &pos in &sites {
+            vcf.add(Variant::new(pos, &["C", "T"], vec![gt("tumor", "0/1")]));
+        }
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let output = dir.path().join("out.vcf");
+        for (origin, default) in [
+            (None, EndRepairFillIn::DUPLEX_FALLBACK_SCALE),
+            (Some(Strand::Forward), EndRepairFillIn::FALLBACK_SCALE),
+        ] {
+            let at = |base, d: usize| {
+                let m = Molecule::new(base, 40, d, 199 - d);
+                origin.map_or(m, |strand| m.from_strand(strand))
+            };
+            let mut table = MoleculeTable::new();
+            for &pos in &sites {
+                let mut molecules: Vec<Molecule> = (0..200).map(|d| at(b'C', d)).collect();
+                molecules.extend([60, 100, 140].map(|d| at(b'T', d)));
+                table.insert("chr1", pos, molecules);
+            }
+            let options = FilterOptions {
+                filters: vec![FilterKind::EndRepairFillIn],
+                ..FilterOptions::default()
+            };
+            let rows = filter_vcf(&input, &output, &mut table, None, &options).unwrap();
+            let scale = rows[0].distance;
+            assert!((scale - default).abs() < 0.1, "{origin:?}: {scale}");
+        }
     }
 
     /// Each stratum's expected mutations and expected artifacts are the sums of

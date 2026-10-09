@@ -88,7 +88,8 @@ pub(crate) const CARGO_STYLING: Styles = Styles::styled()
 ///                        tagging: alternates crowd the lesion strand's 5' end
 ///   end-repair-fill-in   errors in a filled-in recessed 3' end: alternates
 ///                        crowd the 3' end of the strand read 1 reports, or
-///                        either end under fgbio (ERFAP)
+///                        either end of a duplex consensus or under fgbio
+///                        (ERFAP)
 ///   a-tailing            adenines added to an over-digested 3' end: a T near
 ///                        the left end or an A near the right (fgbio ATAP)
 ///
@@ -281,7 +282,9 @@ struct Cli {
     /// Distance in bases from a template end, or `learned`.
     ///
     ///   --model chaff   the decay scale from the 3' end of the strand read 1
-    ///                   reports, learned unless fixed
+    ///                   reports, or the nearer end of a duplex consensus,
+    ///                   learned from 15, or 3 on a duplex consensus, unless
+    ///                   fixed
     ///   --model fgbio   fgbio's window from the nearest template end, 15
     ///                   unless fixed
     ///
