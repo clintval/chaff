@@ -136,9 +136,13 @@ impl CopiedDamage {
         alt_base: u8,
         strand: Strand,
     ) -> Distances {
-        Distances::of(molecules, ref_base, alt_base, |m| {
-            Self::five_prime_distance(m, strand)
-        })
+        Distances::of(
+            molecules,
+            ref_base,
+            alt_base,
+            |m| Self::five_prime_distance(m, strand),
+            Molecule::length,
+        )
     }
 
     /// The call's score at a decay scale of `scale` bases.
@@ -296,11 +300,13 @@ mod tests {
         assert_eq!((score.alt_congruent, score.alt_molecules), (3, 15));
     }
 
+    /// A site deep enough to outweigh the even spread its `W` is shrunk toward
+    /// keeps its own skew.
     #[test]
     fn test_capture_skew_shared_by_both_alleles_is_absorbed() {
         let filter = CopiedDamage::default();
         let skewed = |base| -> Vec<Molecule> { (0..20).map(|d| at(base, d)).collect() };
-        let mut molecules = skewed(C);
+        let mut molecules: Vec<Molecule> = skewed(C).into_iter().cycle().take(400).collect();
         molecules.extend(skewed(T).into_iter().step_by(4));
         let score = filter.score(&molecules, C, T, Strand::Forward, 30.0);
         assert!(score.log_likelihood_ratio.unwrap().abs() < 0.5, "{score:?}");
@@ -320,6 +326,8 @@ mod tests {
         assert_eq!(score.alt_molecules, 0);
         assert_eq!(score.ref_molecules, 1);
         assert_eq!(score.log_likelihood_ratio, None);
+        let distances = filter.distances(&molecules, C, T, Strand::Forward);
+        assert_eq!(distances.spans, vec![111]);
     }
 
     #[test]

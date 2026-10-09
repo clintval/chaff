@@ -26,7 +26,16 @@
 //!   molecules, since a base error lands wherever a reference molecule could.
 //!   A call with few reference molecules measures `W` poorly, so `W` is
 //!   shrunk toward its stratum's pooled reference molecules,
-//!   `(n W + k W_p) / (n + k)` with `k = 10`.
+//!   `(n W + k W_p) / (n + k)` with `k = 10`. The pool's `W_p` over its `N`
+//!   molecules is in turn shrunk toward `U`, the mean weight were the site
+//!   spread evenly along each pooled molecule's template, as
+//!   `(N W_p + k U) / (N + k)`. A template whose two ends are known lets the
+//!   site take `S` distances, its length from one end or half of it from the
+//!   nearer of two, which give a mean weight of
+//!   `(1 - exp(-S / s)) / (S (1 - exp(-1 / s)))`, about `s / S`. This bounds
+//!   `W` from below, so reference molecules that all sit far from the end
+//!   can't make alternate molecules merely nearer it look like a copy, while
+//!   a pool of thousands of molecules keeps nearly its own `W_p`.
 //!   Copied damage measures `d` from the lesion strand's 5' end: the leftmost
 //!   base for a lesion on the forward strand (a `C>T` or `G>T`), the rightmost
 //!   for one on the reverse strand (a `G>A` or `C>A`). End repair fill-in
