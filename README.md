@@ -342,7 +342,7 @@ The tool learns per sample how common each artifact is and how far it reaches, s
 | `--copied-damage-classes` | The damage classes, damaged base `>` read base: `C>T` for deamination from heat, storage, or formalin, and `G>T` for oxidation from shearing or heat (default `C>T,G>T`). |
 | `--copied-damage-distance` | The decay scale in bases from the lesion strand's 5′ end, the mean length over which a polymerase copies a lesion strand onto its partner, or `learned` (default `learned`). |
 | `--copied-damage-prior` | Where copied damage takes each call's artifact fraction from under `--model chaff`: `chance`, on a BAM with single-strand consensus, the share of the library's positions as deep with as many changes that chance explains, or `learned`, the fraction learned from the calls (default `chance`). |
-| `--end-repair-fill-in-distance` | The decay scale in bases from the 3′ end of the strand read 1 reports, or from the nearer template end of a duplex consensus, or `learned`, which starts from 15, or 3 on a duplex consensus (default `learned`); under `--model fgbio`, the window from the nearest template end (default 15). |
+| `--end-repair-fill-in-distance` | The decay scale in bases from the 3′ end of the strand read 1 reports, or from the nearer template end of a duplex consensus, or `learned`, which starts from 15, or 5 on a duplex consensus (default `learned`); under `--model fgbio`, the window from the nearest template end (default 15). |
 | `--a-tailing-distance` | The window from the template end, in bases (default 2). |
 | `--min-mapping-quality` | The mapping quality floor of a read or consensus (short `-m`; default 20). |
 | `--min-base-quality` | The base quality floor at the call (short `-q`; default 20). |
