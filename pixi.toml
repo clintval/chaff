@@ -3,7 +3,7 @@ authors = ["clintval <valentine.clint@gmail.com>"]
 channels = ["conda-forge", "bioconda"]
 name = "chaff"
 platforms = ["linux-64", "osx-64", "osx-arm64"]
-version = "0.2.0"
+version = "0.2.1"
 
 [tasks]
 build = "cargo build --release"
