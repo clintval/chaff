@@ -661,7 +661,7 @@ fn score_decays(calls: &mut [Vec<Annotation>], options: &FilterOptions) -> Scale
                 pools
                     .entry(annotation.stratum.clone())
                     .or_default()
-                    .add(&distances.reference);
+                    .add(&distances.reference, &distances.spans);
                 held.push((distances, &annotation.stratum));
             }
         }
@@ -1599,6 +1599,44 @@ mod tests {
             assert!(erfap.is_finite(), "{erfap}");
         }
         assert!(rows[0].artifact_fraction.unwrap().is_finite());
+    }
+
+    /// Two calls on a few duplex molecules each, all a VCF holds, whose
+    /// alternate molecules sit a few bases nearer the end than every
+    /// reference molecule but none within 30 bases of it, are no end repair
+    /// fill-in at a 5-base scale: their pool is their own molecules, so only
+    /// the even spread of their 200-base templates bounds `W`.
+    #[test]
+    fn test_alternates_far_from_the_end_of_a_thin_one_sided_pool_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(10, &["C", "T"], vec![gt("tumor", "0/1")]));
+        vcf.add(Variant::new(20, &["C", "T"], vec![gt("tumor", "0/1")]));
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let output = dir.path().join("out.vcf");
+        let at = |base, d: usize| Molecule::new(base, 40, d, 199 - d);
+        let mut table = MoleculeTable::new();
+        for (pos, refs, alts) in [
+            (10, vec![35, 38, 41, 44, 47, 50], vec![31, 32]),
+            (20, vec![36, 40, 44], vec![30, 33]),
+        ] {
+            let mut molecules: Vec<Molecule> = refs.into_iter().map(|d| at(b'C', d)).collect();
+            molecules.extend(alts.into_iter().map(|d| at(b'T', d)));
+            table.insert("chr1", pos, molecules);
+        }
+        let options = FilterOptions {
+            filters: vec![FilterKind::EndRepairFillIn],
+            end_repair_fill_in: EndRepairFillIn::new(5.0),
+            end_repair_fill_in_threshold: Some(0.5),
+            ..FilterOptions::default()
+        };
+        filter_vcf(&input, &output, &mut table, None, &options).unwrap();
+        let (_, records) = read_records(&output);
+        for record in &records {
+            let erfap = float(record, EndRepairFillIn::INFO).unwrap();
+            assert!(erfap > 0.5, "{erfap}");
+            assert!(record.filters().as_ref().is_empty());
+        }
     }
 
     /// Alternate molecules that copied damage cannot place, here without the

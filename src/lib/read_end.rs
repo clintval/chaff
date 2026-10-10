@@ -94,37 +94,77 @@ pub fn window_score(
 }
 
 /// The reference molecules a decay's calls hold, pooled per stratum by
-/// distance, toward which each call's own reference molecules are shrunk.
+/// distance and span, toward which each call's own reference molecules are
+/// shrunk.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ReferencePool {
     distances: BTreeMap<usize, u64>,
+    spans: BTreeMap<usize, u64>,
     molecules: u64,
 }
 
 impl ReferencePool {
-    /// Add one call's reference distances.
-    pub fn add(&mut self, distances: &[usize]) {
+    /// Add one call's reference distances and spans.
+    pub fn add(&mut self, distances: &[usize], spans: &[usize]) {
         for &d in distances {
             *self.distances.entry(d).or_default() += 1;
+        }
+        for &s in spans {
+            *self.spans.entry(s).or_default() += 1;
         }
         self.molecules += distances.len() as u64;
     }
 
     /// `ln` of the mean decay weight `exp(-d / scale)` over the pooled
-    /// molecules, `ln W_p`, or `None` without any.
+    /// molecules, `ln W_p`, shrunk toward their [`ln_spread_weight`] by
+    /// [`REFERENCE_PSEUDO_MOLECULES`], or `None` without any.
     pub fn ln_mean_weight(&self, scale: f64) -> Option<f64> {
         let terms = self
             .distances
             .iter()
             .map(|(&d, &n)| (n as f64).ln() - d as f64 / scale);
-        Some(ln_sum_exp(terms)? - (self.molecules as f64).ln())
+        let n = self.molecules as f64;
+        let spans = self.spans.iter().map(|(&s, &n)| (s, n as f64));
+        Some(ln_shrunk(
+            ln_sum_exp(terms)? - n.ln(),
+            n,
+            ln_spread_weight(spans, scale),
+        ))
     }
 }
 
-/// The reference molecules of a stratum's pool that a call's own reference
-/// molecules are shrunk toward, as pseudo-molecules: ten, as a stratum's
-/// fraction is shrunk toward its filter's by ten pseudo-calls.
+/// The pseudo-molecules each mean reference weight is shrunk toward the one
+/// above it by: ten, as a stratum's fraction is shrunk toward its filter's by
+/// ten pseudo-calls.
 pub const REFERENCE_PSEUDO_MOLECULES: f64 = 10.0;
+
+/// `ln U`, the mean decay weight `exp(-d / scale)` of a site spread evenly
+/// along its molecules' templates, from their spans and counts: a span of `S`
+/// distances gives `(1 - exp(-S / scale)) / (S (1 - exp(-1 / scale)))`, about
+/// `scale / S`. `None` without a span.
+pub fn ln_spread_weight(spans: impl Iterator<Item = (usize, f64)>, scale: f64) -> Option<f64> {
+    let spans: Vec<(f64, f64)> = spans.map(|(s, n)| (s as f64, n)).collect();
+    let count: f64 = spans.iter().map(|(_, n)| n).sum();
+    let terms = spans
+        .iter()
+        .map(|&(s, n)| n.ln() + (-(-s / scale).exp_m1()).ln() - s.ln());
+    Some(ln_sum_exp(terms)? - count.ln() - (-(-1.0 / scale).exp_m1()).ln())
+}
+
+/// `ln((n W + k U) / (n + k))`: a mean weight `W` over `n` molecules shrunk
+/// toward `U` by [`REFERENCE_PSEUDO_MOLECULES`] `k`, in log space, or `W`
+/// itself without a `U`.
+fn ln_shrunk(ln_weight: f64, n: f64, ln_toward: Option<f64>) -> f64 {
+    match ln_toward {
+        Some(ln_toward) => {
+            ln_add_exp(
+                n.ln() + ln_weight,
+                REFERENCE_PSEUDO_MOLECULES.ln() + ln_toward,
+            ) - (n + REFERENCE_PSEUDO_MOLECULES).ln()
+        }
+        None => ln_weight,
+    }
+}
 
 /// `ln(sum(exp(x)))` without overflow, or `None` for no terms.
 fn ln_sum_exp(terms: impl Iterator<Item = f64>) -> Option<f64> {
@@ -147,17 +187,21 @@ fn ln_sum_exp(terms: impl Iterator<Item = f64>) -> Option<f64> {
 /// ```
 ///
 /// since a base error lands anywhere a reference molecule could. A site with
-/// few reference molecules measures `W` poorly, so given `ln_pool_weight`,
-/// the [`ReferencePool::ln_mean_weight`] at `scale` of its stratum's
-/// reference molecules, `W` is shrunk toward that mean weight `W_p` by
-/// [`REFERENCE_PSEUDO_MOLECULES`] `k`, `W = (n W_site + k W_p) / (n + k)` for
-/// `n` reference molecules at the site: one reference molecule far
-/// from the end no longer makes alternates near it look like a copy. The
+/// few reference molecules measures `W` poorly, so `W` is shrunk by
+/// [`REFERENCE_PSEUDO_MOLECULES`] `k` toward `ln_pool_weight`, the
+/// [`ReferencePool::ln_mean_weight`] at `scale` of its stratum's reference
+/// molecules, or without a pool toward the [`ln_spread_weight`] of its own
+/// reference molecules' `ref_spans`: `W = (n W_site + k W_p) / (n + k)` for
+/// `n` reference molecules at the site. The pool is itself shrunk toward its
+/// molecules' spread weight, which bounds `W` from below: reference molecules
+/// that all sit far from the end, at a site or across its pool, can't make
+/// alternates merely nearer the end than they are look like a copy. The
 /// terms are summed in log space, so the ratio is finite however far a
 /// molecule sits from the end. Returns `None` without both a reference and an
 /// alternate distance, as such a call carries no evidence either way.
 pub fn tilt_log_likelihood_ratio(
     ref_distances: &[usize],
+    ref_spans: &[usize],
     alt: &[(usize, u8)],
     scale: f64,
     ln_pool_weight: Option<f64>,
@@ -166,15 +210,11 @@ pub fn tilt_log_likelihood_ratio(
         return None;
     }
     let ln_w = |d: usize| -(d as f64) / scale;
-    let ln_site = ln_sum_exp(ref_distances.iter().map(|&d| ln_w(d)))?;
     let n = ref_distances.len() as f64;
-    let ln_mean = match ln_pool_weight {
-        Some(ln_pool) => {
-            ln_add_exp(ln_site, REFERENCE_PSEUDO_MOLECULES.ln() + ln_pool)
-                - (n + REFERENCE_PSEUDO_MOLECULES).ln()
-        }
-        None => ln_site - n.ln(),
-    };
+    let ln_site = ln_sum_exp(ref_distances.iter().map(|&d| ln_w(d)))? - n.ln();
+    let ln_toward =
+        ln_pool_weight.or_else(|| ln_spread_weight(ref_spans.iter().map(|&s| (s, 1.0)), scale));
+    let ln_mean = ln_shrunk(ln_site, n, ln_toward);
     Some(
         alt.iter()
             .map(|&(d, q)| {
@@ -192,6 +232,9 @@ pub fn tilt_log_likelihood_ratio(
 pub struct Distances {
     /// The reference molecules' distances.
     pub reference: Vec<usize>,
+    /// The spans of the reference molecules whose templates' two ends are
+    /// known: how many distances a site anywhere on the template could take.
+    pub spans: Vec<usize>,
     /// The alternate molecules' distances and base qualities.
     pub alternate: Vec<(usize, u8)>,
     /// Whether most of the call's molecules are a duplex consensus, which
@@ -201,17 +244,22 @@ pub struct Distances {
 
 impl Distances {
     /// The distances `distance` gives a call's reference and alternate
-    /// molecules, leaving out the molecules it gives none.
+    /// molecules, leaving out the molecules it gives none, and the spans
+    /// `span` gives its measured reference molecules.
     pub fn of(
         molecules: &[Molecule],
         ref_base: u8,
         alt_base: u8,
         distance: impl Fn(&Molecule) -> Option<usize>,
+        span: impl Fn(&Molecule) -> Option<usize>,
     ) -> Self {
         let mut distances = Self::default();
         for m in molecules {
             match distance(m) {
-                Some(d) if m.base == ref_base => distances.reference.push(d),
+                Some(d) if m.base == ref_base => {
+                    distances.reference.push(d);
+                    distances.spans.extend(span(m));
+                }
                 Some(d) if m.base == alt_base => distances.alternate.push((d, m.quality)),
                 _ => {}
             }
@@ -224,7 +272,13 @@ impl Distances {
     /// The [`tilt_log_likelihood_ratio`] at `scale`, shrunk toward a pool's
     /// mean weight.
     pub fn log_likelihood_ratio(&self, scale: f64, ln_pool_weight: Option<f64>) -> Option<f64> {
-        tilt_log_likelihood_ratio(&self.reference, &self.alternate, scale, ln_pool_weight)
+        tilt_log_likelihood_ratio(
+            &self.reference,
+            &self.spans,
+            &self.alternate,
+            scale,
+            ln_pool_weight,
+        )
     }
 
     /// The score at `scale`, shrunk toward a pool's mean weight: its ratio,
@@ -313,9 +367,27 @@ impl EndRepairFillIn {
         }
     }
 
+    /// How many distances [`Self::three_prime_distance`] could give a site
+    /// anywhere on the molecule's template, when both its ends are known: the
+    /// template's length, or half of it, rounded up, from the nearer end of a
+    /// duplex consensus.
+    pub fn three_prime_span(m: &Molecule) -> Option<usize> {
+        let length = m.length()?;
+        Some(match m.origin {
+            Some(_) => length,
+            None => length.div_ceil(2),
+        })
+    }
+
     /// The distances the `chaff` model's decay scores a call by.
     pub fn distances(&self, molecules: &[Molecule], ref_base: u8, alt_base: u8) -> Distances {
-        Distances::of(molecules, ref_base, alt_base, Self::three_prime_distance)
+        Distances::of(
+            molecules,
+            ref_base,
+            alt_base,
+            Self::three_prime_distance,
+            Self::three_prime_span,
+        )
     }
 
     /// Heterozygous calls whose every called allele is one base.
@@ -861,34 +933,153 @@ mod tests {
     #[test]
     fn test_tilt_ratio_rewards_alternates_nearer_the_end_than_the_references() {
         let refs: Vec<usize> = (0..100).collect();
-        let near = tilt_log_likelihood_ratio(&refs, &[(1, 90), (3, 90)], 15.0, None).unwrap();
-        let far = tilt_log_likelihood_ratio(&refs, &[(80, 90), (95, 90)], 15.0, None).unwrap();
+        let spans = vec![100; 100];
+        let ratio = |alt: &[(usize, u8)]| tilt_log_likelihood_ratio(&refs, &spans, alt, 15.0, None);
+        let near = ratio(&[(1, 90), (3, 90)]).unwrap();
+        let far = ratio(&[(80, 90), (95, 90)]).unwrap();
         assert!(near > 0.0, "{near}");
         assert!(far < 0.0, "{far}");
-        assert_eq!(tilt_log_likelihood_ratio(&refs, &[], 15.0, None), None);
-        assert_eq!(tilt_log_likelihood_ratio(&[], &[(1, 30)], 15.0, None), None);
+        assert_eq!(ratio(&[]), None);
+        assert_eq!(
+            tilt_log_likelihood_ratio(&[], &[], &[(1, 30)], 15.0, None),
+            None
+        );
     }
 
     /// Weights of distances hundreds of scales from the end underflow in
-    /// linear space; the ratio stays finite and keeps its sign.
+    /// linear space; the ratio stays finite and keeps its sign. Without a span
+    /// to bound `W`, the tilt is relative, so shifting every distance alike
+    /// leaves the ratio as it was, and an alternate molecule at the end of
+    /// templates whose references all sit 800 bases in counts as hundreds of
+    /// nats; their spans bound it to about `ln(S / scale)`.
     #[test]
     fn test_tilt_ratio_is_finite_far_from_the_end() {
         let refs = [800, 900];
-        let flat = tilt_log_likelihood_ratio(&refs, &[(850, 30)], 1.0, None).unwrap();
-        let near = tilt_log_likelihood_ratio(&refs, &[(0, 30)], 1.0, None).unwrap();
-        let far = tilt_log_likelihood_ratio(&refs, &[(5000, 30)], 1.0, None).unwrap();
+        let ratio = |refs: &[usize], spans: &[usize], d: usize| {
+            tilt_log_likelihood_ratio(refs, spans, &[(d, 30)], 1.0, None).unwrap()
+        };
+        let flat = ratio(&refs, &[], 850);
+        let near = ratio(&refs, &[], 0);
+        let far = ratio(&refs, &[], 5000);
         assert!(flat.is_finite() && near.is_finite() && far.is_finite());
         assert!(near > 700.0, "{near}");
         assert!(far < 0.0, "{far}");
-        let shifted = tilt_log_likelihood_ratio(&[0, 100], &[(50, 30)], 1.0, None).unwrap();
+        let shifted = ratio(&[0, 100], &[], 50);
         assert!((flat - shifted).abs() < 1e-9, "{flat} vs {shifted}");
+        let bounded = ratio(&refs, &[2000, 2000], 0);
+        assert!(bounded > 6.0 && bounded < 8.0, "{bounded}");
+        assert!(ratio(&refs, &[2000, 2000], 5000) < 0.0);
     }
 
     #[test]
     fn test_tilt_ratio_is_flat_when_alternates_match_the_references() {
         let refs = vec![5, 5, 5];
-        let llr = tilt_log_likelihood_ratio(&refs, &[(5, 255)], 30.0, None).unwrap();
+        let llr = tilt_log_likelihood_ratio(&refs, &[], &[(5, 255)], 30.0, None).unwrap();
         assert!(llr.abs() < 1e-12, "{llr}");
+    }
+
+    /// A site spread evenly along a template takes each distance of its span
+    /// equally often: each distance from one end once, and each distance of
+    /// the first half twice from the nearer end of a duplex consensus.
+    #[test]
+    fn test_a_span_holds_the_distances_a_site_anywhere_on_its_template_takes() {
+        let scale = 7.0;
+        for (length, origin) in [
+            (40, Some(Origin::Forward)),
+            (40, None),
+            (41, Some(Origin::Reverse)),
+        ] {
+            let sites: Vec<Molecule> = (0..length)
+                .map(|left| {
+                    let m = Molecule::new(G, 40, left, length - 1 - left);
+                    origin.map_or(m, |strand| m.from_strand(strand))
+                })
+                .collect();
+            let weights: f64 = sites
+                .iter()
+                .map(|m| {
+                    (-(EndRepairFillIn::three_prime_distance(m).unwrap() as f64) / scale).exp()
+                })
+                .sum();
+            let span = EndRepairFillIn::three_prime_span(&sites[0]).unwrap();
+            let spread = ln_spread_weight([(span, 3.0)].into_iter(), scale).unwrap();
+            assert!(
+                (spread - (weights / length as f64).ln()).abs() < 1e-12,
+                "{length} {origin:?}"
+            );
+        }
+        assert_eq!(
+            EndRepairFillIn::three_prime_span(&Molecule::new(G, 40, 20, 20)),
+            Some(21)
+        );
+        let half = Molecule {
+            left: None,
+            ..Molecule::new(G, 40, 20, 20)
+        };
+        assert_eq!(EndRepairFillIn::three_prime_span(&half), None);
+        let short = ln_spread_weight([(1000, 1.0)].into_iter(), 5.0).unwrap();
+        assert!((short - (5.0f64 / 1000.0).ln()).abs() < 0.1, "{short}");
+        assert_eq!(ln_spread_weight(std::iter::empty(), 5.0), None);
+    }
+
+    /// Reference molecules that all sit farther from the end than the
+    /// alternate molecules, at the site and across its pool alike, set `W` by
+    /// the nearest of them, so without spans two alternates 31 bases from the
+    /// end read as a copy at a 5-base scale, though a copy reaches 31 bases
+    /// with a weight of `exp(-31 / 5)`. Shrunk toward the weight molecules
+    /// spread evenly along their 200-base templates would give, the same
+    /// alternates favor a mutation, with or without a pool, while two at the
+    /// end still favor the artifact.
+    #[test]
+    fn test_references_all_farther_from_the_end_than_distant_alternates_bound_the_weight() {
+        let refs = [35, 40, 45, 50, 55, 60];
+        let spans = [200; 6];
+        let distant = [(31, 40), (31, 40)];
+        let mut pool = ReferencePool::default();
+        pool.add(&refs, &spans);
+        let weight = pool.ln_mean_weight(5.0);
+        let ratio = |spans: &[usize], alt: &[(usize, u8)], pool: Option<f64>| {
+            tilt_log_likelihood_ratio(&refs, spans, alt, 5.0, pool).unwrap()
+        };
+
+        let mut unbounded = ReferencePool::default();
+        unbounded.add(&refs, &[]);
+        let unbounded = unbounded.ln_mean_weight(5.0);
+        assert!(ratio(&[], &distant, None) > 4.0);
+        assert!(ratio(&[], &distant, unbounded) > 4.0);
+
+        let alone = ratio(&spans, &distant, None);
+        let pooled = ratio(&spans, &distant, weight);
+        assert!(alone < -4.0, "{alone}");
+        assert!(pooled < -3.0, "{pooled}");
+        let near = ratio(&spans, &[(0, 40), (1, 40)], weight);
+        assert!(near > 7.0, "{near}");
+    }
+
+    /// A pool that holds reference molecules at nearly every distance, here
+    /// none within three bases of the end, keeps nearly its own mean weight:
+    /// the even spread it is shrunk toward weighs as ten of its 3,000
+    /// molecules.
+    #[test]
+    fn test_a_pool_at_every_distance_barely_moves_toward_the_even_spread() {
+        let refs: Vec<usize> = (3..150).cycle().take(3000).collect();
+        let mut spread = ReferencePool::default();
+        spread.add(&refs, &vec![150; refs.len()]);
+        let mut unbounded = ReferencePool::default();
+        unbounded.add(&refs, &[]);
+        let alt = [(0, 40), (1, 40), (60, 40)];
+        let site: Vec<usize> = refs.iter().copied().step_by(15).collect();
+        for scale in [5.0, 30.0] {
+            let ratio = |pool: &ReferencePool| {
+                tilt_log_likelihood_ratio(&site, &[], &alt, scale, pool.ln_mean_weight(scale))
+                    .unwrap()
+            };
+            let (spread, unbounded) = (ratio(&spread), ratio(&unbounded));
+            assert!(
+                (spread - unbounded).abs() < 0.01,
+                "{scale}: {spread} {unbounded}"
+            );
+        }
     }
 
     /// Reference molecules spread along 150-base templates copied from
@@ -906,32 +1097,44 @@ mod tests {
         molecules
     }
 
-    /// Fill-in errors sit near the 3' end of the strand a template was copied
-    /// from: the rightmost end for the forward strand, the leftmost for the
-    /// reverse, and either for a duplex consensus. fgbio's window counts
-    /// either end for every template.
     /// One reference molecule far from the end can't make three alternates
     /// near it look like a copy: the site's reference weight is shrunk toward
-    /// its stratum's pool, while a site with hundreds of reference molecules
+    /// its stratum's pool, or without one toward the even spread its own
+    /// template gives, while a site with hundreds of reference molecules
     /// keeps nearly its own.
     #[test]
     fn test_a_site_with_few_reference_molecules_is_shrunk_toward_its_pool() {
         let mut pool = ReferencePool::default();
-        pool.add(&(0..150).cycle().take(3000).collect::<Vec<_>>());
+        pool.add(
+            &(0..150).cycle().take(3000).collect::<Vec<_>>(),
+            &[150; 3000],
+        );
         let weight = pool.ln_mean_weight(30.0);
         let alt = [(0, 40), (1, 40), (2, 40)];
-        let lone = tilt_log_likelihood_ratio(&[100], &alt, 30.0, None).unwrap();
-        let shrunk = tilt_log_likelihood_ratio(&[100], &alt, 30.0, weight).unwrap();
+        let ratio = |refs: &[usize], spans: &[usize], pool| {
+            tilt_log_likelihood_ratio(refs, spans, &alt, 30.0, pool).unwrap()
+        };
+        let lone = ratio(&[100], &[], None);
+        let shrunk = ratio(&[100], &[150], weight);
+        let alone = ratio(&[100], &[150], None);
         assert!(lone > 9.5, "{lone}");
         assert!(shrunk < 5.5 && shrunk > 0.0, "{shrunk}");
+        assert!((alone - shrunk).abs() < 1e-9, "{alone} {shrunk}");
         let many: Vec<usize> = (0..150).cycle().take(300).collect();
-        let own = tilt_log_likelihood_ratio(&many, &alt, 30.0, None).unwrap();
-        let pooled = tilt_log_likelihood_ratio(&many, &alt, 30.0, weight).unwrap();
+        let own = ratio(&many, &[150; 300], None);
+        let pooled = ratio(&many, &[150; 300], weight);
         assert!((own - pooled).abs() < 0.01, "{own} {pooled}");
-        assert_eq!(tilt_log_likelihood_ratio(&[], &alt, 30.0, weight), None);
+        assert_eq!(
+            tilt_log_likelihood_ratio(&[], &[], &alt, 30.0, weight),
+            None
+        );
         assert!(ReferencePool::default().ln_mean_weight(30.0).is_none());
     }
 
+    /// Fill-in errors sit near the 3' end of the strand a template was copied
+    /// from: the rightmost end for the forward strand, the leftmost for the
+    /// reverse, and either for a duplex consensus. fgbio's window counts
+    /// either end for every template.
     #[test]
     fn test_end_repair_fill_in_decays_from_the_copied_strand_s_three_prime_end() {
         let filter = EndRepairFillIn::new(15.0);
