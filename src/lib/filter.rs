@@ -955,11 +955,7 @@ pub fn filter_vcf_report(
     log_scored(&sample, &calls, &skipped);
 
     let scales = score_decays(&mut calls, options);
-    let damaged = calls
-        .iter()
-        .flatten()
-        .any(|a| a.kind == FilterKind::CopiedDamage);
-    let library = if options.takes_chance() && damaged {
+    let library = if options.takes_chance() {
         evidence.library()?
     } else {
         None
@@ -2175,7 +2171,8 @@ mod tests {
 
     /// Every stratum of an enabled filter has a metrics row, so the table is
     /// rectangular across libraries: a stratum without a call counts none,
-    /// learns no fraction of its own, and still carries the library's rates.
+    /// learns no fraction of its own, and still carries the library's rates,
+    /// as it does when no call at all is scored for copied damage.
     #[test]
     fn test_a_stratum_without_a_call_keeps_its_row_and_the_library_rates() {
         use crate::testing::poisson_stratum;
@@ -2241,6 +2238,15 @@ mod tests {
         assert_eq!(empty.single_strand_rate, scored.single_strand_rate);
         assert!(empty.chance_excess.is_some(), "{empty:?}");
         assert!(rows[1].change_rate.is_none(), "{:?}", rows[1]);
+
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(1001, &["A", "G"], vec![gt("tumor", "0/1")]));
+        let input = vcf.write(&dir.path().join("undamaged.vcf"));
+        let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
+        assert_eq!(rows.len(), 7);
+        assert!(rows.iter().all(|r| r.calls == 0), "{rows:?}");
+        assert_eq!(rows[0].change_rate, scored.change_rate);
+        assert_eq!(rows[3].single_strand_rate, scored.single_strand_rate);
     }
 
     /// A two-molecule call takes the share of positions chance explains at
