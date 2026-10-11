@@ -25,7 +25,7 @@ use noodles::vcf::variant::RecordBuf;
 use streampile::{RecordSource, StreamingPileupBuilder};
 
 use crate::call::{Genotype, Skip};
-use crate::classes::{sbs6, Context};
+use crate::classes::{sbs6, sbs6_of, Context};
 use crate::copied_damage::{CopiedDamage, DamageSite};
 use crate::evidence::{Evidence, Molecule, PendingLibrary, PileupEvidence, PileupOptions};
 use crate::io::{add_filter, add_info, significant, vcf_float, VariantReader, VariantWriter};
@@ -106,6 +106,17 @@ impl FilterKind {
             FilterKind::CopiedDamage => options.copied_damage_threshold,
             FilterKind::ATailing => options.a_tailing_threshold,
             FilterKind::EndRepairFillIn => options.end_repair_fill_in_threshold,
+        }
+    }
+
+    /// Every stratum the filter can score a call in: each damage class in
+    /// each context for copied damage, and the substitutions of the calls
+    /// the others score.
+    pub fn strata(self, options: &FilterOptions) -> Vec<String> {
+        match self {
+            FilterKind::CopiedDamage => options.copied_damage.strata(),
+            FilterKind::ATailing => sbs6_of(|alt| matches!(alt, b'A' | b'T')),
+            FilterKind::EndRepairFillIn => sbs6_of(|_| true),
         }
     }
 
@@ -998,7 +1009,7 @@ pub fn filter_vcf_report(
         library.as_ref(),
         &chances,
     );
-    for row in &rows {
+    for row in rows.iter().filter(|row| row.calls > 0) {
         info!(
             "{} {}: {}, artifact fraction {}, {} filtered, {} of {} congruent",
             row.filter,
@@ -1106,7 +1117,8 @@ fn log_chance(chances: &BTreeMap<String, Chance>) {
     }
 }
 
-/// Pool every annotation into one metrics row per filter and stratum.
+/// Pool every annotation into one metrics row per filter and stratum, with a
+/// row for each stratum of an enabled filter that holds no call.
 fn metrics_rows(
     sample: &str,
     calls: &[Vec<Annotation>],
@@ -1117,39 +1129,46 @@ fn metrics_rows(
     chances: &BTreeMap<String, Chance>,
 ) -> Vec<StratumMetrics> {
     let learned = options.model == Model::Chaff;
-    let mut rows: BTreeMap<Stratum, (StratumMetrics, Vec<(u32, f64)>)> = BTreeMap::new();
+    let empty = |key: &Stratum| {
+        let (kind, stratum) = key;
+        let row = StratumMetrics {
+            sample: sample.to_string(),
+            filter: kind.to_string(),
+            stratum: stratum.clone(),
+            artifact_fraction: learned
+                .then(|| fractions.strata.get(key).copied())
+                .flatten(),
+            filter_artifact_fraction: learned
+                .then(|| fractions.filters.get(kind).copied())
+                .flatten(),
+            distance: scales.of(*kind),
+            ..StratumMetrics::default()
+        };
+        let row = match (kind, library.and_then(|l| l.stratum(stratum))) {
+            (FilterKind::CopiedDamage, Some(profile)) => StratumMetrics {
+                change_rate: profile.change_rate(),
+                single_strand_rate: profile.single_strand_rate(),
+                conversion_ratio: profile.conversion_ratio(),
+                chance_excess: chances.get(stratum).map(|c| c.excess),
+                ..row
+            },
+            _ => row,
+        };
+        (row, Vec::new())
+    };
+    let mut rows: BTreeMap<Stratum, (StratumMetrics, Vec<(u32, f64)>)> = options
+        .filters
+        .iter()
+        .flat_map(|&kind| kind.strata(options).into_iter().map(move |s| (kind, s)))
+        .map(|key| {
+            let row = empty(&key);
+            (key, row)
+        })
+        .collect();
     let mut priors: BTreeMap<Stratum, (f64, u64)> = BTreeMap::new();
     for annotation in calls.iter().flatten() {
         let key = (annotation.kind, annotation.stratum.clone());
-        let (row, trials) = rows.entry(key.clone()).or_insert_with(|| {
-            let row = StratumMetrics {
-                sample: sample.to_string(),
-                filter: annotation.kind.to_string(),
-                stratum: annotation.stratum.clone(),
-                artifact_fraction: learned
-                    .then(|| fractions.strata.get(&key).copied())
-                    .flatten(),
-                filter_artifact_fraction: learned
-                    .then(|| fractions.filters.get(&annotation.kind).copied())
-                    .flatten(),
-                distance: scales.of(annotation.kind),
-                ..StratumMetrics::default()
-            };
-            let row = match (
-                annotation.kind,
-                library.and_then(|l| l.stratum(&annotation.stratum)),
-            ) {
-                (FilterKind::CopiedDamage, Some(profile)) => StratumMetrics {
-                    change_rate: profile.change_rate(),
-                    single_strand_rate: profile.single_strand_rate(),
-                    conversion_ratio: profile.conversion_ratio(),
-                    chance_excess: chances.get(&annotation.stratum).map(|c| c.excess),
-                    ..row
-                },
-                _ => row,
-            };
-            (row, Vec::new())
-        });
+        let (row, trials) = rows.entry(key.clone()).or_insert_with(|| empty(&key));
         row.calls += 1;
         let score = &annotation.score;
         row.alt_molecules += u64::from(score.alt_molecules);
@@ -1380,9 +1399,16 @@ mod tests {
             Some(Some(&Value::Array(Array::Integer(vec![Some(6), Some(6)]))))
         );
 
-        assert_eq!(rows.len(), 2);
-        let strata: Vec<&str> = rows.iter().map(|r| r.stratum.as_str()).collect();
-        assert_eq!(strata, vec!["C>T:CpG", "C>T:non-CpG"]);
+        let strata: Vec<(&str, u64)> = rows.iter().map(|r| (r.stratum.as_str(), r.calls)).collect();
+        assert_eq!(
+            strata,
+            [
+                ("C>T:CpG", 1),
+                ("C>T:non-CpG", 1),
+                ("G>T:CpG", 0),
+                ("G>T:non-CpG", 0)
+            ]
+        );
     }
 
     /// Without an alternate molecule, A-tailing has no evidence, so under the
@@ -1715,14 +1741,17 @@ mod tests {
         table.insert("chr1", 1002, molecules((100, 900), (1, 9)));
         table.insert("chr1", 1010, molecules((90, 10), (90, 10)));
         let mut reference = Reference::open(&reference).unwrap();
-        let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
-        let p = rows[0].asymmetry_p_value.unwrap();
+        let mut p_value = |table: &mut MoleculeTable| {
+            let rows = filter_vcf(&input, &output, table, Some(&mut reference), &options).unwrap();
+            let row = rows.iter().find(|r| r.stratum == "C>T:non-CpG").unwrap();
+            row.asymmetry_p_value.unwrap()
+        };
+        let p = p_value(&mut table);
         assert!(p > 0.1, "{p}");
 
         let mut table = MoleculeTable::new();
         table.insert("chr1", 1018, molecules((0, 50), (1, 0)));
-        let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
-        let p = rows[0].asymmetry_p_value.unwrap();
+        let p = p_value(&mut table);
         assert!((p - 1.0 / 52.0).abs() < 1e-12, "{p}");
     }
 
@@ -2142,6 +2171,76 @@ mod tests {
         assert_eq!(unprofiled.chance_fraction, None);
         assert_eq!(unprofiled_text, learned_text);
         assert!((unprofiled_real - learned_real).abs() < 1e-6);
+    }
+
+    /// Every stratum of an enabled filter has a metrics row, so the table is
+    /// rectangular across libraries: a stratum without a call counts none,
+    /// learns no fraction of its own, and still carries the library's rates.
+    #[test]
+    fn test_a_stratum_without_a_call_keeps_its_row_and_the_library_rates() {
+        use crate::testing::poisson_stratum;
+        let dir = tempfile::tempdir().unwrap();
+        let reference = write_fasta(dir.path(), "chr1", &"ACGTTCAA".repeat(250));
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(1002, &["C", "T"], vec![gt("tumor", "0/1")]));
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let output = dir.path().join("out.vcf");
+        let at = |base, d| Molecule::new(base, 40, d, 149 - d);
+        let mut molecules: Vec<Molecule> = (0..150).map(|d| at(b'C', d)).collect();
+        molecules.extend([at(b'T', 20), at(b'T', 90)]);
+        let mut table = MoleculeTable::new();
+        table.insert("chr1", 1002, molecules);
+        let mut library = LibraryProfile::default();
+        for stratum in ["C>T:CpG", "G>T:non-CpG"] {
+            let profile = poisson_stratum(&[700], 100_000.0, 1e-4, 0);
+            library.strata.insert(stratum.to_string(), profile);
+        }
+        table.set_library(library);
+        let options = FilterOptions {
+            filters: vec![FilterKind::CopiedDamage, FilterKind::ATailing],
+            ..FilterOptions::default()
+        };
+        let mut reference = Reference::open(&reference).unwrap();
+        let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
+        let keys: Vec<(&str, &str, u64)> = rows
+            .iter()
+            .map(|r| (r.filter.as_str(), r.stratum.as_str(), r.calls))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                ("copied-damage", "C>T:CpG", 1),
+                ("copied-damage", "C>T:non-CpG", 0),
+                ("copied-damage", "G>T:CpG", 0),
+                ("copied-damage", "G>T:non-CpG", 0),
+                ("a-tailing", "C>A", 0),
+                ("a-tailing", "C>T", 1),
+                ("a-tailing", "T>A", 0),
+            ]
+        );
+        let (scored, empty) = (&rows[0], &rows[3]);
+        assert_eq!(empty.sample, "tumor");
+        assert_eq!(
+            (empty.filtered, empty.alt_molecules, empty.ref_molecules),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            (empty.expected_artifacts, empty.expected_mutations),
+            (0.0, 0.0)
+        );
+        assert_eq!(empty.artifact_fraction, None);
+        assert_eq!(empty.asymmetry_p_value, None);
+        assert_eq!(empty.chance_fraction, None);
+        assert_eq!(empty.distance, scored.distance);
+        assert_eq!(
+            empty.filter_artifact_fraction,
+            scored.filter_artifact_fraction
+        );
+        assert!(empty.filter_artifact_fraction.is_some(), "{empty:?}");
+        assert!(empty.change_rate.is_some(), "{empty:?}");
+        assert_eq!(empty.single_strand_rate, scored.single_strand_rate);
+        assert!(empty.chance_excess.is_some(), "{empty:?}");
+        assert!(rows[1].change_rate.is_none(), "{:?}", rows[1]);
     }
 
     /// A two-molecule call takes the share of positions chance explains at

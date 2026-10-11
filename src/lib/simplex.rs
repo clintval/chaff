@@ -2,8 +2,9 @@
 //!
 //! A duplex consensus from fgbio's or fgumi's `CallDuplexConsensusReads`
 //! carries, per base, the single-strand consensus of each of the molecule's two
-//! strands: `ac` and `bc` hold their bases and `ad` and `bd` the raw reads
-//! behind them. Once aligned, as by `ZipperBams`, the bases are reverse
+//! strands: `ac` and `bc` hold their bases, `ad` and `bd` the raw reads
+//! behind them, and `ae` and `be`, when present, those of the raw reads that
+//! disagree with them. Once aligned, as by `ZipperBams`, the bases are reverse
 //! complemented with the consensus, so they sit in the reference's
 //! orientation. A consensus counts only with all four tags, read past any
 //! hard clip they still hold. Where mates overlap, only the one that sorts
@@ -13,9 +14,10 @@
 //! a damage class can change, two kinds of molecule:
 //!
 //! - **Single-strand changes:** one strand holds the reference base and the
-//!   other the class's damaged base, each read by at least
-//!   [`MIN_STRAND_READS`] raw reads. These are lesions polymerase never
-//!   copied.
+//!   other the class's damaged base, each agreed on by at least
+//!   [`MIN_STRAND_READS`] raw reads: its depth less its disagreeing reads,
+//!   or its depth alone without `ae` and `be`. These are lesions polymerase
+//!   never copied.
 //! - **Duplex changes:** the consensus base, at the base quality floor, and
 //!   both strands' bases are the damaged base. These are copied lesions and
 //!   real mutations alike.
@@ -95,8 +97,9 @@ use crate::evidence::PileupOptions;
 use crate::prior::{chance_prior, STRATUM_PRIOR_STRENGTH};
 use crate::reference::Reference;
 
-/// The fewest raw reads behind each strand's base for a molecule to count
-/// toward single-strand changes, so a single read's error does not.
+/// The fewest raw reads agreeing with each strand's base for a molecule to
+/// count toward single-strand changes, so a single read's error does not,
+/// nor does a base its own reads dispute.
 pub const MIN_STRAND_READS: i64 = 2;
 
 /// The changes from which the chance model takes positions with a count or
@@ -174,8 +177,8 @@ pub struct StratumProfile {
     pub molecules: u64,
     /// Those whose consensus base is the damaged base.
     pub changes: u64,
-    /// Molecules with both strands' bases called, each by at least
-    /// [`MIN_STRAND_READS`] raw reads.
+    /// Molecules with both strands' bases called, each agreed on by at
+    /// least [`MIN_STRAND_READS`] raw reads.
     pub strand_molecules: u64,
     /// Those with a single-strand change.
     pub single_strand_changes: u64,
@@ -703,13 +706,29 @@ fn index(base: u8) -> Option<usize> {
     }
 }
 
-/// One consensus's single-strand bases and raw-read depths, from its first
-/// base on.
+/// One consensus's single-strand bases, raw-read depths, and, when tagged,
+/// the raw reads that disagree with each base, from its first base on.
 struct Strands<'a> {
     a_bases: &'a [u8],
     b_bases: &'a [u8],
     a_reads: &'a [i64],
     b_reads: &'a [i64],
+    a_errors: Option<&'a [i64]>,
+    b_errors: Option<&'a [i64]>,
+}
+
+impl Strands<'_> {
+    /// Whether both strands' bases at `query` are each agreed on by at least
+    /// [`MIN_STRAND_READS`] raw reads.
+    fn agreed(&self, query: usize) -> bool {
+        let agreeing = |reads: &[i64], errors: Option<&[i64]>| {
+            let errors = errors.and_then(|e| e.get(query)).copied().unwrap_or(0);
+            reads
+                .get(query)
+                .is_some_and(|&n| n - errors >= MIN_STRAND_READS)
+        };
+        agreeing(self.a_reads, self.a_errors) && agreeing(self.b_reads, self.b_errors)
+    }
 }
 
 /// Where a consensus's first base sits in its per-base tags of `length`: at
@@ -982,6 +1001,14 @@ impl<'a> Scanner<'a> {
         if [b_bases.len(), a_reads.len(), b_reads.len()] != [length; 3] {
             return Ok(());
         }
+        let (a_errors, b_errors) = (strand_reads(b"ae"), strand_reads(b"be"));
+        if [&a_errors, &b_errors]
+            .into_iter()
+            .flatten()
+            .any(|errors| errors.len() != length)
+        {
+            return Ok(());
+        }
         let Some(offset) = tag_offset(record, length)? else {
             return Ok(());
         };
@@ -1033,6 +1060,8 @@ impl<'a> Scanner<'a> {
             b_bases: &b_bases[offset..],
             a_reads: &a_reads[offset..],
             b_reads: &b_reads[offset..],
+            a_errors: a_errors.as_deref().map(|e| &e[offset..]),
+            b_errors: b_errors.as_deref().map(|e| &e[offset..]),
         };
 
         let (mut query, mut pos) = (0usize, start);
@@ -1110,8 +1139,7 @@ impl<'a> Scanner<'a> {
         let (Some(ia), Some(ib)) = (index(a), index(b)) else {
             return Ok(());
         };
-        let reads = |r: &[i64]| r.get(query).is_some_and(|&n| n >= MIN_STRAND_READS);
-        if !reads(strands.a_reads) || !reads(strands.b_reads) {
+        if !strands.agreed(query) {
             return Ok(());
         }
         site.strand_molecules += 1;
@@ -1356,6 +1384,48 @@ mod tests {
             (cpg.molecules, cpg.changes, cpg.single_strand_changes),
             (120, 1, 1)
         );
+    }
+
+    /// A strand counts the raw reads that agree with its base, its depth less
+    /// its errors: of 3 reads, 1 error leaves 2 and the molecule counts, 2
+    /// errors on either strand leave 1 and it does not, and without the error
+    /// tags all 3 count. Error tags of another length than the depths leave
+    /// the consensus out.
+    #[test]
+    fn test_a_strand_counts_the_raw_reads_that_agree_with_it() {
+        let errors = |a: Option<i16>, b: i16| {
+            let mut frag = frag(&[(6, b'N', 2, b'T', b'C', 3)], Strand::Plus);
+            if let Some(a) = a {
+                let per_base = |n: i16| {
+                    let mut errors = vec![0i16; 40];
+                    errors[6] = n;
+                    BufValue::Array(BufArray::Int16(errors))
+                };
+                frag = frag
+                    .attr(Tag::new(b'a', b'e'), per_base(a))
+                    .attr(Tag::new(b'b', b'e'), per_base(b));
+            }
+            let mut reads = SamBuilder::new().read_length(40);
+            fill(&mut reads, 11);
+            reads.add_frag(frag);
+            let profile = profile(&reads).unwrap();
+            let other = profile.stratum("C>T:non-CpG").unwrap();
+            (other.single_strand_changes, other.strand_molecules)
+        };
+        assert_eq!(errors(None, 0), (1, 60));
+        assert_eq!(errors(Some(0), 0), (1, 60));
+        assert_eq!(errors(Some(1), 1), (1, 60));
+        assert_eq!(errors(Some(2), 0), (0, 59));
+        assert_eq!(errors(Some(0), 2), (0, 59));
+
+        let mut reads = SamBuilder::new().read_length(40);
+        fill(&mut reads, 10);
+        let errors = BufValue::Array(BufArray::Int16(vec![0; 39]));
+        reads.add_frag(
+            frag(&[(6, b'N', 2, b'T', b'C', 3)], Strand::Plus).attr(Tag::new(b'a', b'e'), errors),
+        );
+        let misfit = profile(&reads).unwrap();
+        assert!(misfit.strata.is_empty(), "{misfit:?}");
     }
 
     #[test]

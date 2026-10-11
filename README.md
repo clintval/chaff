@@ -96,7 +96,7 @@ As the copied damage diagram shows, the copy runs from the partner's recessed en
 Copied damage has one blind spot: a lesion copied from an internal nick, by nick translation or strand displacement, or across the gap an abasic site leaves, can sit anywhere in the template, so its alternate molecules carry no signal of an end, and they show only as an excess of the damage class across a library.
 
 A duplex consensus BAM that carries each strand's single-strand consensus, the `ac`, `bc`, `ad` and `bd` tags fgbio and fgumi write, covers it.
-The tool then reads every molecule once more, counting its duplex changes and its *single-strand* changes, lesions on one strand that no polymerase copied, per damage class and context.
+The tool then reads every molecule once more, counting its duplex changes and its *single-strand* changes, lesions on one strand that no polymerase copied, per damage class and context; a strand counts toward a single-strand change when at least 2 of its raw reads agree with its base, its `ad` or `bd` depth less its `ae` or `be` errors, or its depth alone where those tags are absent.
 Copied lesions land on a position one molecule at a time, while a real mutation in a clone puts several molecules on one position, so the artifact fraction a call with two or more alternate molecules starts from becomes the share of the library's positions as deep with as many changes that chance explains, unless `--copied-damage-prior learned` keeps the learned one or the call looks germline, alternate in 20% of its molecules.
 Two real mutations on single molecules at one position read as chance too, so where real mutations on one molecule come at a tenth of the damage rate or more, the chance share costs real calls on two molecules, and a position damaged far beyond the rest of its class looks real to it, so a threshold there rests on the decay alone.
 Without those tags, the artifact fraction is learned from the calls.
@@ -186,17 +186,20 @@ chaff \
 
 In the spectrum, compare the expected real SNVs with every SNV: copied damage shows as C>T at CpG, or C>A, that shrinks when weighted while the other channels keep their height.
 
-Each row of the metrics describes one filter and *stratum*, a group of calls that share an artifact rate: the damage class and CpG context for copied damage, and the substitution for the others; its columns are:
+Each row of the metrics describes one filter and *stratum*, a group of calls that share an artifact rate: the damage class and CpG context for copied damage, and the substitution for the others.
+Every stratum a filter can score has a row, its call and molecule counts at zero when no call falls in it, so the tables of different samples line up; its columns are:
 
 - **Calls:** `calls`, the calls scored, and `filtered`, the calls given the FILTER.
 - **Fractions:** `artifact_fraction`, the stratum's learned share of artifacts, which stays near `filter_artifact_fraction`, the filter's over all its strata, until the stratum has many calls; `expected_artifacts` and `expected_mutations`, each call's chance of being either summed, a call without a posterior counting as real.
 - **Distance:** `distance`, the decay scale or window in bases.
 - **Molecules:** `alt_molecules` and `ref_molecules`, the molecules measured, and their `_congruent` counts and fractions, those within the distance of the artifact's end.
 - **Asymmetry:** `expected_alt_congruent`, the alternate molecules each call's own reference molecules predict within the distance, and `asymmetry_p_value`, a one-sided test of whether more sit there; a small value says the library has the artifact.
-- **Single strand:** for copied damage on a BAM with single-strand consensus, `change_rate` and `single_strand_rate`, the duplex and single-strand changes of the class per molecule over positions of more than 10 molecules, their `conversion_ratio`, `chance_fraction`, the mean prior of its calls, and `chance_excess`, the positions with two or more changes that chance expects beyond those seen and their noise, as a share of them, zero when the model fits.
+- **Single strand:** for copied damage on a BAM with single-strand consensus, `change_rate` and `single_strand_rate`, the duplex and single-strand changes of the class per molecule over positions of more than 10 molecules, whether or not a call falls in the stratum, their `conversion_ratio`, `chance_fraction`, the mean prior of its calls, and `chance_excess`, the positions with two or more changes that chance expects beyond those seen and their noise, as a share of them, zero when the model fits.
+
+The strata that hold a call are:
 
 ```console
-cut -f 2,3,6,8,18 tumor.chaff.tsv | column -t
+awk -F'\t' 'NR == 1 || $4 > 0' tumor.chaff.tsv | cut -f 2,3,6,8,18 | column -t
 ```
 
 ```text
@@ -271,8 +274,10 @@ awk -F'\t' '$2 == "copied-damage" { print $3, $10; n += $10 } END { print "total
 ```
 
 ```text
+C>T:CpG      0.0
 C>T:non-CpG  0.999977
 G>T:CpG      0.0222778
+G>T:non-CpG  0.0
 total        1.02225
 ```
 

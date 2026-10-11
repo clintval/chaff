@@ -111,10 +111,11 @@
 //!
 //! ## Metrics
 //!
-//! The metrics have one row per filter and stratum (see [`metrics`]). A
-//! molecule is congruent when the site lies within the filter's distance of
-//! the end its artifact favors: a 0-based distance less than a decay's scale,
-//! or a 1-based distance of at most a window. The asymmetry test asks whether
+//! The metrics have one row per filter and every stratum it can score, a
+//! stratum without a call counting zero (see [`metrics`]). A molecule is
+//! congruent when the site lies within the filter's distance of the end its
+//! artifact favors: a 0-based distance less than a decay's scale, or a
+//! 1-based distance of at most a window. The asymmetry test asks whether
 //! more alternate molecules are congruent than each call's own reference
 //! molecules predict. Call `i` contributes its `a_i` alternate molecules, each
 //! congruent under the null with probability
