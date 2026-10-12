@@ -38,8 +38,10 @@
 //! often than a uniform rate would. Single-strand changes measure that
 //! variation free of real mutations, which only duplex changes carry: their
 //! counts at each position follow a negative binomial, a Poisson whose rate
-//! varies as a gamma of shape `a`, fitted so that at their rate per molecule
-//! the positions expected with no change match those observed. With `n_j`
+//! varies as a gamma of shape `a`, fitted with its rate by maximum likelihood
+//! over every position's count of changes, and taken as infinite, a
+//! Poisson, unless it fits them better than a Poisson does by a likelihood
+//! ratio test at the 1% level ([`DISPERSION_EVIDENCE`]). With `n_j`
 //! molecules at position `j` and `S(k)` positions holding `k` duplex
 //! changes, the duplex rate `r` solves `sum_j NB(0; n_j r, a) = S(0)`, so
 //! that chance explains every position without a change and, but for the
@@ -151,6 +153,14 @@ const DEPTH_STEPS: f64 = 64.0;
 /// The least and greatest finite gamma shapes the models search.
 const DISPERSIONS: (f64, f64) = (0.05, 1e4);
 
+/// The least evidence, twice the log of the likelihood ratio of the
+/// single-strand changes under the fitted negative binomial over a Poisson,
+/// on which their rate varies across positions: a test at the 1% level,
+/// whose statistic, the shape's inverse held at or above zero, is zero half
+/// the time under a Poisson and otherwise a chi-square of one degree of
+/// freedom.
+pub const DISPERSION_EVIDENCE: f64 = 5.412;
+
 /// The fewest changes that, with [`CLONAL_FRACTION`], make a position
 /// germline or clonal, left out of the rates.
 const CLONAL_CHANGES: u32 = 3;
@@ -249,7 +259,8 @@ impl StratumProfile {
     }
 
     /// The gamma shape of the single-strand change rate's variation across
-    /// positions, infinite when it varies no more than a Poisson allows.
+    /// positions, fitted by maximum likelihood, and infinite unless it
+    /// varies more than a Poisson allows by [`DISPERSION_EVIDENCE`].
     pub fn single_strand_dispersion(&self) -> f64 {
         fitted_dispersion(&self.strand_positions)
     }
@@ -629,47 +640,152 @@ fn matched_rate(depths: &BTreeMap<u32, f64>, zeros: f64, dispersion: f64) -> f64
     ((low + high) / 2.0).exp()
 }
 
-/// The gamma shape of a rate's variation across positions, fitted so the
-/// positions expected with no change match those observed at the rate the
-/// changes give per molecule: infinite when they vary no more than a Poisson
-/// allows. Single-strand changes give it free of real mutations, which only
-/// duplex changes carry. At a given mean, a position's chance of no change
-/// rises as the shape falls from a Poisson's, so the shape is where the
-/// expected zeros reach those observed.
+/// The gamma shape of a rate's variation across positions: the negative
+/// binomial's maximum likelihood over every position's count of changes,
+/// its rate per molecule fitted at each shape, or infinite, a Poisson,
+/// unless it beats a Poisson's by [`DISPERSION_EVIDENCE`]. Single-strand
+/// changes give it free of real mutations, which only duplex changes carry.
+/// The search runs over the shape's inverse, zero at a Poisson, on a grid
+/// spanning [`DISPERSIONS`], then by golden section about the grid's best.
 fn fitted_dispersion(positions: &Positions) -> f64 {
-    let depths = depths(positions);
-    let zeros = observed(positions, 0) as f64;
-    let (molecules, changes) =
-        positions
-            .iter()
-            .fold((0.0, 0.0), |(molecules, changes), (&(n, k), &count)| {
-                let count = count as f64;
-                (
-                    molecules + f64::from(n) * count,
-                    changes + f64::from(k) * count,
-                )
-            });
-    if changes == 0.0 {
+    let likelihood = Likelihood::new(positions);
+    if likelihood.changes == 0.0 || likelihood.molecules == 0.0 {
         return f64::INFINITY;
     }
-    let rate = changes / molecules;
-    let excess = |ln_dispersion: f64| expected_at(&depths, 0, rate, ln_dispersion.exp()) - zeros;
-    if expected_at(&depths, 0, rate, f64::INFINITY) >= zeros {
-        return f64::INFINITY;
-    }
-    let (mut low, mut high) = (DISPERSIONS.0.ln(), DISPERSIONS.1.ln());
-    if excess(low) < 0.0 {
-        return DISPERSIONS.0;
-    }
+    let profile = |ln_inverse: f64| likelihood.profile(ln_inverse.exp());
+    let (low, high) = ((1.0 / DISPERSIONS.1).ln(), (1.0 / DISPERSIONS.0).ln());
+    let steps = 48;
+    let grid: Vec<(f64, f64)> = (0..=steps)
+        .map(|i| {
+            let ln_inverse = low + (high - low) * f64::from(i) / f64::from(steps);
+            (ln_inverse, profile(ln_inverse))
+        })
+        .collect();
+    let best = (0..grid.len())
+        .max_by(|&a, &b| grid[a].1.total_cmp(&grid[b].1))
+        .unwrap_or(0);
+    let golden = (5f64.sqrt() - 1.0) / 2.0;
+    let (mut a, mut b) = (
+        grid[best.saturating_sub(1)].0,
+        grid[(best + 1).min(grid.len() - 1)].0,
+    );
+    let (mut c, mut d) = (b - golden * (b - a), a + golden * (b - a));
+    let (mut at_c, mut at_d) = (profile(c), profile(d));
     for _ in 0..40 {
-        let mid = (low + high) / 2.0;
-        if excess(mid) < 0.0 {
-            high = mid;
+        if at_c >= at_d {
+            (b, d, at_d) = (d, c, at_c);
+            c = b - golden * (b - a);
+            at_c = profile(c);
         } else {
-            low = mid;
+            (a, c, at_c) = (c, d, at_d);
+            d = a + golden * (b - a);
+            at_d = profile(d);
         }
     }
-    ((low + high) / 2.0).exp()
+    let (ln_inverse, fitted) = [grid[best], (c, at_c), (d, at_d)]
+        .into_iter()
+        .max_by(|x, y| x.1.total_cmp(&y.1))
+        .unwrap_or(grid[best]);
+    if 2.0 * (fitted - likelihood.profile(0.0)) < DISPERSION_EVIDENCE {
+        return f64::INFINITY;
+    }
+    (-ln_inverse).exp()
+}
+
+/// A table of positions as a negative binomial's likelihood needs it: each
+/// depth's positions and changes, and the positions with more than each
+/// count of changes.
+struct Likelihood {
+    /// Each depth's molecules, positions, and changes.
+    depths: Vec<(f64, f64, f64)>,
+    /// The positions with more than `i` changes, from `i` of 0.
+    tails: Vec<f64>,
+    molecules: f64,
+    changes: f64,
+}
+
+impl Likelihood {
+    fn new(positions: &Positions) -> Self {
+        let mut depths: Vec<(f64, f64, f64)> = Vec::new();
+        let mut counts: Vec<f64> = Vec::new();
+        for (&(n, k), &count) in positions {
+            let (n, count) = (f64::from(n), count as f64);
+            let changes = f64::from(k) * count;
+            match depths.last_mut() {
+                Some(depth) if depth.0 == n => {
+                    depth.1 += count;
+                    depth.2 += changes;
+                }
+                _ => depths.push((n, count, changes)),
+            }
+            let k = k as usize;
+            if counts.len() <= k {
+                counts.resize(k + 1, 0.0);
+            }
+            counts[k] += count;
+        }
+        let mut tails = vec![0.0; counts.len()];
+        for k in (1..counts.len()).rev() {
+            tails[k - 1] = tails[k] + counts[k];
+        }
+        let molecules = depths.iter().map(|&(n, positions, _)| n * positions).sum();
+        let changes = depths.iter().map(|&(_, _, changes)| changes).sum();
+        Self {
+            depths,
+            tails,
+            molecules,
+            changes,
+        }
+    }
+
+    /// The rate per molecule at which the likelihood peaks for a gamma shape
+    /// of `1 / inverse`, by Newton's method from zero, which rises to it
+    /// without passing it, as the changes the peak must match are concave
+    /// in the rate.
+    fn rate(&self, inverse: f64) -> f64 {
+        let mut rate = 0.0;
+        for _ in 0..200 {
+            let (excess, slope) = self.depths.iter().fold(
+                (-self.changes, 0.0),
+                |(excess, slope), &(n, positions, changes)| {
+                    let weight = (positions + inverse * changes) * n;
+                    let damping = 1.0 + n * rate * inverse;
+                    (
+                        excess + weight * rate / damping,
+                        slope + weight / (damping * damping),
+                    )
+                },
+            );
+            let step = -excess / slope;
+            rate += step;
+            if step <= 1e-12 * rate {
+                break;
+            }
+        }
+        rate
+    }
+
+    /// The log likelihood, but for terms free of the rate and the shape, at
+    /// the rate it peaks at for a gamma shape of `1 / inverse`: a Poisson's
+    /// at an `inverse` of zero, toward which it is continuous.
+    fn profile(&self, inverse: f64) -> f64 {
+        let rate = self.rate(inverse);
+        let spread: f64 = (1..)
+            .zip(self.tails.iter().skip(1))
+            .map(|(i, &tail)| tail * (f64::from(i) * inverse).ln_1p())
+            .sum();
+        let means: f64 = self
+            .depths
+            .iter()
+            .map(|&(n, positions, changes)| {
+                let x = n * rate * inverse;
+                let ln_1p = x.ln_1p();
+                let per_x = if x > 0.0 { ln_1p / x } else { 1.0 };
+                changes * ln_1p + positions * n * rate * per_x
+            })
+            .sum();
+        spread + self.changes * rate.ln() - means
+    }
 }
 
 /// The single-strand and duplex changes of a library, per damage stratum,
@@ -2039,6 +2155,138 @@ mod tests {
             assert!((chance.rate / 2e-3 - 1.0).abs() < 0.01, "{chance:?}");
             assert!(chance.fits() && chance.excess == 0.0, "{chance:?}");
         }
+    }
+
+    /// Seeded draws for simulated libraries: SplitMix64 uniforms, Poisson
+    /// counts by multiplying uniforms, and gamma variates of mean one and a
+    /// whole shape as means of exponentials.
+    struct Draws(u64);
+
+    impl Draws {
+        fn uniform(&mut self) -> f64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            (((z ^ (z >> 31)) >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        }
+
+        fn poisson(&mut self, mean: f64) -> u32 {
+            let floor = (-mean).exp();
+            let (mut k, mut product) = (0, self.uniform());
+            while product > floor {
+                k += 1;
+                product *= self.uniform();
+            }
+            k
+        }
+
+        fn gamma(&mut self, shape: u32) -> f64 {
+            -(0..shape).map(|_| self.uniform().ln()).sum::<f64>() / f64::from(shape)
+        }
+
+        /// A library's positions by their molecules and single-strand
+        /// changes: `positions` of them, spread in depth as a gamma of shape
+        /// 2 about `depth` but at least 11, whose changes fall at `rate` per
+        /// molecule, the rate varying across positions as a gamma of
+        /// `shape`, or not at all without one.
+        fn library(
+            &mut self,
+            positions: usize,
+            depth: f64,
+            rate: f64,
+            shape: Option<u32>,
+        ) -> Vec<(u32, u32)> {
+            (0..positions)
+                .map(|_| {
+                    let n = (depth * self.gamma(2)).round().max(11.0) as u32;
+                    let varied = shape.map_or(1.0, |shape| self.gamma(shape));
+                    (n, self.poisson(f64::from(n) * rate * varied))
+                })
+                .collect()
+        }
+
+        /// The same positions with each change kept with chance `keep`.
+        fn thin(&mut self, sites: &[(u32, u32)], keep: f64) -> Vec<(u32, u32)> {
+            sites
+                .iter()
+                .map(|&(n, k)| (n, (0..k).filter(|_| self.uniform() < keep).count() as u32))
+                .collect()
+        }
+    }
+
+    /// The table of a simulated library's positions, leaving out those the
+    /// profile would call germline.
+    fn table(sites: &[(u32, u32)]) -> Positions {
+        let mut positions = Positions::new();
+        for &(n, k) in sites.iter().filter(|&&(n, k)| !germline(k, n)) {
+            *positions.entry((n, k)).or_default() += 1;
+        }
+        positions
+    }
+
+    /// Libraries the size of a stratum, 434 single-strand changes over 2.59
+    /// million molecules at 5,000 positions, whose changes fall as a Poisson,
+    /// take a Poisson's shape in all but about one in a hundred, and keep it
+    /// when 2.5% of their changes are thinned away.
+    #[test]
+    fn test_poisson_single_strand_changes_keep_a_poisson_shape() {
+        let mut draws = Draws(7);
+        let (mut varied, mut flipped) = (0, 0);
+        for _ in 0..100 {
+            let sites = draws.library(5_000, 517.0, 434.0 / 2_586_031.0, None);
+            let fitted = fitted_dispersion(&table(&sites));
+            let thinned = fitted_dispersion(&table(&draws.thin(&sites, 0.975)));
+            varied += usize::from(fitted.is_finite());
+            flipped += usize::from(fitted.is_finite() != thinned.is_finite());
+        }
+        assert!(varied <= 3 && flipped <= 2, "{varied} {flipped}");
+    }
+
+    /// Single-strand changes whose rate varies as a gamma of shape 1, 2 or
+    /// 4 give back that shape over 20,000 positions of about 1,000
+    /// molecules at 3e-4 changes per molecule, and 2.5% of their changes
+    /// thinned away barely moves it.
+    #[test]
+    fn test_overdispersed_single_strand_changes_give_back_their_shape() {
+        let mut draws = Draws(11);
+        for shape in [1, 2, 4] {
+            for _ in 0..4 {
+                let sites = draws.library(20_000, 1_000.0, 3e-4, Some(shape));
+                let fitted = fitted_dispersion(&table(&sites));
+                let thinned = fitted_dispersion(&table(&draws.thin(&sites, 0.975)));
+                let truth = f64::from(shape);
+                assert!((fitted / truth - 1.0).abs() < 0.3, "{fitted} {truth}");
+                assert!((thinned / fitted - 1.0).abs() < 0.1, "{thinned} {fitted}");
+            }
+        }
+    }
+
+    /// Tables without a change, or with one position of them, take a
+    /// Poisson's shape, while a negative binomial's counts at a single depth
+    /// of a billion molecules give back their shape, as does a Poisson's, and
+    /// a shape below the least searched takes that least.
+    #[test]
+    fn test_the_dispersion_fit_holds_at_the_edges() {
+        assert!(fitted_dispersion(&Positions::new()).is_infinite());
+        let zeros = Positions::from([((100, 0), 1_000), ((5_000, 0), 10)]);
+        assert!(fitted_dispersion(&zeros).is_infinite());
+        assert!(fitted_dispersion(&Positions::from([((1_000, 3), 1)])).is_infinite());
+
+        let expected = |n: u32, mean: f64, shape: f64| -> Positions {
+            (0..)
+                .zip(probabilities(mean, shape))
+                .map(|(k, p)| ((n, k), (100_000.0 * p).round() as u64))
+                .take_while(|&((_, k), count)| count > 0 || f64::from(k) < mean)
+                .filter(|&(_, count)| count > 0)
+                .collect()
+        };
+        let huge = 1_000_000_000;
+        assert!(fitted_dispersion(&expected(huge, 50.0, f64::INFINITY)).is_infinite());
+        let fitted = fitted_dispersion(&expected(huge, 50.0, 1.5));
+        assert!((fitted - 1.5).abs() < 0.01, "{fitted}");
+        let fitted = fitted_dispersion(&expected(1_000, 0.5, 0.01));
+        assert!((fitted - DISPERSIONS.0).abs() < 1e-9, "{fitted}");
     }
 
     /// Positions deeper than 64 molecules pool at their mean depth within
