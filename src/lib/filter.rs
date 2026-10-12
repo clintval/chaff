@@ -870,7 +870,7 @@ pub fn filter_vcf(
     reference: Option<&mut Reference>,
     options: &FilterOptions,
 ) -> Result<Vec<StratumMetrics>> {
-    let report = filter_vcf_report(input, output, evidence, reference, options, false)?;
+    let report = filter_vcf_report(input, output, evidence, reference, options, false, true)?;
     Ok(report.metrics)
 }
 
@@ -886,7 +886,9 @@ pub struct Report {
 }
 
 /// As [`filter_vcf`], also tallying the sample's trinucleotide spectrum when
-/// `spectrum` is set, which needs the reference.
+/// `spectrum` is set, which needs the reference. Copied damage under the
+/// `chaff` model waits for the library's profile only when it scored a call,
+/// for its priors, or when `metrics` asks for the library's rates.
 pub fn filter_vcf_report(
     input: &Path,
     output: &Path,
@@ -894,6 +896,7 @@ pub fn filter_vcf_report(
     mut reference: Option<&mut Reference>,
     options: &FilterOptions,
     spectrum: bool,
+    metrics: bool,
 ) -> Result<Report> {
     if options.enabled(FilterKind::CopiedDamage) && reference.is_none() {
         bail!("the copied damage filter needs a reference FASTA (--ref)");
@@ -955,7 +958,11 @@ pub fn filter_vcf_report(
     log_scored(&sample, &calls, &skipped);
 
     let scales = score_decays(&mut calls, options);
-    let library = if options.takes_chance() {
+    let damaged = calls
+        .iter()
+        .flatten()
+        .any(|a| a.kind == FilterKind::CopiedDamage);
+    let library = if options.takes_chance() && (damaged || metrics) {
         evidence.library()?
     } else {
         None
@@ -1214,6 +1221,7 @@ pub fn run_filter_with(args: &FilterArgs, evidence: &mut dyn Evidence) -> Result
         reference.as_mut(),
         &args.options,
         args.spectrum.is_some(),
+        args.metrics.is_some(),
     )?;
     if let Some(path) = &args.metrics {
         write_metrics(path, &report.metrics)?;
@@ -1965,54 +1973,61 @@ mod tests {
         assert!(error.to_string().contains("reference"), "{error}");
     }
 
+    /// A duplex BAM of 40 read pairs over the reference `ACGTTCAA` repeated
+    /// on chr1, three with a C>T at 1002, and with both strands'
+    /// single-strand consensus when `tagged`.
+    fn duplex_bam(dir: &Path, tagged: bool) -> PathBuf {
+        use noodles::sam::alignment::record::data::field::Tag;
+        use noodles::sam::alignment::record_buf::data::field::value::Array;
+        use noodles::sam::alignment::record_buf::data::field::Value as Field;
+        use streampile::testing::{Pair, SamBuilder};
+        let sequence = "ACGTTCAA".repeat(250);
+        let (mut scratch, mut reads) = (
+            SamBuilder::new().read_length(50),
+            SamBuilder::new().read_length(50),
+        );
+        for i in 0..40usize {
+            let (start1, start2) = (961 + i, 1041 + i);
+            let mut first = sequence[start1 - 1..start1 + 49].to_string();
+            if i < 3 {
+                first.replace_range(1002 - start1..1003 - start1, "T");
+            }
+            let second = sequence[start2 - 1..start2 + 49].to_string();
+            let pair = Pair::at(start1, start2).bases1(first).bases2(second);
+            for mut record in scratch.add_pair(pair) {
+                if tagged {
+                    let bases = String::from_utf8(record.sequence().as_ref().to_vec()).unwrap();
+                    let depths = Field::Array(Array::Int16(vec![3; bases.len()]));
+                    let data = record.data_mut();
+                    data.insert(Tag::new(b'a', b'c'), Field::from(bases.clone()));
+                    data.insert(Tag::new(b'b', b'c'), Field::from(bases));
+                    data.insert(Tag::new(b'a', b'd'), depths.clone());
+                    data.insert(Tag::new(b'b', b'd'), depths);
+                }
+                reads.extend([record]);
+            }
+        }
+        let bam = dir.join(if tagged { "tagged.bam" } else { "plain.bam" });
+        reads.write_bam(&bam).unwrap();
+        bam
+    }
+
     /// A duplex consensus BAM that carries both strands' single-strand consensus
     /// is profiled beside the calls: its copied damage takes the chance prior
     /// and its metrics the library's rates, while the same consensus without the
     /// tags scores as before.
     #[test]
     fn test_a_duplex_bam_with_single_strand_consensus_is_profiled() {
-        use noodles::sam::alignment::record::data::field::Tag;
-        use noodles::sam::alignment::record_buf::data::field::value::Array;
-        use noodles::sam::alignment::record_buf::data::field::Value as Field;
-        use streampile::testing::{Pair, SamBuilder};
         let dir = tempfile::tempdir().unwrap();
-        let sequence = "ACGTTCAA".repeat(250);
-        let fasta = write_fasta(dir.path(), "chr1", &sequence);
+        let fasta = write_fasta(dir.path(), "chr1", &"ACGTTCAA".repeat(250));
         let mut vcf = VcfBuilder::new(&["tumor"]);
         vcf.add(Variant::new(1002, &["C", "T"], vec![gt("tumor", "0/1")]));
         let input = vcf.write(&dir.path().join("in.vcf"));
         let run = |tagged: bool| {
-            let (mut scratch, mut reads) = (
-                SamBuilder::new().read_length(50),
-                SamBuilder::new().read_length(50),
-            );
-            for i in 0..40usize {
-                let (start1, start2) = (961 + i, 1041 + i);
-                let mut first = sequence[start1 - 1..start1 + 49].to_string();
-                if i < 3 {
-                    first.replace_range(1002 - start1..1003 - start1, "T");
-                }
-                let second = sequence[start2 - 1..start2 + 49].to_string();
-                let pair = Pair::at(start1, start2).bases1(first).bases2(second);
-                for mut record in scratch.add_pair(pair) {
-                    if tagged {
-                        let bases = String::from_utf8(record.sequence().as_ref().to_vec()).unwrap();
-                        let depths = Field::Array(Array::Int16(vec![3; bases.len()]));
-                        let data = record.data_mut();
-                        data.insert(Tag::new(b'a', b'c'), Field::from(bases.clone()));
-                        data.insert(Tag::new(b'b', b'c'), Field::from(bases));
-                        data.insert(Tag::new(b'a', b'd'), depths.clone());
-                        data.insert(Tag::new(b'b', b'd'), depths);
-                    }
-                    reads.extend([record]);
-                }
-            }
-            let bam = dir.path().join("reads.bam");
-            reads.write_bam(&bam).unwrap();
             let args = FilterArgs {
                 input: input.clone(),
                 output: dir.path().join("out.vcf"),
-                bam,
+                bam: duplex_bam(dir.path(), tagged),
                 reference: Some(fasta.clone()),
                 metrics: Some(dir.path().join("out.tsv")),
                 spectrum: None,
@@ -2050,6 +2065,71 @@ mod tests {
             "{description}"
         );
         assert!(row[18..23].iter().all(String::is_empty), "{row:?}");
+    }
+
+    /// A run without a copied-damage call reads the library's profile only
+    /// for the metrics, whose copied-damage rows then carry its rates with
+    /// no call, and without them filters its calls without waiting for the
+    /// profile, as a run with a copied-damage call waits for its priors.
+    #[test]
+    fn test_a_run_without_a_copied_damage_call_waits_for_the_library_only_for_the_metrics() {
+        use std::cell::Cell;
+        let dir = tempfile::tempdir().unwrap();
+        let fasta = write_fasta(dir.path(), "chr1", &"ACGTTCAA".repeat(250));
+        let bam = duplex_bam(dir.path(), true);
+        let vcf = |name: &str, pos: usize, alleles: &[&str]| {
+            let mut vcf = VcfBuilder::new(&["tumor"]);
+            vcf.add(Variant::new(pos, alleles, vec![gt("tumor", "0/1")]));
+            vcf.write(&dir.path().join(name))
+        };
+        let undamaged = vcf("undamaged.vcf", 1001, &["A", "G"]);
+        let damaged = vcf("damaged.vcf", 1002, &["C", "T"]);
+        let tsv = dir.path().join("out.tsv");
+        let args = |input: &Path, metrics: Option<&Path>| FilterArgs {
+            input: input.to_path_buf(),
+            output: dir.path().join("out.vcf"),
+            bam: bam.clone(),
+            reference: Some(fasta.clone()),
+            metrics: metrics.map(Path::to_path_buf),
+            spectrum: None,
+            pileup: PileupOptions::default(),
+            options: FilterOptions::default(),
+        };
+
+        run_filter(&args(&undamaged, Some(&tsv))).unwrap();
+        let metrics = std::fs::read_to_string(&tsv).unwrap();
+        let row: Vec<&str> = metrics
+            .lines()
+            .map(|line| line.split('\t').collect::<Vec<_>>())
+            .find(|row| row[1] == "copied-damage" && row[2] == "C>T:CpG")
+            .unwrap();
+        assert_eq!(row[3], "0", "{row:?}");
+        assert!([18, 19, 22].iter().all(|&i| !row[i].is_empty()), "{row:?}");
+        std::fs::remove_file(&tsv).unwrap();
+        run_filter(&args(&undamaged, None)).unwrap();
+        assert!(!tsv.exists());
+        let (_, records) = read_records(&dir.path().join("out.vcf"));
+        assert_eq!(records.len(), 1);
+
+        let waits = |input: &Path, metrics: Option<&Path>| {
+            let args = args(input, metrics);
+            let mut reader = noodles::bam::io::reader::Builder
+                .build_from_path(&args.bam)
+                .unwrap();
+            let header = reader.read_header().unwrap();
+            let builder = StreamingPileupBuilder::new(reader, &header).unwrap();
+            let waited = Cell::new(false);
+            let pending: PendingLibrary<'_> = Box::new(|| {
+                waited.set(true);
+                Ok(None)
+            });
+            let mut evidence = PileupEvidence::new(builder, &args.pileup).with_library(pending);
+            run_filter_with(&args, &mut evidence).unwrap();
+            waited.get()
+        };
+        assert!(!waits(&undamaged, None));
+        assert!(waits(&undamaged, Some(&tsv)));
+        assert!(waits(&damaged, None));
     }
 
     /// A library whose duplex C>T changes at CpG fall together by chance at
@@ -2486,6 +2566,7 @@ mod tests {
                 Some(&mut reference),
                 &options,
                 true,
+                false,
             )
             .unwrap();
             let spectrum = report.spectrum.unwrap();
@@ -2517,8 +2598,8 @@ mod tests {
         };
         let output = dir.path().join("out.vcf");
         let mut table = MoleculeTable::new();
-        let error =
-            filter_vcf_report(&input, &output, &mut table, None, &options, true).unwrap_err();
+        let error = filter_vcf_report(&input, &output, &mut table, None, &options, true, false)
+            .unwrap_err();
         assert!(
             error.to_string().contains("the spectrum needs a reference"),
             "{error}"
