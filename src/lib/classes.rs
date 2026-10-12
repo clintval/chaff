@@ -73,6 +73,14 @@ impl DamageClass {
         }
     }
 
+    /// The contexts its lesion base can sit in: CpG only for a C or a G.
+    pub fn contexts(&self) -> &'static [Context] {
+        match self.lesion {
+            b'C' | b'G' => &Context::ALL,
+            _ => &[Context::NonCpG],
+        }
+    }
+
     /// The same class written from the other strand, e.g. `G>A` for `C>T`.
     pub fn reverse_complement(&self) -> Self {
         Self {

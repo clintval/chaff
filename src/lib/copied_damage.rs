@@ -114,11 +114,17 @@ impl CopiedDamage {
         gt.is_het() && gt.calls_are_single_bases()
     }
 
-    /// Every stratum a call can be tested in: each class in each context.
+    /// Every stratum a call can be tested in: each class in each context its
+    /// lesion base can sit in.
     pub fn strata(&self) -> Vec<String> {
         self.classes
             .iter()
-            .flat_map(|&class| Context::ALL.map(|context| stratum(class, context)))
+            .flat_map(|&class| {
+                class
+                    .contexts()
+                    .iter()
+                    .map(move |&context| stratum(class, context))
+            })
             .collect()
     }
 
@@ -368,6 +374,24 @@ mod tests {
         assert_eq!(
             filter.strata(),
             ["G>T:CpG", "G>T:non-CpG", "C>T:CpG", "C>T:non-CpG"]
+        );
+    }
+
+    /// A lesion on an A or a T never sits in a CpG, so its class has no CpG
+    /// stratum.
+    #[test]
+    fn test_a_class_of_a_or_t_lesions_has_no_cpg_stratum() {
+        let filter = CopiedDamage {
+            classes: vec![
+                "A>G".parse().unwrap(),
+                "T>G".parse().unwrap(),
+                DamageClass::DEAMINATION,
+            ],
+            ..CopiedDamage::default()
+        };
+        assert_eq!(
+            filter.strata(),
+            ["A>G:non-CpG", "T>G:non-CpG", "C>T:CpG", "C>T:non-CpG"]
         );
     }
 }
