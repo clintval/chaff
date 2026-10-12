@@ -2,20 +2,25 @@
 //!
 //! A duplex consensus from fgbio's or fgumi's `CallDuplexConsensusReads`
 //! carries, per base, the single-strand consensus of each of the molecule's two
-//! strands: `ac` and `bc` hold their bases and `ad` and `bd` the raw reads
-//! behind them. Once aligned, as by `ZipperBams`, the bases are reverse
+//! strands: `ac` and `bc` hold their bases, `ad` and `bd` the raw reads
+//! behind them, and `ae` and `be`, when present, those of the raw reads that
+//! disagree with them. Once aligned, as by `ZipperBams`, the bases are reverse
 //! complemented with the consensus, so they sit in the reference's
 //! orientation. A consensus counts only with all four tags, read past any
-//! hard clip they still hold. Where mates overlap, only the one that sorts
-//! first counts, so each molecule counts once.
+//! hard clip they still hold, and without an error tag that is not an
+//! integer array as long as its depths or that counts errors outside 0 to
+//! its depth. Where mates overlap, only the one that sorts first counts, so
+//! each molecule counts once.
 //!
 //! A library profile reads every consensus once and counts, at each reference base
 //! a damage class can change, two kinds of molecule:
 //!
 //! - **Single-strand changes:** one strand holds the reference base and the
-//!   other the class's damaged base, each read by at least
-//!   [`MIN_STRAND_READS`] raw reads. These are lesions polymerase never
-//!   copied.
+//!   other the class's damaged base, each agreed on by at least
+//!   [`MIN_AGREEING_READS`] raw reads: its depth less its disagreeing reads
+//!   when the consensus carries both `ae` and `be`, or its depth alone when
+//!   it lacks either. The same floor admits the molecules the rate is per.
+//!   These are lesions polymerase never copied.
 //! - **Duplex changes:** the consensus base, at the base quality floor, and
 //!   both strands' bases are the damaged base. These are copied lesions and
 //!   real mutations alike.
@@ -95,9 +100,10 @@ use crate::evidence::PileupOptions;
 use crate::prior::{chance_prior, STRATUM_PRIOR_STRENGTH};
 use crate::reference::Reference;
 
-/// The fewest raw reads behind each strand's base for a molecule to count
-/// toward single-strand changes, so a single read's error does not.
-pub const MIN_STRAND_READS: i64 = 2;
+/// The fewest raw reads agreeing with each strand's base for a molecule to
+/// count toward single-strand changes, so a single read's error does not,
+/// nor does a base its own reads dispute.
+pub const MIN_AGREEING_READS: i64 = 2;
 
 /// The changes from which the chance model takes positions with a count or
 /// more rather than that count alone, as deep counts are sparse: a call
@@ -174,8 +180,8 @@ pub struct StratumProfile {
     pub molecules: u64,
     /// Those whose consensus base is the damaged base.
     pub changes: u64,
-    /// Molecules with both strands' bases called, each by at least
-    /// [`MIN_STRAND_READS`] raw reads.
+    /// Molecules with both strands' bases called, each agreed on by at
+    /// least [`MIN_AGREEING_READS`] raw reads.
     pub strand_molecules: u64,
     /// Those with a single-strand change.
     pub single_strand_changes: u64,
@@ -672,6 +678,21 @@ fn fitted_dispersion(positions: &Positions) -> f64 {
 pub struct LibraryProfile {
     /// Each stratum's counts.
     pub strata: BTreeMap<String, StratumProfile>,
+    /// The consensus counted and left out by their error tags.
+    pub error_tags: ErrorTagCounts,
+}
+
+/// Consensus by how their error tags, `ae` and `be`, floor their strands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ErrorTagCounts {
+    /// Counted with both tags, each strand by the raw reads that agree with
+    /// its base.
+    pub paired: u64,
+    /// Counted without both tags, each strand by its raw-read depth.
+    pub unpaired: u64,
+    /// Left out for an error tag that is not an integer array as long as its
+    /// depths, or that counts errors outside 0 to its depth.
+    pub malformed: u64,
 }
 
 impl LibraryProfile {
@@ -703,13 +724,66 @@ fn index(base: u8) -> Option<usize> {
     }
 }
 
-/// One consensus's single-strand bases and raw-read depths, from its first
-/// base on.
+/// One consensus's single-strand bases, raw-read depths, and, when it
+/// carries both error tags, the raw reads that disagree with each strand's
+/// base, from its first base on.
 struct Strands<'a> {
     a_bases: &'a [u8],
     b_bases: &'a [u8],
     a_reads: &'a [i64],
     b_reads: &'a [i64],
+    errors: Option<(&'a [i64], &'a [i64])>,
+}
+
+impl Strands<'_> {
+    /// Whether both strands' bases at `query` are each agreed on by at least
+    /// [`MIN_AGREEING_READS`] raw reads.
+    fn agreed(&self, query: usize) -> bool {
+        let agreeing = |reads: &[i64], errors: Option<&[i64]>| {
+            let errors = errors.and_then(|e| e.get(query)).copied().unwrap_or(0);
+            reads
+                .get(query)
+                .is_some_and(|&n| n - errors >= MIN_AGREEING_READS)
+        };
+        let (a_errors, b_errors) = self.errors.unzip();
+        agreeing(self.a_reads, a_errors) && agreeing(self.b_reads, b_errors)
+    }
+}
+
+/// A consensus's error tags, `ae` and `be`, read against its raw-read
+/// depths.
+#[derive(Debug)]
+enum ErrorTags {
+    /// Both valid, so each strand counts the raw reads that agree with it.
+    Paired(Vec<i64>, Vec<i64>),
+    /// Either absent, so each strand counts its raw-read depth.
+    Unpaired,
+    /// Either not an integer array as long as its depths, or counting errors
+    /// outside 0 to its depth, so the consensus is left out.
+    Malformed,
+}
+
+impl ErrorTags {
+    /// Read the error tags of a consensus whose strands have the raw-read
+    /// depths `a_reads` and `b_reads`.
+    fn read(data: &bam::record::Data<'_>, a_reads: &[i64], b_reads: &[i64]) -> Self {
+        let strand = |tag: &[u8; 2], reads: &[i64]| {
+            let value = data.get(tag)?;
+            let errors = value.ok().and_then(integers).filter(|errors| {
+                errors.len() == reads.len()
+                    && errors
+                        .iter()
+                        .zip(reads)
+                        .all(|(&e, &n)| (0..=n).contains(&e))
+            });
+            Some(errors)
+        };
+        match (strand(b"ae", a_reads), strand(b"be", b_reads)) {
+            (Some(None), _) | (_, Some(None)) => Self::Malformed,
+            (Some(Some(a)), Some(Some(b))) => Self::Paired(a, b),
+            _ => Self::Unpaired,
+        }
+    }
 }
 
 /// Where a consensus's first base sits in its per-base tags of `length`: at
@@ -982,6 +1056,11 @@ impl<'a> Scanner<'a> {
         if [b_bases.len(), a_reads.len(), b_reads.len()] != [length; 3] {
             return Ok(());
         }
+        let errors = ErrorTags::read(&data, &a_reads, &b_reads);
+        if matches!(errors, ErrorTags::Malformed) {
+            self.profile.error_tags.malformed += 1;
+            return Ok(());
+        }
         let Some(offset) = tag_offset(record, length)? else {
             return Ok(());
         };
@@ -1028,11 +1107,23 @@ impl<'a> Scanner<'a> {
         let qualities = record.quality_scores();
         let qualities = qualities.as_ref();
         let reverse = flags.is_reverse_complemented();
+        let counts = &mut self.profile.error_tags;
+        let errors = match &errors {
+            ErrorTags::Paired(a, b) => {
+                counts.paired += 1;
+                Some((&a[offset..], &b[offset..]))
+            }
+            _ => {
+                counts.unpaired += 1;
+                None
+            }
+        };
         let strands = Strands {
             a_bases: &a_bases[offset..],
             b_bases: &b_bases[offset..],
             a_reads: &a_reads[offset..],
             b_reads: &b_reads[offset..],
+            errors,
         };
 
         let (mut query, mut pos) = (0usize, start);
@@ -1110,8 +1201,7 @@ impl<'a> Scanner<'a> {
         let (Some(ia), Some(ib)) = (index(a), index(b)) else {
             return Ok(());
         };
-        let reads = |r: &[i64]| r.get(query).is_some_and(|&n| n >= MIN_STRAND_READS);
-        if !reads(strands.a_reads) || !reads(strands.b_reads) {
+        if !strands.agreed(query) {
             return Ok(());
         }
         site.strand_molecules += 1;
@@ -1136,7 +1226,32 @@ impl<'a> Scanner<'a> {
             );
             return None;
         }
+        log_error_tags(self.profile.error_tags);
         Some(self.profile)
+    }
+}
+
+/// Log how the profile's consensus floored their strands, warning when the
+/// BAM mixes consensus with and without both error tags or has malformed ones.
+fn log_error_tags(counts: ErrorTagCounts) {
+    let ErrorTagCounts {
+        paired,
+        unpaired,
+        malformed,
+    } = counts;
+    info!(
+        "the single-strand floor counted the raw reads agreeing with each strand in {paired} consensus with both error tags (ae and be), every raw read in {unpaired} without both, and left out {malformed} with a malformed one"
+    );
+    if paired > 0 && unpaired > 0 {
+        warn!(
+            "the BAM mixes consensus with both error tags (ae and be) and without them, so {unpaired} of {} consensus count every raw read toward the single-strand floor rather than those that agree with their strands",
+            paired + unpaired
+        );
+    }
+    if malformed > 0 {
+        warn!(
+            "{malformed} consensus were left out of the single-strand profile for an error tag (ae or be) that is not an integer array as long as their depths or counts errors outside 0 to their depth"
+        );
     }
 }
 
@@ -1356,6 +1471,108 @@ mod tests {
             (cpg.molecules, cpg.changes, cpg.single_strand_changes),
             (120, 1, 1)
         );
+    }
+
+    /// Per-base errors of 40 bases, `n` at `offset` and none elsewhere.
+    fn errors_at(offset: usize, n: i16) -> BufValue {
+        let mut errors = vec![0i16; 40];
+        errors[offset] = n;
+        BufValue::Array(BufArray::Int16(errors))
+    }
+
+    /// The same consensus with the error tags given.
+    fn with_errors(mut frag: Frag, ae: Option<BufValue>, be: Option<BufValue>) -> Frag {
+        for (tag, errors) in [(Tag::new(b'a', b'e'), ae), (Tag::new(b'b', b'e'), be)] {
+            if let Some(errors) = errors {
+                frag = frag.attr(tag, errors);
+            }
+        }
+        frag
+    }
+
+    /// The single-strand changes and strand molecules of `stratum`, and the
+    /// error tag counts, over eleven plain consensus and `frag`.
+    fn floored(frag: Frag, stratum: &str) -> ((u64, u64), ErrorTagCounts) {
+        let mut reads = SamBuilder::new().read_length(40);
+        fill(&mut reads, 11);
+        reads.add_frag(frag);
+        let profile = profile(&reads).unwrap();
+        let counts = profile.stratum(stratum).unwrap();
+        (
+            (counts.single_strand_changes, counts.strand_molecules),
+            profile.error_tags,
+        )
+    }
+
+    /// A strand counts the raw reads that agree with its base, its depth less
+    /// its errors, when the consensus carries both error tags: of 3 reads, 1
+    /// error leaves 2 and the molecule counts, and 2 errors on either strand
+    /// leave 1 and it counts neither as a change nor among the molecules. A
+    /// consensus without both tags counts all 3 on both strands, whatever the
+    /// one tag it carries says.
+    #[test]
+    fn test_a_strand_counts_the_raw_reads_that_agree_with_it() {
+        let run = |ae: Option<i16>, be: Option<i16>| {
+            let frag = frag(&[(6, b'N', 2, b'T', b'C', 3)], Strand::Plus);
+            let errors = |n: Option<i16>| n.map(|n| errors_at(6, n));
+            let ((changes, molecules), counts) =
+                floored(with_errors(frag, errors(ae), errors(be)), "C>T:non-CpG");
+            assert_eq!(counts.paired + counts.unpaired, 12, "{counts:?}");
+            assert_eq!(counts.malformed, 0, "{counts:?}");
+            (changes, molecules, counts.paired)
+        };
+        assert_eq!(run(None, None), (1, 60, 0));
+        assert_eq!(run(Some(0), Some(0)), (1, 60, 1));
+        assert_eq!(run(Some(1), Some(1)), (1, 60, 1));
+        assert_eq!(run(Some(2), Some(0)), (0, 59, 1));
+        assert_eq!(run(Some(0), Some(2)), (0, 59, 1));
+        assert_eq!(run(Some(3), Some(0)), (0, 59, 1));
+        assert_eq!(run(Some(2), None), (1, 60, 0));
+        assert_eq!(run(None, Some(2)), (1, 60, 0));
+    }
+
+    /// An error tag that is not an integer array as long as the depths, or
+    /// that counts more errors than raw reads or fewer than none, leaves the
+    /// consensus out, which the profile counts, even without its partner tag.
+    #[test]
+    fn test_malformed_error_tags_leave_the_consensus_out() {
+        let run = |ae: BufValue, be: Option<BufValue>| {
+            let frag = frag(&[(6, b'N', 2, b'T', b'C', 3)], Strand::Plus);
+            floored(with_errors(frag, Some(ae), be), "C>T:non-CpG")
+        };
+        let dropped = (
+            (0, 55),
+            ErrorTagCounts {
+                paired: 0,
+                unpaired: 11,
+                malformed: 1,
+            },
+        );
+        for be in [Some(errors_at(6, 0)), None] {
+            let short = BufValue::Array(BufArray::Int16(vec![0; 39]));
+            assert_eq!(run(short, be.clone()), dropped);
+            assert_eq!(run(errors_at(6, 4), be.clone()), dropped);
+            assert_eq!(run(errors_at(6, -1), be.clone()), dropped);
+            let float = BufValue::Array(BufArray::Float(vec![0.0; 40]));
+            assert_eq!(run(float, be.clone()), dropped);
+            assert_eq!(run(BufValue::from("0".repeat(40)), be), dropped);
+        }
+    }
+
+    /// A reverse consensus's error tags, reversed with its depths when it
+    /// was aligned, floor each strand where they align: 2 errors of 3 reads
+    /// at the G>A of a CpG's G leave out its single-strand C>T.
+    #[test]
+    fn test_a_reverse_consensus_floors_its_strands_where_they_align() {
+        let run = |errors: i16| {
+            let frag = frag(&[(3, b'N', 2, b'A', b'G', 3)], Strand::Minus);
+            let frag = with_errors(frag, Some(errors_at(3, errors)), Some(errors_at(3, 0)));
+            let (counts, error_tags) = floored(frag, "C>T:CpG");
+            assert_eq!(error_tags.paired, 1, "{error_tags:?}");
+            counts
+        };
+        assert_eq!(run(1), (1, 120));
+        assert_eq!(run(2), (0, 119));
     }
 
     #[test]

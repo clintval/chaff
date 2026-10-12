@@ -496,7 +496,8 @@ fn test_end_repair_fill_in_on_a_duplex_consensus_measures_from_the_nearer_end() 
 }
 
 /// The metrics rows of the thresholded run: one per filter and substitution
-/// class, pooled over the calls.
+/// class it scores, pooled over the calls, with a row for each class that
+/// holds none.
 #[test]
 fn test_metrics_rows_of_the_shared_vcf() {
     let dir = TempDir::new().unwrap();
@@ -533,8 +534,12 @@ fn test_metrics_rows_of_the_shared_vcf() {
             ("end-repair-fill-in".into(), "C>G".into()),
             ("end-repair-fill-in".into(), "C>T".into()),
             ("end-repair-fill-in".into(), "T>A".into()),
+            ("end-repair-fill-in".into(), "T>C".into()),
+            ("end-repair-fill-in".into(), "T>G".into()),
         ]
     );
+    let calls: Vec<&str> = rows.iter().map(|r| r[3].as_str()).collect();
+    assert_eq!(calls, ["1", "1", "1", "1", "1", "1", "1", "0", "0"]);
 }
 
 /// fgbio `PileupBuilderTest`: "raise an exception if the input SAM source is
@@ -872,7 +877,9 @@ fn test_end_repair_fill_in_near_the_copied_strand_s_three_prime_end_is_filtered(
             "{model}"
         );
         let counts = ["C>A", "6", ref_congruent].map(String::from);
-        assert_eq!(rows, vec![counts], "{model}");
+        assert_eq!(rows.len(), 6, "{model}");
+        assert_eq!(rows[0], counts, "{model}");
+        assert!(rows[1..].iter().all(|r| r[1..] == ["0", "0"]), "{model}");
     }
 }
 

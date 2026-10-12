@@ -6,6 +6,7 @@
 //! on the forward strand, and `G>A` (its reverse complement) puts it on the
 //! reverse strand.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
@@ -72,6 +73,14 @@ impl DamageClass {
         }
     }
 
+    /// The contexts its lesion base can sit in: CpG only for a C or a G.
+    pub fn contexts(&self) -> &'static [Context] {
+        match self.lesion {
+            b'C' | b'G' => &Context::ALL,
+            _ => &[Context::NonCpG],
+        }
+    }
+
     /// The same class written from the other strand, e.g. `G>A` for `C>T`.
     pub fn reverse_complement(&self) -> Self {
         Self {
@@ -132,6 +141,9 @@ pub enum Context {
 }
 
 impl Context {
+    /// Every context.
+    pub const ALL: [Context; 2] = [Context::CpG, Context::NonCpG];
+
     /// Classify the reference base at a position from its forward-strand
     /// neighbors. CpG is palindromic, so the result holds on both strands.
     pub fn of(prev: Option<u8>, base: u8, next: Option<u8>) -> Self {
@@ -153,6 +165,19 @@ impl fmt::Display for Context {
             Context::NonCpG => write!(f, "non-CpG"),
         }
     }
+}
+
+/// The pyrimidine-centric single-base substitution labels of every change to
+/// an alternate base that `alt` admits, in order.
+pub fn sbs6_of(alt: impl Fn(u8) -> bool) -> Vec<String> {
+    const BASES: [u8; 4] = *b"ACGT";
+    let labels: BTreeSet<String> = BASES
+        .iter()
+        .flat_map(|&r| BASES.iter().map(move |&a| (r, a)))
+        .filter(|&(_, a)| alt(a))
+        .filter_map(|(r, a)| sbs6(r, a))
+        .collect();
+    labels.into_iter().collect()
 }
 
 /// The pyrimidine-centric single-base substitution label (one of the six SBS
@@ -263,6 +288,13 @@ mod tests {
     #[case(b'A', b'C', "T>G")]
     fn test_sbs6(#[case] ref_base: u8, #[case] alt_base: u8, #[case] expected: &str) {
         assert_eq!(sbs6(ref_base, alt_base).as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn test_sbs6_of_lists_the_labels_of_the_admitted_alternate_bases() {
+        let every = ["C>A", "C>G", "C>T", "T>A", "T>C", "T>G"];
+        assert_eq!(sbs6_of(|_| true), every);
+        assert_eq!(sbs6_of(|a| a == b'A' || a == b'T'), ["C>A", "C>T", "T>A"]);
     }
 
     #[test]

@@ -77,8 +77,13 @@ pub struct DamageSite {
 impl DamageSite {
     /// The stratum label, e.g. `C>T:CpG`.
     pub fn stratum(&self) -> String {
-        format!("{}:{}", self.class, self.context)
+        stratum(self.class, self.context)
     }
+}
+
+/// The stratum label of a damage class in a context, e.g. `C>T:CpG`.
+pub fn stratum(class: DamageClass, context: Context) -> String {
+    format!("{class}:{context}")
 }
 
 impl CopiedDamage {
@@ -107,6 +112,20 @@ impl CopiedDamage {
     /// Heterozygous calls whose every called allele is one base.
     pub fn applies_to(gt: &Genotype) -> bool {
         gt.is_het() && gt.calls_are_single_bases()
+    }
+
+    /// Every stratum a call can be tested in: each class in each context its
+    /// lesion base can sit in.
+    pub fn strata(&self) -> Vec<String> {
+        self.classes
+            .iter()
+            .flat_map(|&class| {
+                class
+                    .contexts()
+                    .iter()
+                    .map(move |&context| stratum(class, context))
+            })
+            .collect()
     }
 
     /// The first configured class that explains `ref_base>alt_base`, with the
@@ -348,5 +367,31 @@ mod tests {
             context: Context::CpG,
         };
         assert_eq!(site.stratum(), "C>T:CpG");
+        let filter = CopiedDamage {
+            classes: vec![DamageClass::OXIDATION, DamageClass::DEAMINATION],
+            ..CopiedDamage::default()
+        };
+        assert_eq!(
+            filter.strata(),
+            ["G>T:CpG", "G>T:non-CpG", "C>T:CpG", "C>T:non-CpG"]
+        );
+    }
+
+    /// A lesion on an A or a T never sits in a CpG, so its class has no CpG
+    /// stratum.
+    #[test]
+    fn test_a_class_of_a_or_t_lesions_has_no_cpg_stratum() {
+        let filter = CopiedDamage {
+            classes: vec![
+                "A>G".parse().unwrap(),
+                "T>G".parse().unwrap(),
+                DamageClass::DEAMINATION,
+            ],
+            ..CopiedDamage::default()
+        };
+        assert_eq!(
+            filter.strata(),
+            ["A>G:non-CpG", "T>G:non-CpG", "C>T:CpG", "C>T:non-CpG"]
+        );
     }
 }

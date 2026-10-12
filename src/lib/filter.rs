@@ -25,7 +25,7 @@ use noodles::vcf::variant::RecordBuf;
 use streampile::{RecordSource, StreamingPileupBuilder};
 
 use crate::call::{Genotype, Skip};
-use crate::classes::{sbs6, Context};
+use crate::classes::{sbs6, sbs6_of, Context};
 use crate::copied_damage::{CopiedDamage, DamageSite};
 use crate::evidence::{Evidence, Molecule, PendingLibrary, PileupEvidence, PileupOptions};
 use crate::io::{add_filter, add_info, significant, vcf_float, VariantReader, VariantWriter};
@@ -106,6 +106,17 @@ impl FilterKind {
             FilterKind::CopiedDamage => options.copied_damage_threshold,
             FilterKind::ATailing => options.a_tailing_threshold,
             FilterKind::EndRepairFillIn => options.end_repair_fill_in_threshold,
+        }
+    }
+
+    /// Every stratum the filter can score a call in: each damage class in
+    /// each context for copied damage, and the substitutions of the calls
+    /// the others score.
+    pub fn strata(self, options: &FilterOptions) -> Vec<String> {
+        match self {
+            FilterKind::CopiedDamage => options.copied_damage.strata(),
+            FilterKind::ATailing => sbs6_of(|alt| matches!(alt, b'A' | b'T')),
+            FilterKind::EndRepairFillIn => sbs6_of(|_| true),
         }
     }
 
@@ -859,7 +870,7 @@ pub fn filter_vcf(
     reference: Option<&mut Reference>,
     options: &FilterOptions,
 ) -> Result<Vec<StratumMetrics>> {
-    let report = filter_vcf_report(input, output, evidence, reference, options, false)?;
+    let report = filter_vcf_report(input, output, evidence, reference, options, false, true)?;
     Ok(report.metrics)
 }
 
@@ -875,7 +886,9 @@ pub struct Report {
 }
 
 /// As [`filter_vcf`], also tallying the sample's trinucleotide spectrum when
-/// `spectrum` is set, which needs the reference.
+/// `spectrum` is set, which needs the reference. Copied damage under the
+/// `chaff` model waits for the library's profile only when it scored a call,
+/// for its priors, or when `metrics` asks for the library's rates.
 pub fn filter_vcf_report(
     input: &Path,
     output: &Path,
@@ -883,6 +896,7 @@ pub fn filter_vcf_report(
     mut reference: Option<&mut Reference>,
     options: &FilterOptions,
     spectrum: bool,
+    metrics: bool,
 ) -> Result<Report> {
     if options.enabled(FilterKind::CopiedDamage) && reference.is_none() {
         bail!("the copied damage filter needs a reference FASTA (--ref)");
@@ -948,7 +962,7 @@ pub fn filter_vcf_report(
         .iter()
         .flatten()
         .any(|a| a.kind == FilterKind::CopiedDamage);
-    let library = if options.takes_chance() && damaged {
+    let library = if options.takes_chance() && (damaged || metrics) {
         evidence.library()?
     } else {
         None
@@ -998,7 +1012,7 @@ pub fn filter_vcf_report(
         library.as_ref(),
         &chances,
     );
-    for row in &rows {
+    for row in rows.iter().filter(|row| row.calls > 0) {
         info!(
             "{} {}: {}, artifact fraction {}, {} filtered, {} of {} congruent",
             row.filter,
@@ -1106,7 +1120,8 @@ fn log_chance(chances: &BTreeMap<String, Chance>) {
     }
 }
 
-/// Pool every annotation into one metrics row per filter and stratum.
+/// Pool every annotation into one metrics row per filter and stratum, with a
+/// row for each stratum of an enabled filter that holds no call.
 fn metrics_rows(
     sample: &str,
     calls: &[Vec<Annotation>],
@@ -1117,39 +1132,46 @@ fn metrics_rows(
     chances: &BTreeMap<String, Chance>,
 ) -> Vec<StratumMetrics> {
     let learned = options.model == Model::Chaff;
-    let mut rows: BTreeMap<Stratum, (StratumMetrics, Vec<(u32, f64)>)> = BTreeMap::new();
+    let empty = |key: &Stratum| {
+        let (kind, stratum) = key;
+        let row = StratumMetrics {
+            sample: sample.to_string(),
+            filter: kind.to_string(),
+            stratum: stratum.clone(),
+            artifact_fraction: learned
+                .then(|| fractions.strata.get(key).copied())
+                .flatten(),
+            filter_artifact_fraction: learned
+                .then(|| fractions.filters.get(kind).copied())
+                .flatten(),
+            distance: scales.of(*kind),
+            ..StratumMetrics::default()
+        };
+        let row = match (kind, library.and_then(|l| l.stratum(stratum))) {
+            (FilterKind::CopiedDamage, Some(profile)) => StratumMetrics {
+                change_rate: profile.change_rate(),
+                single_strand_rate: profile.single_strand_rate(),
+                conversion_ratio: profile.conversion_ratio(),
+                chance_excess: chances.get(stratum).map(|c| c.excess),
+                ..row
+            },
+            _ => row,
+        };
+        (row, Vec::new())
+    };
+    let mut rows: BTreeMap<Stratum, (StratumMetrics, Vec<(u32, f64)>)> = options
+        .filters
+        .iter()
+        .flat_map(|&kind| kind.strata(options).into_iter().map(move |s| (kind, s)))
+        .map(|key| {
+            let row = empty(&key);
+            (key, row)
+        })
+        .collect();
     let mut priors: BTreeMap<Stratum, (f64, u64)> = BTreeMap::new();
     for annotation in calls.iter().flatten() {
         let key = (annotation.kind, annotation.stratum.clone());
-        let (row, trials) = rows.entry(key.clone()).or_insert_with(|| {
-            let row = StratumMetrics {
-                sample: sample.to_string(),
-                filter: annotation.kind.to_string(),
-                stratum: annotation.stratum.clone(),
-                artifact_fraction: learned
-                    .then(|| fractions.strata.get(&key).copied())
-                    .flatten(),
-                filter_artifact_fraction: learned
-                    .then(|| fractions.filters.get(&annotation.kind).copied())
-                    .flatten(),
-                distance: scales.of(annotation.kind),
-                ..StratumMetrics::default()
-            };
-            let row = match (
-                annotation.kind,
-                library.and_then(|l| l.stratum(&annotation.stratum)),
-            ) {
-                (FilterKind::CopiedDamage, Some(profile)) => StratumMetrics {
-                    change_rate: profile.change_rate(),
-                    single_strand_rate: profile.single_strand_rate(),
-                    conversion_ratio: profile.conversion_ratio(),
-                    chance_excess: chances.get(&annotation.stratum).map(|c| c.excess),
-                    ..row
-                },
-                _ => row,
-            };
-            (row, Vec::new())
-        });
+        let (row, trials) = rows.entry(key.clone()).or_insert_with(|| empty(&key));
         row.calls += 1;
         let score = &annotation.score;
         row.alt_molecules += u64::from(score.alt_molecules);
@@ -1199,6 +1221,7 @@ pub fn run_filter_with(args: &FilterArgs, evidence: &mut dyn Evidence) -> Result
         reference.as_mut(),
         &args.options,
         args.spectrum.is_some(),
+        args.metrics.is_some(),
     )?;
     if let Some(path) = &args.metrics {
         write_metrics(path, &report.metrics)?;
@@ -1380,9 +1403,16 @@ mod tests {
             Some(Some(&Value::Array(Array::Integer(vec![Some(6), Some(6)]))))
         );
 
-        assert_eq!(rows.len(), 2);
-        let strata: Vec<&str> = rows.iter().map(|r| r.stratum.as_str()).collect();
-        assert_eq!(strata, vec!["C>T:CpG", "C>T:non-CpG"]);
+        let strata: Vec<(&str, u64)> = rows.iter().map(|r| (r.stratum.as_str(), r.calls)).collect();
+        assert_eq!(
+            strata,
+            [
+                ("C>T:CpG", 1),
+                ("C>T:non-CpG", 1),
+                ("G>T:CpG", 0),
+                ("G>T:non-CpG", 0)
+            ]
+        );
     }
 
     /// Without an alternate molecule, A-tailing has no evidence, so under the
@@ -1715,14 +1745,17 @@ mod tests {
         table.insert("chr1", 1002, molecules((100, 900), (1, 9)));
         table.insert("chr1", 1010, molecules((90, 10), (90, 10)));
         let mut reference = Reference::open(&reference).unwrap();
-        let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
-        let p = rows[0].asymmetry_p_value.unwrap();
+        let mut p_value = |table: &mut MoleculeTable| {
+            let rows = filter_vcf(&input, &output, table, Some(&mut reference), &options).unwrap();
+            let row = rows.iter().find(|r| r.stratum == "C>T:non-CpG").unwrap();
+            row.asymmetry_p_value.unwrap()
+        };
+        let p = p_value(&mut table);
         assert!(p > 0.1, "{p}");
 
         let mut table = MoleculeTable::new();
         table.insert("chr1", 1018, molecules((0, 50), (1, 0)));
-        let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
-        let p = rows[0].asymmetry_p_value.unwrap();
+        let p = p_value(&mut table);
         assert!((p - 1.0 / 52.0).abs() < 1e-12, "{p}");
     }
 
@@ -1940,54 +1973,61 @@ mod tests {
         assert!(error.to_string().contains("reference"), "{error}");
     }
 
+    /// A duplex BAM of 40 read pairs over the reference `ACGTTCAA` repeated
+    /// on chr1, three with a C>T at 1002, and with both strands'
+    /// single-strand consensus when `tagged`.
+    fn duplex_bam(dir: &Path, tagged: bool) -> PathBuf {
+        use noodles::sam::alignment::record::data::field::Tag;
+        use noodles::sam::alignment::record_buf::data::field::value::Array;
+        use noodles::sam::alignment::record_buf::data::field::Value as Field;
+        use streampile::testing::{Pair, SamBuilder};
+        let sequence = "ACGTTCAA".repeat(250);
+        let (mut scratch, mut reads) = (
+            SamBuilder::new().read_length(50),
+            SamBuilder::new().read_length(50),
+        );
+        for i in 0..40usize {
+            let (start1, start2) = (961 + i, 1041 + i);
+            let mut first = sequence[start1 - 1..start1 + 49].to_string();
+            if i < 3 {
+                first.replace_range(1002 - start1..1003 - start1, "T");
+            }
+            let second = sequence[start2 - 1..start2 + 49].to_string();
+            let pair = Pair::at(start1, start2).bases1(first).bases2(second);
+            for mut record in scratch.add_pair(pair) {
+                if tagged {
+                    let bases = String::from_utf8(record.sequence().as_ref().to_vec()).unwrap();
+                    let depths = Field::Array(Array::Int16(vec![3; bases.len()]));
+                    let data = record.data_mut();
+                    data.insert(Tag::new(b'a', b'c'), Field::from(bases.clone()));
+                    data.insert(Tag::new(b'b', b'c'), Field::from(bases));
+                    data.insert(Tag::new(b'a', b'd'), depths.clone());
+                    data.insert(Tag::new(b'b', b'd'), depths);
+                }
+                reads.extend([record]);
+            }
+        }
+        let bam = dir.join(if tagged { "tagged.bam" } else { "plain.bam" });
+        reads.write_bam(&bam).unwrap();
+        bam
+    }
+
     /// A duplex consensus BAM that carries both strands' single-strand consensus
     /// is profiled beside the calls: its copied damage takes the chance prior
     /// and its metrics the library's rates, while the same consensus without the
     /// tags scores as before.
     #[test]
     fn test_a_duplex_bam_with_single_strand_consensus_is_profiled() {
-        use noodles::sam::alignment::record::data::field::Tag;
-        use noodles::sam::alignment::record_buf::data::field::value::Array;
-        use noodles::sam::alignment::record_buf::data::field::Value as Field;
-        use streampile::testing::{Pair, SamBuilder};
         let dir = tempfile::tempdir().unwrap();
-        let sequence = "ACGTTCAA".repeat(250);
-        let fasta = write_fasta(dir.path(), "chr1", &sequence);
+        let fasta = write_fasta(dir.path(), "chr1", &"ACGTTCAA".repeat(250));
         let mut vcf = VcfBuilder::new(&["tumor"]);
         vcf.add(Variant::new(1002, &["C", "T"], vec![gt("tumor", "0/1")]));
         let input = vcf.write(&dir.path().join("in.vcf"));
         let run = |tagged: bool| {
-            let (mut scratch, mut reads) = (
-                SamBuilder::new().read_length(50),
-                SamBuilder::new().read_length(50),
-            );
-            for i in 0..40usize {
-                let (start1, start2) = (961 + i, 1041 + i);
-                let mut first = sequence[start1 - 1..start1 + 49].to_string();
-                if i < 3 {
-                    first.replace_range(1002 - start1..1003 - start1, "T");
-                }
-                let second = sequence[start2 - 1..start2 + 49].to_string();
-                let pair = Pair::at(start1, start2).bases1(first).bases2(second);
-                for mut record in scratch.add_pair(pair) {
-                    if tagged {
-                        let bases = String::from_utf8(record.sequence().as_ref().to_vec()).unwrap();
-                        let depths = Field::Array(Array::Int16(vec![3; bases.len()]));
-                        let data = record.data_mut();
-                        data.insert(Tag::new(b'a', b'c'), Field::from(bases.clone()));
-                        data.insert(Tag::new(b'b', b'c'), Field::from(bases));
-                        data.insert(Tag::new(b'a', b'd'), depths.clone());
-                        data.insert(Tag::new(b'b', b'd'), depths);
-                    }
-                    reads.extend([record]);
-                }
-            }
-            let bam = dir.path().join("reads.bam");
-            reads.write_bam(&bam).unwrap();
             let args = FilterArgs {
                 input: input.clone(),
                 output: dir.path().join("out.vcf"),
-                bam,
+                bam: duplex_bam(dir.path(), tagged),
                 reference: Some(fasta.clone()),
                 metrics: Some(dir.path().join("out.tsv")),
                 spectrum: None,
@@ -2025,6 +2065,71 @@ mod tests {
             "{description}"
         );
         assert!(row[18..23].iter().all(String::is_empty), "{row:?}");
+    }
+
+    /// A run without a copied-damage call reads the library's profile only
+    /// for the metrics, whose copied-damage rows then carry its rates with
+    /// no call, and without them filters its calls without waiting for the
+    /// profile, as a run with a copied-damage call waits for its priors.
+    #[test]
+    fn test_a_run_without_a_copied_damage_call_waits_for_the_library_only_for_the_metrics() {
+        use std::cell::Cell;
+        let dir = tempfile::tempdir().unwrap();
+        let fasta = write_fasta(dir.path(), "chr1", &"ACGTTCAA".repeat(250));
+        let bam = duplex_bam(dir.path(), true);
+        let vcf = |name: &str, pos: usize, alleles: &[&str]| {
+            let mut vcf = VcfBuilder::new(&["tumor"]);
+            vcf.add(Variant::new(pos, alleles, vec![gt("tumor", "0/1")]));
+            vcf.write(&dir.path().join(name))
+        };
+        let undamaged = vcf("undamaged.vcf", 1001, &["A", "G"]);
+        let damaged = vcf("damaged.vcf", 1002, &["C", "T"]);
+        let tsv = dir.path().join("out.tsv");
+        let args = |input: &Path, metrics: Option<&Path>| FilterArgs {
+            input: input.to_path_buf(),
+            output: dir.path().join("out.vcf"),
+            bam: bam.clone(),
+            reference: Some(fasta.clone()),
+            metrics: metrics.map(Path::to_path_buf),
+            spectrum: None,
+            pileup: PileupOptions::default(),
+            options: FilterOptions::default(),
+        };
+
+        run_filter(&args(&undamaged, Some(&tsv))).unwrap();
+        let metrics = std::fs::read_to_string(&tsv).unwrap();
+        let row: Vec<&str> = metrics
+            .lines()
+            .map(|line| line.split('\t').collect::<Vec<_>>())
+            .find(|row| row[1] == "copied-damage" && row[2] == "C>T:CpG")
+            .unwrap();
+        assert_eq!(row[3], "0", "{row:?}");
+        assert!([18, 19, 22].iter().all(|&i| !row[i].is_empty()), "{row:?}");
+        std::fs::remove_file(&tsv).unwrap();
+        run_filter(&args(&undamaged, None)).unwrap();
+        assert!(!tsv.exists());
+        let (_, records) = read_records(&dir.path().join("out.vcf"));
+        assert_eq!(records.len(), 1);
+
+        let waits = |input: &Path, metrics: Option<&Path>| {
+            let args = args(input, metrics);
+            let mut reader = noodles::bam::io::reader::Builder
+                .build_from_path(&args.bam)
+                .unwrap();
+            let header = reader.read_header().unwrap();
+            let builder = StreamingPileupBuilder::new(reader, &header).unwrap();
+            let waited = Cell::new(false);
+            let pending: PendingLibrary<'_> = Box::new(|| {
+                waited.set(true);
+                Ok(None)
+            });
+            let mut evidence = PileupEvidence::new(builder, &args.pileup).with_library(pending);
+            run_filter_with(&args, &mut evidence).unwrap();
+            waited.get()
+        };
+        assert!(!waits(&undamaged, None));
+        assert!(waits(&undamaged, Some(&tsv)));
+        assert!(waits(&damaged, None));
     }
 
     /// A library whose duplex C>T changes at CpG fall together by chance at
@@ -2142,6 +2247,86 @@ mod tests {
         assert_eq!(unprofiled.chance_fraction, None);
         assert_eq!(unprofiled_text, learned_text);
         assert!((unprofiled_real - learned_real).abs() < 1e-6);
+    }
+
+    /// Every stratum of an enabled filter has a metrics row, so the table is
+    /// rectangular across libraries: a stratum without a call counts none,
+    /// learns no fraction of its own, and still carries the library's rates,
+    /// as it does when no call at all is scored for copied damage.
+    #[test]
+    fn test_a_stratum_without_a_call_keeps_its_row_and_the_library_rates() {
+        use crate::testing::poisson_stratum;
+        let dir = tempfile::tempdir().unwrap();
+        let reference = write_fasta(dir.path(), "chr1", &"ACGTTCAA".repeat(250));
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(1002, &["C", "T"], vec![gt("tumor", "0/1")]));
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let output = dir.path().join("out.vcf");
+        let at = |base, d| Molecule::new(base, 40, d, 149 - d);
+        let mut molecules: Vec<Molecule> = (0..150).map(|d| at(b'C', d)).collect();
+        molecules.extend([at(b'T', 20), at(b'T', 90)]);
+        let mut table = MoleculeTable::new();
+        table.insert("chr1", 1002, molecules);
+        let mut library = LibraryProfile::default();
+        for stratum in ["C>T:CpG", "G>T:non-CpG"] {
+            let profile = poisson_stratum(&[700], 100_000.0, 1e-4, 0);
+            library.strata.insert(stratum.to_string(), profile);
+        }
+        table.set_library(library);
+        let options = FilterOptions {
+            filters: vec![FilterKind::CopiedDamage, FilterKind::ATailing],
+            ..FilterOptions::default()
+        };
+        let mut reference = Reference::open(&reference).unwrap();
+        let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
+        let keys: Vec<(&str, &str, u64)> = rows
+            .iter()
+            .map(|r| (r.filter.as_str(), r.stratum.as_str(), r.calls))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                ("copied-damage", "C>T:CpG", 1),
+                ("copied-damage", "C>T:non-CpG", 0),
+                ("copied-damage", "G>T:CpG", 0),
+                ("copied-damage", "G>T:non-CpG", 0),
+                ("a-tailing", "C>A", 0),
+                ("a-tailing", "C>T", 1),
+                ("a-tailing", "T>A", 0),
+            ]
+        );
+        let (scored, empty) = (&rows[0], &rows[3]);
+        assert_eq!(empty.sample, "tumor");
+        assert_eq!(
+            (empty.filtered, empty.alt_molecules, empty.ref_molecules),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            (empty.expected_artifacts, empty.expected_mutations),
+            (0.0, 0.0)
+        );
+        assert_eq!(empty.artifact_fraction, None);
+        assert_eq!(empty.asymmetry_p_value, None);
+        assert_eq!(empty.chance_fraction, None);
+        assert_eq!(empty.distance, scored.distance);
+        assert_eq!(
+            empty.filter_artifact_fraction,
+            scored.filter_artifact_fraction
+        );
+        assert!(empty.filter_artifact_fraction.is_some(), "{empty:?}");
+        assert!(empty.change_rate.is_some(), "{empty:?}");
+        assert_eq!(empty.single_strand_rate, scored.single_strand_rate);
+        assert!(empty.chance_excess.is_some(), "{empty:?}");
+        assert!(rows[1].change_rate.is_none(), "{:?}", rows[1]);
+
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(1001, &["A", "G"], vec![gt("tumor", "0/1")]));
+        let input = vcf.write(&dir.path().join("undamaged.vcf"));
+        let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
+        assert_eq!(rows.len(), 7);
+        assert!(rows.iter().all(|r| r.calls == 0), "{rows:?}");
+        assert_eq!(rows[0].change_rate, scored.change_rate);
+        assert_eq!(rows[3].single_strand_rate, scored.single_strand_rate);
     }
 
     /// A two-molecule call takes the share of positions chance explains at
@@ -2381,6 +2566,7 @@ mod tests {
                 Some(&mut reference),
                 &options,
                 true,
+                false,
             )
             .unwrap();
             let spectrum = report.spectrum.unwrap();
@@ -2412,8 +2598,8 @@ mod tests {
         };
         let output = dir.path().join("out.vcf");
         let mut table = MoleculeTable::new();
-        let error =
-            filter_vcf_report(&input, &output, &mut table, None, &options, true).unwrap_err();
+        let error = filter_vcf_report(&input, &output, &mut table, None, &options, true, false)
+            .unwrap_err();
         assert!(
             error.to_string().contains("the spectrum needs a reference"),
             "{error}"
