@@ -190,7 +190,7 @@ Each row of the metrics describes one filter and *stratum*, a group of calls tha
 Every stratum a filter can score has a row, its call and molecule counts at zero when no call falls in it, so the tables of different samples line up; its columns are:
 
 - **Calls:** `calls`, the calls scored, and `filtered`, the calls given the FILTER.
-- **Fractions:** `artifact_fraction`, the stratum's learned share of artifacts, which stays near `filter_artifact_fraction`, the filter's over all its strata, until the stratum has many calls; `expected_artifacts` and `expected_mutations`, each call's chance of being either summed, a call without a posterior counting as real.
+- **Fractions:** `artifact_fraction`, the stratum's learned share of artifacts, which stays near `filter_artifact_fraction`, the filter's over all its strata, until the stratum has many calls, each empty under `--model fgbio`, whose prior is per call, or without a call with a posterior to learn from, as in a stratum without a call; `expected_artifacts` and `expected_mutations`, each call's chance of being either summed, a call without a posterior counting as real.
 - **Distance:** `distance`, the decay scale or window in bases.
 - **Molecules:** `alt_molecules` and `ref_molecules`, the molecules measured, and their `_congruent` counts and fractions, those within the distance of the artifact's end.
 - **Asymmetry:** `expected_alt_congruent`, the alternate molecules each call's own reference molecules predict within the distance, and `asymmetry_p_value`, a one-sided test of whether more sit there; a small value says the library has the artifact.

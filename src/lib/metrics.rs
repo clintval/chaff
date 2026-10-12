@@ -40,12 +40,14 @@ pub struct StratumMetrics {
     pub calls: u64,
     /// Calls the filter's FILTER was applied to.
     pub filtered: u64,
-    /// The learned artifact fraction of the stratum, empty under fgbio's
-    /// per-call prior.
+    /// The learned artifact fraction of the stratum: empty under fgbio's
+    /// per-call prior, and when none of the stratum's calls has a posterior to
+    /// learn it from, as in a stratum without a call.
     #[serde(serialize_with = "six_digits_or_empty")]
     pub artifact_fraction: Option<f64>,
     /// The learned artifact fraction of all the filter's calls, which each
-    /// stratum's prior shrinks toward; empty under fgbio's per-call prior.
+    /// stratum's prior shrinks toward: empty under fgbio's per-call prior,
+    /// and when none of the filter's calls has a posterior.
     #[serde(serialize_with = "six_digits_or_empty")]
     pub filter_artifact_fraction: Option<f64>,
     /// The filter's distance in bases, shared by its strata: a decay's scale,
