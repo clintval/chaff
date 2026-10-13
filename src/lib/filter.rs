@@ -968,9 +968,10 @@ pub fn filter_vcf_report(
         None
     };
     let chances: BTreeMap<String, Chance> = library
-        .as_ref()
-        .map(LibraryProfile::chances)
-        .unwrap_or_default();
+        .iter()
+        .flat_map(|library| &library.strata)
+        .map(|(stratum, profile)| (stratum.clone(), profile.chance()))
+        .collect();
     log_chance(&chances);
     let prior = options.copied_damage.prior;
     let fractions = assign_posteriors(&mut calls, options.model, prior, &chances);
