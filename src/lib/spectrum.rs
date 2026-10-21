@@ -13,9 +13,6 @@
 //!   without a posterior weighing one.
 //! - **Passing:** the SNVs no filter flagged, drawn only when some filter has
 //!   a threshold.
-//!
-//! The views share a page rather than taking a page each because `kuva`
-//! renders one scene to one single-page PDF.
 
 use std::io::Write;
 use std::path::Path;
@@ -193,7 +190,7 @@ impl Spectrum {
                 }
             }
         }
-        let bytes = kuva::backend::pdf::PdfBackend
+        let bytes = kuva::backend::pdf::PdfBackend::new()
             .render_scene(&scene)
             .map_err(|e| anyhow!("failed to render the spectrum for {path:?}: {e}"))?;
         let write = || -> Result<()> {
@@ -303,7 +300,8 @@ fn panel(
         .with_y_tick_step(step)
         .with_show_grid(false)
         .with_x_tick_rotate(90.0)
-        .with_tick_size(8);
+        .with_tick_size(8)
+        .with_tick_font_family("monospace");
     for (class, name) in CLASSES.iter().enumerate() {
         let label = TextAnnotation::new(*name, 16.0 * class as f64 + 8.5, base + band * 0.58)
             .with_color("black")
