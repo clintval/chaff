@@ -1,6 +1,6 @@
 [package]
 name = "chaff"
-version = "0.5.0"
+version = "0.5.1"
 authors = ["Clint Valentine <valentine.clint@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -88,7 +88,7 @@ commit_parsers = [
     { message = "^style*", group = "Styling" },
     { message = "^test*", group = "Testing" },
     { message = "^build*", group = "Build" },
-    { message = "^ci*", group = "Continuous Integration" },
+    { message = "^ci", group = "Continuous Integration" },
     { message = "^revert*", group = "Reverts" },
     { message = "^chore\\(release\\):*", skip = true },
     { message = "^chore\\(deps\\)", skip = true },
