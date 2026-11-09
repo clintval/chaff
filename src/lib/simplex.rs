@@ -28,7 +28,9 @@
 //! Their rates per molecule, and the conversion ratio of the duplex rate to the
 //! single-strand rate, describe the library's damage; the rates leave out
 //! positions whose changes are at least 3 and 1% of their molecules, as
-//! germline or clonal.
+//! germline or clonal. A library none of whose molecules reach the floor, as
+//! a CODEC library of single read pairs does not, yields no profile, and the
+//! priors are learned from the calls.
 //!
 //! Duplex changes also give the chance of a call. Copied lesions fall on a
 //! position independently, molecule by molecule, so most positions with one
@@ -1226,6 +1228,16 @@ impl<'a> Scanner<'a> {
             );
             return None;
         }
+        let (molecules, floored) = self.profile.strata.values().fold((0, 0), |(m, f), s| {
+            (m + s.molecules, f + s.strand_molecules)
+        });
+        if molecules > 0 && floored == 0 {
+            warn!(
+                "no consensus has at least {MIN_AGREEING_READS} raw reads agreeing with each strand's base, as a CODEC consensus of one read pair has not, \
+                 so chaff leaves the single-strand consensus out and learns its copied-damage priors from the calls alone"
+            );
+            return None;
+        }
         log_error_tags(self.profile.error_tags);
         Some(self.profile)
     }
@@ -1304,13 +1316,15 @@ pub fn profile_library(
             break;
         }
     }
+    let tagged = scanner.tagged;
     let profile = scanner.finish();
     match &profile {
         Some(profile) => info!(
             "profiled the single-strand consensus of {records} records in {} strata",
             profile.strata.len()
         ),
-        None => info!("the BAM's records carry no single-strand consensus (ac, bc, ad and bd), so chaff learns its priors from the calls alone"),
+        None if tagged == 0 => info!("the BAM's records carry no single-strand consensus (ac, bc, ad and bd), so chaff learns its priors from the calls alone"),
+        None => {}
     }
     Ok(profile)
 }
@@ -1471,6 +1485,30 @@ mod tests {
             (cpg.molecules, cpg.changes, cpg.single_strand_changes),
             (120, 1, 1)
         );
+    }
+
+    /// A library whose consensus each rest on one raw read per strand, as a
+    /// CODEC consensus of one read pair does, has no molecule at the
+    /// single-strand floor, so it yields no profile and the priors are learned
+    /// from the calls, rather than a chance model fitted to nothing.
+    #[test]
+    fn test_a_library_of_single_read_strands_yields_no_profile() {
+        let mut reads = SamBuilder::new().read_length(40);
+        for _ in 0..13 {
+            reads.add_frag(single_read(frag(&[], Strand::Plus)));
+        }
+        reads.add_frag(single_read(frag(
+            &[(2, b'T', 30, b'T', b'T', 1)],
+            Strand::Plus,
+        )));
+        assert_eq!(profile(&reads), None);
+    }
+
+    /// The same consensus with one raw read behind each strand's every base.
+    fn single_read(frag: Frag) -> Frag {
+        let ones = || BufValue::Array(BufArray::Int16(vec![1; 40]));
+        frag.attr(Tag::new(b'a', b'd'), ones())
+            .attr(Tag::new(b'b', b'd'), ones())
     }
 
     /// Per-base errors of 40 bases, `n` at `offset` and none elsewhere.

@@ -15,7 +15,9 @@
 //! original strand from its 5' end, so an F1R2 template comes from the forward
 //! strand and an F2R1 template from the reverse. A duplex consensus, whose
 //! records carry fgbio's `aD` and `bD` depths of both strands, comes from
-//! both.
+//! both, and an unpaired one, as CODEC's consensus of a read pair whose reads
+//! hold the two strands is, spans its template, so both template ends are its
+//! one record's outermost bases.
 
 use std::collections::HashMap;
 
@@ -100,6 +102,12 @@ pub trait Evidence {
     fn library(&mut self) -> Result<Option<LibraryProfile>> {
         Ok(None)
     }
+
+    /// The molecules measured so far from both ends of an unpaired duplex
+    /// consensus, as a CODEC consensus is, one per template at each site.
+    fn spanning_molecules(&self) -> u64 {
+        0
+    }
 }
 
 /// A library profile still being made, which [`Evidence::library`] waits for.
@@ -155,6 +163,7 @@ impl PileupOptions {
 pub struct PileupEvidence<'f, S: RecordSource> {
     builder: StreamingPileupBuilder<'f, S>,
     library: Option<PendingLibrary<'f>>,
+    spanning: u64,
 }
 
 impl<'f, S: RecordSource> PileupEvidence<'f, S> {
@@ -163,6 +172,7 @@ impl<'f, S: RecordSource> PileupEvidence<'f, S> {
         Self {
             builder: options.configure(builder),
             library: None,
+            spanning: 0,
         }
     }
 
@@ -178,6 +188,10 @@ impl<'f, S: RecordSource> PileupEvidence<'f, S> {
 impl<S: RecordSource> Evidence for PileupEvidence<'_, S> {
     fn library(&mut self) -> Result<Option<LibraryProfile>> {
         self.library.take().map_or(Ok(None), |library| library())
+    }
+
+    fn spanning_molecules(&self) -> u64 {
+        self.spanning
     }
 
     fn molecules(&mut self, contig: &str, pos: Position) -> Result<Vec<Molecule>> {
@@ -210,6 +224,9 @@ impl<S: RecordSource> Evidence for PileupEvidence<'_, S> {
                     error => error.into(),
                 })
                 .with_context(|| format!("reading template ends at {contig}:{pos}"))?;
+            if molecule.is_some() && spanning_ends(&template).is_some() {
+                self.spanning += 1;
+            }
             molecules.extend(molecule);
         }
         Ok(molecules)
@@ -250,15 +267,7 @@ fn molecule<R: AlignmentRecord>(
 /// which for a second of pair is its mate's, or `None` for a duplex consensus,
 /// which holds both.
 fn origin<R: AlignmentRecord>(entry: PileupEntry<'_, R>) -> Option<Strand> {
-    let depth = |tag: &[u8; 2]| {
-        entry
-            .record()
-            .data()
-            .get(tag)
-            .and_then(Result::ok)
-            .and_then(|value| value.as_int())
-    };
-    if depth(b"aD").is_some_and(|d| d > 0) && depth(b"bD").is_some_and(|d| d > 0) {
+    if is_duplex(&entry) {
         return None;
     }
     let flags = entry.flags();
@@ -286,6 +295,9 @@ fn origin<R: AlignmentRecord>(entry: PileupEntry<'_, R>) -> Option<Strand> {
 fn distances<R: AlignmentRecord>(
     template: &PileupTemplate<'_, R>,
 ) -> streampile::Result<Option<(Option<usize>, Option<usize>)>> {
+    if let Some(ends) = spanning_ends(template) {
+        return Ok(Some(ends));
+    }
     let end = |reverse: bool| -> streampile::Result<Option<usize>> {
         let own = template
             .entries()
@@ -306,6 +318,44 @@ fn distances<R: AlignmentRecord>(
         return Ok(None);
     }
     Ok(Some((left, right)))
+}
+
+/// Whether a record is a duplex consensus, carrying fgbio's `aD` and `bD`
+/// depths of both strands.
+fn is_duplex<R: AlignmentRecord>(entry: &PileupEntry<'_, R>) -> bool {
+    let depth = |tag: &[u8; 2]| {
+        entry
+            .record()
+            .data()
+            .get(tag)
+            .and_then(Result::ok)
+            .and_then(|value| value.as_int())
+    };
+    depth(b"aD").is_some_and(|d| d > 0) && depth(b"bD").is_some_and(|d| d > 0)
+}
+
+/// The site's distances from both ends of an unpaired duplex consensus, which
+/// spans its template: a CODEC consensus, called from one read pair whose
+/// reads hold the fragment's two strands, is one record carrying both
+/// strands' depths whose outermost bases are the template ends. The far end
+/// is the record's bases past the site, soft clips counted, and a deletion is
+/// measured by the bases before and after it. `None` for any other template.
+fn spanning_ends<R: AlignmentRecord>(
+    template: &PileupTemplate<'_, R>,
+) -> Option<(Option<usize>, Option<usize>)> {
+    let mut entries = template.entries();
+    let entry = entries.next()?;
+    if entries.next().is_some() || entry.flags().is_segmented() || !is_duplex(&entry) {
+        return None;
+    }
+    let own = entry.five_prime_distance()?;
+    let past = usize::from(entry.kind() == EntryKind::Base);
+    let other = entry.record().sequence().len().checked_sub(own + past)?;
+    Some(if entry.is_reverse() {
+        (Some(other), Some(own))
+    } else {
+        (Some(own), Some(other))
+    })
 }
 
 /// [`Evidence`] from a fixed table of molecules per site, for callers that
@@ -744,6 +794,61 @@ mod tests {
         let mut reads = SamBuilder::new().read_length(50);
         let frag = reads.add_frag(Frag::at(100).strand(strand).cigar(cigar));
         assert_eq!(distances_at(&frag, 100), [expected]);
+    }
+
+    /// An unpaired consensus that carries both strands' depths, as CODEC's
+    /// does, spans its template, so the site's distances from both template
+    /// ends come from its own alignment, soft clips counted and a deletion
+    /// measured by the bases before and after it.
+    #[rstest]
+    #[case(Strand::Plus, "50M", 104, (Some(4), Some(45)))]
+    #[case(Strand::Minus, "50M", 104, (Some(4), Some(45)))]
+    #[case(Strand::Plus, "5S45M", 100, (Some(5), Some(44)))]
+    #[case(Strand::Minus, "45M5S", 100, (Some(0), Some(49)))]
+    #[case(Strand::Plus, "4M2D46M", 104, (Some(4), Some(46)))]
+    fn test_template_distances_of_a_duplex_consensus_fragment_know_both_ends(
+        #[case] strand: Strand,
+        #[case] cigar: &str,
+        #[case] site: usize,
+        #[case] expected: (Option<usize>, Option<usize>),
+    ) {
+        let mut reads = SamBuilder::new().read_length(50);
+        let frag = reads.add_frag(duplex(Frag::at(100).strand(strand).cigar(cigar), 1, 1));
+        assert_eq!(distances_at(&frag, site), [expected]);
+    }
+
+    /// An unpaired record whose strand depths are not both above zero is no
+    /// duplex consensus, so it keeps only its own end.
+    #[test]
+    fn test_template_distances_of_a_fragment_without_both_strands_know_only_their_own_end() {
+        let mut reads = SamBuilder::new().read_length(50);
+        let frag = reads.add_frag(duplex(Frag::at(100), 1, 0));
+        assert_eq!(distances_at(&frag, 104), [(Some(4), None)]);
+    }
+
+    /// The evidence counts the molecules it measures from both ends of an
+    /// unpaired duplex consensus, site by site, so a run can say how many
+    /// CODEC consensus it read that way.
+    #[test]
+    fn test_evidence_counts_the_duplex_consensus_fragments_it_measures() {
+        let mut reads = SamBuilder::new().read_length(50);
+        reads.add_frag(duplex(Frag::at(100), 1, 1));
+        reads.add_frag(duplex(Frag::at(100), 2, 1));
+        reads.add_frag(Frag::at(100));
+        let options = PileupOptions::default();
+        let mut evidence = PileupEvidence::new(reads.to_pileup_builder(), &options);
+        for site in [104, 110] {
+            assert_eq!(evidence.molecules("chr1", pos(site)).unwrap().len(), 3);
+        }
+        assert_eq!(evidence.spanning_molecules(), 4);
+    }
+
+    /// `frag` tagged with fgbio's `aD` and `bD` depths of its two strands.
+    fn duplex(frag: Frag, a: i32, b: i32) -> Frag {
+        use noodles::sam::alignment::record::data::field::Tag;
+        use noodles::sam::alignment::record_buf::data::field::Value as Field;
+        frag.attr(Tag::new(b'a', b'D'), Field::from(a))
+            .attr(Tag::new(b'b', b'D'), Field::from(b))
     }
 
     #[test]

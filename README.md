@@ -62,6 +62,11 @@ The BAM decides what each filter can find, since a consensus removes the artifac
 | Simplex consensus | All three | The same: a simplex consensus collapses the reads of one strand, so every artifact one strand carries survives it. |
 | Duplex consensus | Copied damage, and end repair fill-in as a fragment-end filter | Copied damage: lesions copied onto both strands before the adapters were ligated, the one artifact a duplex consensus keeps, so this is the filter Duplex Sequencing needs. End repair fill-in: changes both strands agree on, of any substitution class, that crowd either fragment end. A-tailing: nothing, unless trimming left the A-tail in place, as the note under [A-Tailing](#a-tailing) describes. |
 
+A CODEC consensus [[9]](#references), from fgbio's `CallCodecConsensusReads` or `fgumi codec` [[10]](#references), is a duplex consensus of one read pair, whose read 1 and read 2 hold the fragment's two strands, written as one unpaired record that spans the template and carries the duplex tags.
+The tool reads it as a duplex consensus whose template ends are the record's outermost bases, where a plain unpaired read knows only its own 5′ end.
+Each strand of such a consensus rests on one raw read unless PCR duplicates were sequenced, below the single-strand floor of 2 under [Copied Damage](#copied-damage), so where no consensus reaches the floor `chaff` says so and learns the prior from the calls, as on a BAM without the single-strand tags, and the single-strand columns of the metrics stay empty.
+No real CODEC data has been run through `chaff` yet: whether a disagreement between the two reads can stand in for a single-strand change, and what a call needs at CODEC's duplex depths, are open.
+
 Every filter runs and only annotates by default; a threshold makes it filter, as [Setting and Tuning](#setting-and-tuning) describes.
 
 ## How DNA Damage Becomes a Variant Call
@@ -381,7 +386,7 @@ The tool learns per sample how common each artifact is and how far it reaches, s
 
 The VCF/BCF and the BAM must be coordinate sorted, with their contigs in the same order, and need no index; the FASTA needs a `.fai`.
 Each template counts once, and a read or consensus whose mate maps to the same contig needs the mate's CIGAR in its `MC` tag.
-Both ends of a template are measured for an FR pair, whose forward mate starts at or before its reverse mate's 5′ end; a mate of any other pair knows only its own end.
+Both ends of a template are measured for an FR pair, whose forward mate starts at or before its reverse mate's 5′ end, and for an unpaired duplex consensus, as CODEC's is, from its one record's outermost bases; a mate of any other pair knows only its own end.
 An option of a filter that `--filters` leaves out is a usage error, and so are `--ref` without `copied-damage` or `--spectrum`, and `--copied-damage-prior` or `--end-repair-fill-in-distance learned` typed under `--model fgbio`.
 A VCF that already declares an enabled filter's INFO or FILTER, from an earlier run, is refused, so a FILTER never outlives the run that applied it; remove them first, as with `bcftools annotate -x`.
 
@@ -401,3 +406,5 @@ The tool `chaff` ports the end repair fill-in and A-tailing filters of fgbio's `
 6. fgbio's `FilterSomaticVcf`: [https://fulcrumgenomics.github.io/fgbio/tools/latest/FilterSomaticVcf.html](https://fulcrumgenomics.github.io/fgbio/tools/latest/FilterSomaticVcf.html), from [https://github.com/fulcrumgenomics/fgbio](https://github.com/fulcrumgenomics/fgbio)
 7. fgbio's `CallDuplexConsensusReads`: [https://fulcrumgenomics.github.io/fgbio/tools/latest/CallDuplexConsensusReads.html](https://fulcrumgenomics.github.io/fgbio/tools/latest/CallDuplexConsensusReads.html), whose rule for strands that disagree is in [DuplexConsensusCaller.scala](https://github.com/fulcrumgenomics/fgbio/blob/main/src/main/scala/com/fulcrumgenomics/umi/DuplexConsensusCaller.scala), and `fgumi duplex`: [https://fgumi.readthedocs.io/en/latest/tools/duplex.html](https://fgumi.readthedocs.io/en/latest/tools/duplex.html), with the same rule in [duplex_caller.rs](https://github.com/fulcrumgenomics/fgumi/blob/main/crates/fgumi-consensus/src/duplex_caller.rs)
 8. fgbio's `FilterConsensusReads`: [https://fulcrumgenomics.github.io/fgbio/tools/latest/FilterConsensusReads.html](https://fulcrumgenomics.github.io/fgbio/tools/latest/FilterConsensusReads.html), and `fgumi filter`: [https://fgumi.readthedocs.io/en/latest/tools/filter.html](https://fgumi.readthedocs.io/en/latest/tools/filter.html)
+9. Bae JH, et al. 2023. Single duplex DNA sequencing with CODEC detects mutations with high sensitivity. *Nature Genetics* 55(5):871–879. [https://doi.org/10.1038/s41588-023-01376-0](https://doi.org/10.1038/s41588-023-01376-0)
+10. fgbio's `CallCodecConsensusReads`: [https://fulcrumgenomics.github.io/fgbio/tools/latest/CallCodecConsensusReads.html](https://fulcrumgenomics.github.io/fgbio/tools/latest/CallCodecConsensusReads.html), and `fgumi codec`: [https://fgumi.readthedocs.io/en/latest/tools/codec.html](https://fgumi.readthedocs.io/en/latest/tools/codec.html)
