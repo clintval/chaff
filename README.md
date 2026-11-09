@@ -49,8 +49,20 @@ gzip -dc calls.chaff.vcf.gz | grep -v '^#' | cut -f 2,4,5,7,8 | column -t
 500  C    G  .                     .
 ```
 
-Each scored call's `CDAP` is the posterior probability that it is a real mutation, not that it is an artifact, so a low value marks likely copied damage.
-The call at position 100, a C>A that copied damage reads as an oxidized G on the reverse strand, has a `CDAP` of 0.022, at or below the threshold of 0.05, and so the FILTER: all 3 of its alternate molecules sit within 23 bp of that strand's 5′ end (`CDAC=3,3`), against 72 of its 240 reference molecules (`CDRC=72,240`).
+Each scored call's `CDAP` is its *posterior*, the probability that it is a real mutation rather than the artifact, given where its molecules sit and how common the artifact is in the sample, so a low value marks likely copied damage.
+The call at position 100, a C>A that copied damage reads as an oxidized G on the reverse strand, has a `CDAP` of 0.022, at or below the threshold of 0.05, and so the FILTER: all 3 of its alternate *molecules*, the DNA fragments that carry the A, each counted once however many reads hold it, sit within 23 bp of that strand's 5′ end (`CDAC=3,3`), against 72 of its 240 reference molecules (`CDRC=72,240`).
+
+## Which Filter, on Which Data
+
+The BAM decides what each filter can find, since a consensus removes the artifacts that one strand alone carries:
+
+| Data&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | Run | What each catches there |
+| --- | --- | --- |
+| Reads | All three | Copied damage: lesions of its damage classes near the lesion strand's 5′ end, copied onto the partner strand or not. End repair fill-in: bases the polymerase misincorporated as it filled in a recessed 3′ end. A-tailing: a non-templated A at the last base of a 3′ end. |
+| Simplex consensus | All three | The same: a simplex consensus collapses the reads of one strand, so every artifact one strand carries survives it. |
+| Duplex consensus | Copied damage, and end repair fill-in as a fragment-end filter | Copied damage: lesions copied onto both strands before the adapters were ligated, the one artifact a duplex consensus keeps, so this is the filter Duplex Sequencing needs. End repair fill-in: changes both strands agree on, of any substitution class, that crowd either fragment end. A-tailing: nothing, unless trimming left the A-tail in place, as the note under [A-Tailing](#a-tailing) describes. |
+
+Every filter runs and only annotates by default; a threshold makes it filter, as [Setting and Tuning](#setting-and-tuning) describes.
 
 ## How DNA Damage Becomes a Variant Call
 
@@ -61,8 +73,12 @@ A *lesion* is a damaged base on one strand that a polymerase copies as another b
 - **Cytosine deaminates to uracil**, so any C can read C>T. Proofreading polymerases of the Pfu family stall at template uracil and often leave it uncopied, so most deamination that survives such a PCR is 5-methylcytosine at CpG; copied damage learns CpG and other contexts apart.
 - **Guanine oxidizes to 8-oxoguanine**, which pairs with A, so a G reads G>T, a C>A on the other strand.
 
-Duplex Sequencing [[2]](#references) ligates UMI-bearing adapters to both ends of each fragment and keeps a base only where its two strands agree.
-A duplex consensus therefore removes an error on one strand, such as a lesion left uncopied, but not damage copied onto both strands before the adapters were ligated.
+Duplex Sequencing [[2]](#references) ligates UMI-bearing adapters to both ends of each fragment, reads each strand into its own single-strand consensus, and calls each base of the duplex consensus from the two.
+Where the strands agree, the base keeps their summed quality; where they disagree, fgbio's `CallDuplexConsensusReads` and `fgumi duplex` keep the higher-quality strand's base at the difference of the two qualities, or an `N` when they tie [[7]](#references).
+Their consensus filters, fgbio's `FilterConsensusReads` and `fgumi filter`, mask every base the strands disagree on only with `--require-single-strand-agreement`, which is off by default [[8]](#references); otherwise only their base-quality floor masks it, so the base survives wherever one strand's quality exceeds the other's by the floor or more, as a strand of many reads does against one of a single read.
+Turn agreement on for a BAM `chaff` will read.
+With it off, a change that one strand alone carries can survive as an alternate molecule whose quality is the gap between the strands; `chaff` drops those below `--min-base-quality`, 20 by default, and counts the rest like any other alternate molecule, so an uncopied lesion near its strand's 5′ end reads as copied damage and counts toward it in `CDAC`, the metrics, and the spectrum.
+With agreement on, a duplex consensus removes every error on one strand, such as a lesion left uncopied, but never damage copied onto both strands before the adapters were ligated.
 End repair's polymerase does that copying before the adapters are ligated: it extends each recessed 3′ end across the 5′ overhang opposite it, and, where it displaces strands, from a nick, and copies a lesion it passes onto the partner strand, so copied damage reads as a real change on both strands.
 
 ## The Filters
@@ -83,7 +99,7 @@ A-tailing scores those whose alternate base is A or T, and end repair fill-in al
 
 ![Copied damage makes a call: a methylated C at a CpG is deaminated to T near one strand's 5′ end, the partner's recessed 3′ end is filled in and the T is copied as an A, the UMI-bearing adapters are ligated, and both strands read T, so Duplex Sequencing calls it.](.github/img/copied-damage-steps.svg)
 
-Copied damage carries its change on both strands, so the duplex consensus agrees on it, which makes this a filter for Duplex Sequencing.
+Copied damage carries its change on both strands, so the duplex consensus agrees on it, which makes this the filter Duplex Sequencing needs.
 Fragmenting with a restriction enzyme that leaves blunt ends, as NanoSeq does [[3]](#references), or repairing lesions before end repair, as Duplex-Repair does [[4]](#references), keeps lesions from being copied.
 
 - **Measured from:** the 5′ end of the *lesion strand*, the strand that carries the damaged base.
@@ -92,12 +108,13 @@ Fragmenting with a restriction enzyme that leaves blunt ends, as NanoSeq does [[
 - **Use it when:** UMI-bearing adapters are ligated after any polymerase fills in ends, nicks, or gaps, as in Duplex Sequencing; it needs the reference, `--ref`.
 
 As the copied damage diagram shows, the copy runs from the partner's recessed end toward the lesion strand's 5′ end, so copied lesions sit near that end, while a real mutation's molecules sit wherever the reference molecules do.
+On reads or a simplex consensus, lesions no polymerase copied show too, and the deamination among them crowds the same 5′ ends, where the overhangs were single-stranded [[1]](#references), so the filter flags those as well.
 
 Copied damage has one blind spot: a lesion copied from an internal nick, by nick translation or strand displacement, or across the gap an abasic site leaves, can sit anywhere in the template, so its alternate molecules carry no signal of an end, and they show only as an excess of the damage class across a library.
 
 A duplex consensus BAM that carries each strand's single-strand consensus, the `ac`, `bc`, `ad` and `bd` tags fgbio and fgumi write, covers it.
 The tool then reads every molecule once more, counting its duplex changes and its *single-strand* changes, lesions on one strand that no polymerase copied, per damage class and context; a molecule counts toward the single-strand rate, as a change or not, only when at least 2 raw reads agree with each strand's base: its `ad` or `bd` depth less its `ae` or `be` errors, or its depth alone where a consensus lacks either error tag.
-Copied lesions land on a position one molecule at a time, while a real mutation in a clone puts several molecules on one position, so the artifact fraction a call with two or more alternate molecules starts from becomes the share of the library's positions as deep with as many changes that chance explains, unless `--copied-damage-prior learned` keeps the learned one or the call looks germline, alternate in 20% of its molecules.
+Copied lesions fall on a position one molecule at a time, while a real mutation in a clone puts several molecules on one position, so the artifact fraction a call with two or more alternate molecules starts from becomes the share of the library's positions as deep with as many changes that chance explains, unless `--copied-damage-prior learned` keeps the learned one or the call looks germline, alternate in 20% of its molecules.
 Two real mutations on single molecules at one position read as chance too, so where real mutations on one molecule come at a tenth of the damage rate or more, the chance share costs real calls on two molecules, and a position damaged far beyond the rest of its class looks real to it, so a threshold there rests on the decay alone.
 Without those tags, the artifact fraction is learned from the calls.
 
@@ -105,18 +122,27 @@ Without those tags, the artifact fraction is learned from the calls.
 
 ![End repair fill-in makes an error: a recessed 3′ end is filled in with a wrong C opposite a T, the UMI-bearing adapters are ligated, and only the filled-in strand reads G, so a duplex consensus masks it.](.github/img/end-repair-fill-in.svg)
 
-End repair's polymerase can misincorporate a base as it fills in a recessed 3′ end, or copy a lesion in the overhang, and in reads or simplex consensus either change sits on the strand it extended, near that strand's 3′ end.
-A misincorporation is on that strand alone, so a duplex consensus removes it, while a copied lesion is on both strands, which is copied damage.
-A call near an end can be flagged by both filters, as the call at position 100 is below.
+On reads or a simplex consensus, this filter flags a base the polymerase misincorporated as it filled in a recessed 3′ end, which sits on the strand it extended, near that strand's 3′ end; a lesion it copied from the overhang sits there too, which is copied damage, so a call near an end can be flagged by both filters, as the call at position 100 is below.
+On a duplex consensus, which has already removed the misincorporations, since each is on one strand, it flags changes both strands agree on, of any substitution class, that crowd either fragment end: copied damage of any chemistry, and whatever else gathers at fragment ends, not fill-in errors.
 
-- **Measured from:** the 3′ end of the strand read 1 reports, which end repair extended: the higher-coordinate end of an F1R2 pair, whose read 1 is forward, and the lower-coordinate end of an F2R1 pair; on a duplex consensus, the nearer template end.
-- **Scored with:** a decay whose scale is learned per sample, from a default of 15 bp, or 5 bp on a duplex consensus.
-- **Writes:** the posterior `ERFAP` and the FILTER `EndRepairFillInArtifact`.
-- **Use it when:** a polymerase end-repaired the library before adapter ligation, as in most ligation preps after mechanical or enzymatic fragmentation, or, on a duplex consensus, to filter changes that crowd the fragment ends.
+- **Measured from:** the 3′ end of the strand read 1 reports, which end repair extended: the higher-coordinate end of an F1R2 pair, whose read 1 is forward, and the lower-coordinate end of an F2R1 pair; on a duplex consensus, whose records carry fgbio's `aD` and `bD` depths of both strands, the nearer template end, since either strand's end can hold the change.
+- **Scored with:** a decay whose scale is learned per sample, from a default of 15 bp, or 5 bp on a duplex consensus, where the changes sit within a few bases of the end.
+- **Writes:** the posterior `ERFAP` and the FILTER `EndRepairFillInArtifact`, on either kind of BAM.
+- **Use it when:** a polymerase end-repaired the library before adapter ligation, as in most ligation preps after mechanical or enzymatic fragmentation; on a duplex consensus, when calls crowd the fragment ends.
 
-A duplex consensus, whose records carry fgbio's `aD` and `bD` depths of both strands, holds both strands, so the filter measures each of its templates from the nearer end.
-The consensus has already removed the errors made on one strand, so the changes the filter finds there are ones both strands agree on, of any substitution class, and they sit within a few bases of the end, so its decay starts from 5 bp.
-That makes it the fragment-end filter for Duplex Sequencing, in place of a caller's filter on the mean distance from a call to the nearer read end: once overlapping mates are clipped, each clip point in the middle of a fragment is a read end too, so such a filter also flags real calls whose few alternate molecules happen to sit near one.
+Both filters look at the stretch end repair filled in, from opposite strands:
+
+| &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | Copied Damage | End Repair Fill-In |
+| --- | --- | --- |
+| The wrong base comes from | A damaged base in the template, which the polymerase copies as it reads it | The polymerase itself, misincorporating a base as it fills in |
+| The strand at fault | The lesion strand; its partner receives the copy | The extended strand, which gained the new bases |
+| Strands that carry it | Both, once copied | One |
+| A duplex consensus | Keeps it | Removes it |
+| Classes scored | C>T and G>T, on either strand | Any substitution |
+| Measured from | The lesion strand's 5′ end | The extended strand's 3′ end, or the nearer end of a duplex consensus |
+| Decay scale | Learned, from 30 bp | Learned, from 15 bp, or 5 bp on a duplex consensus |
+
+On a duplex consensus this is the fragment-end filter for Duplex Sequencing, in place of a caller's filter on the mean distance from a call to the nearer read end: once overlapping mates are clipped, each clip point in the middle of a fragment is a read end too, so such a filter also flags real calls whose few alternate molecules happen to sit near one.
 The examples' reads are in `tests/data/duplex.bam` as a duplex consensus, tagged with those depths:
 
 ```console
@@ -332,31 +358,31 @@ The tool learns per sample how common each artifact is and how far it reaches, s
 
 | Option&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | Sets |
 | --- | --- |
-| `--input` | The coordinate-sorted VCF or BCF of somatic calls (short `-i`; required). |
-| `--output` | The output VCF or BCF, its format set by its extension: `.vcf`, `.vcf.gz`, `.bcf`, or `-` for standard output (short `-o`; required). |
-| `--bam` | The coordinate-sorted BAM of the sample, reads or consensus (short `-b`; required). |
-| `--ref` | The reference FASTA, with its `.fai`, which copied damage and `--spectrum` need (short `-r`). |
+| `--input` | The coordinate-sorted VCF or BCF of somatic calls, read twice, so a file and never standard input (short `-i`; required). |
+| `--output` | The output VCF or BCF, its format set by its extension: `.vcf`, `.vcf.gz`, `.bcf`, or `-` for plain VCF to standard output (short `-o`; required). |
+| `--bam` | The coordinate-sorted BAM of the sample, reads or consensus, with no index needed; distances from template ends count template bases through both mates' CIGARs, so each mate of a pair on one contig needs its mate's CIGAR in its `MC` tag, and the insert size is never read (short `-b`; required). |
+| `--ref` | The reference FASTA, with its `.fai`, for CpG context, which the copied-damage filter and `--spectrum` need; giving it with neither is an error (short `-r`). |
 | `--sample` | The sample the BAM holds, required when the VCF has more than one (short `-s`). |
 | `--metrics` | The per-sample metrics TSV, one row per filter and stratum (default none). |
-| `--spectrum` | A PDF of the sample's heterozygous SNVs by trinucleotide context, whatever their FILTER, in panels on one scale: every SNV, the expected real SNVs, each weighted by the product of its posteriors, and, with a threshold, the SNVs that pass (default none). |
+| `--spectrum` | A PDF of the sample's SNVs by trinucleotide context, before and after filtering, its panels on one scale: every heterozygous SNV, whatever its FILTER; the expected real SNVs, each weighed by the product of its posteriors from the filters `--filters` enables; and, when a filter has a threshold, the SNVs no filter flagged (default none). |
+| `--min-mapping-quality` | The minimum mapping quality of a read or consensus (short `-m`; default 20). |
+| `--min-base-quality` | The minimum base quality at the call (short `-q`; default 20). |
+| `--paired-reads-only` | Use only paired reads or consensus whose mate is also mapped; duplicate, secondary, and supplementary records are always left out (short `-p`; default off). |
 | `--filters` | The filters to run, comma-separated, from `copied-damage`, `end-repair-fill-in`, and `a-tailing` (default `copied-damage,a-tailing,end-repair-fill-in`). |
-| `--model` | The model, either `chaff`, which learns each sample's artifact fractions and decay scales, or `fgbio`, which sets each call's artifact fraction from its alternate allele fraction and uses fgbio's windows, to reproduce its values (default `chaff`). |
-| `--copied-damage-threshold` | The posterior at or below which copied damage applies its FILTER (default none). |
-| `--end-repair-fill-in-threshold` | The posterior at or below which end repair fill-in applies its FILTER (default none). |
-| `--a-tailing-threshold` | The posterior at or below which A-tailing applies its FILTER (default none). |
-| `--copied-damage-classes` | The damage classes, damaged base `>` read base: `C>T` for deamination from heat, storage, or formalin, and `G>T` for oxidation from shearing or heat (default `C>T,G>T`). |
-| `--copied-damage-distance` | The decay scale in bases from the lesion strand's 5′ end, the mean length over which a polymerase copies a lesion strand onto its partner, or `learned` (default `learned`). |
-| `--copied-damage-prior` | Where copied damage takes each call's artifact fraction from under `--model chaff`: `chance`, on a BAM with single-strand consensus, the share of the library's positions as deep with as many changes that chance explains, or `learned`, the fraction learned from the calls (default `chance`). |
-| `--end-repair-fill-in-distance` | The decay scale in bases from the 3′ end of the strand read 1 reports, or from the nearer template end of a duplex consensus, or `learned`, which starts from 15, or 5 on a duplex consensus (default `learned`); under `--model fgbio`, the window from the nearest template end (default 15). |
-| `--a-tailing-distance` | The window from the template end, in bases (default 2). |
-| `--min-mapping-quality` | The mapping quality floor of a read or consensus (short `-m`; default 20). |
-| `--min-base-quality` | The base quality floor at the call (short `-q`; default 20). |
-| `--paired-reads-only` | Keep only reads or consensus whose mate is mapped (short `-p`; default off). |
+| `--model` | The model that scores calls, its prior and its distance models: `chaff`, artifact fractions learned per sample and stratum by EM, and decays for end repair fill-in and copied damage, or `fgbio`, fgbio's per-call `(2 * maf)^2` prior and windows, for parity (default `chaff`). |
+| `--copied-damage-classes` | The damage classes as damaged base `>` read base, comma-separated, each matching on either strand: `C>T`, cytosine or 5-methylcytosine deamination, which covers REF/ALT `C/T` and `G/A`, and `G>T`, guanine oxidation to 8-oxoguanine (default `C>T,G>T`). |
+| `--copied-damage-distance` | The decay scale in bases from the lesion strand's 5′ end, the mean length over which a polymerase copies a lesion strand onto its partner, learned per library under either model unless a number fixes it; molecules within it count as congruent in the metrics (default `learned`). |
+| `--copied-damage-prior` | Where copied damage takes each call's prior from under `--model chaff`: `chance`, on a BAM with single-strand consensus, the share of the library's positions as deep, with as many duplex changes, that chance explains, and the learned fraction otherwise, or `learned`, the fraction learned per sample and stratum from the calls (default `chance`). |
+| `--copied-damage-threshold` | Apply `CopiedDamageArtifact` at or below this posterior (default none). |
+| `--end-repair-fill-in-distance` | The distance in bases from a template end, or `learned`: under `--model chaff`, the decay scale from the 3′ end of the strand read 1 reports, or the nearer end of a duplex consensus, learned from 15, or 5 on a duplex consensus, unless fixed; under `--model fgbio`, fgbio's window from the nearest template end, 15 unless fixed; molecules within it count as congruent in the metrics (default `learned`). |
+| `--end-repair-fill-in-threshold` | Apply `EndRepairFillInArtifact` at or below this posterior (default none). |
+| `--a-tailing-distance` | The window in bases from the template end, under either model (default 2). |
+| `--a-tailing-threshold` | Apply `ATailingArtifact` at or below this posterior (default none). |
 
 The VCF/BCF and the BAM must be coordinate sorted, with their contigs in the same order, and need no index; the FASTA needs a `.fai`.
 Each template counts once, and a read or consensus whose mate maps to the same contig needs the mate's CIGAR in its `MC` tag.
 Both ends of a template are measured for an FR pair, whose forward mate starts at or before its reverse mate's 5′ end; a mate of any other pair knows only its own end.
-An option of a filter that `--filters` leaves out is a usage error, and so are `--ref` without `copied-damage` or `--spectrum` and `--copied-damage-prior` under `--model fgbio`.
+An option of a filter that `--filters` leaves out is a usage error, and so are `--ref` without `copied-damage` or `--spectrum`, and `--copied-damage-prior` or `--end-repair-fill-in-distance learned` typed under `--model fgbio`.
 A VCF that already declares an enabled filter's INFO or FILTER, from an earlier run, is refused, so a FILTER never outlives the run that applied it; remove them first, as with `bcftools annotate -x`.
 
 ## Development and Testing
@@ -373,3 +399,5 @@ The tool `chaff` ports the end repair fill-in and A-tailing filters of fgbio's `
 4. Xiong K, et al. 2022. Duplex-Repair enables highly accurate sequencing, despite DNA damage. *Nucleic Acids Research* 50(1):e1. [https://doi.org/10.1093/nar/gkab855](https://doi.org/10.1093/nar/gkab855)
 5. GATK's `LearnReadOrientationModel`: [https://gatk.broadinstitute.org/hc/en-us/articles/360057439111-LearnReadOrientationModel](https://gatk.broadinstitute.org/hc/en-us/articles/360057439111-LearnReadOrientationModel)
 6. fgbio's `FilterSomaticVcf`: [https://fulcrumgenomics.github.io/fgbio/tools/latest/FilterSomaticVcf.html](https://fulcrumgenomics.github.io/fgbio/tools/latest/FilterSomaticVcf.html), from [https://github.com/fulcrumgenomics/fgbio](https://github.com/fulcrumgenomics/fgbio)
+7. fgbio's `CallDuplexConsensusReads`: [https://fulcrumgenomics.github.io/fgbio/tools/latest/CallDuplexConsensusReads.html](https://fulcrumgenomics.github.io/fgbio/tools/latest/CallDuplexConsensusReads.html), whose rule for strands that disagree is in [DuplexConsensusCaller.scala](https://github.com/fulcrumgenomics/fgbio/blob/main/src/main/scala/com/fulcrumgenomics/umi/DuplexConsensusCaller.scala), and `fgumi duplex`: [https://fgumi.readthedocs.io/en/latest/tools/duplex.html](https://fgumi.readthedocs.io/en/latest/tools/duplex.html), with the same rule in [duplex_caller.rs](https://github.com/fulcrumgenomics/fgumi/blob/main/crates/fgumi-consensus/src/duplex_caller.rs)
+8. fgbio's `FilterConsensusReads`: [https://fulcrumgenomics.github.io/fgbio/tools/latest/FilterConsensusReads.html](https://fulcrumgenomics.github.io/fgbio/tools/latest/FilterConsensusReads.html), and `fgumi filter`: [https://fgumi.readthedocs.io/en/latest/tools/filter.html](https://fgumi.readthedocs.io/en/latest/tools/filter.html)
