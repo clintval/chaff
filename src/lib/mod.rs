@@ -154,7 +154,9 @@
 //!   [fgbio #1172](https://github.com/fulcrumgenomics/fgbio/pull/1172) does
 //!   for clipping, so an indel counts by its length. Soft clips count and hard
 //!   clips do not. fgbio measures the far end by insert size, while the
-//!   `chaff` crate never reads `TLEN`.
+//!   `chaff` crate never reads `TLEN`. An unpaired duplex consensus, as
+//!   CODEC's is, spans its template, so both its ends are its one record's
+//!   outermost bases, where fgbio gives a fragment only its own end.
 //! - **Overlapping mates.** They are called into one base: mates that agree
 //!   keep the higher quality, and mates that disagree count as neither allele.
 //!   fgbio keeps the first record of each name, so values differ where

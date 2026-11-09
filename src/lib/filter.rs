@@ -956,6 +956,10 @@ pub fn filter_vcf_report(
         calls.push(annotations);
     }
     log_scored(&sample, &calls, &skipped);
+    let spanning = evidence.spanning_molecules();
+    if spanning > 0 {
+        info!("{spanning} molecules at the scored sites were unpaired duplex consensus, as CODEC's are, measured from both ends of their one record");
+    }
 
     let scales = score_decays(&mut calls, options);
     let damaged = calls
