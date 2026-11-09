@@ -88,8 +88,9 @@ pub(crate) const CARGO_STYLING: Styles = Styles::styled()
 ///                        tagging: alternates crowd the lesion strand's 5' end
 ///   end-repair-fill-in   errors in a filled-in recessed 3' end: alternates
 ///                        crowd the 3' end of the strand read 1 reports, or
-///                        either end of a duplex consensus or under fgbio
-///                        (ERFAP)
+///                        the nearest end under fgbio (ERFAP); a duplex
+///                        consensus masks those errors, so there it flags
+///                        changes both strands carry near either end
 ///   a-tailing            adenines added to an over-digested 3' end: a T near
 ///                        the left end or an A near the right (fgbio ATAP)
 ///
