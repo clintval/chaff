@@ -928,7 +928,7 @@ fn run_with_metrics(
 /// A `G>T` call where every read holds `C`, the sample being homozygous for
 /// it, but for a few `T` reads whose templates start at the site: under the
 /// `chaff` model copied damage classes the call from the `C` molecules, a
-/// `C>T` at the CpG the next reference base makes, filters it, and names the
+/// `C>T` at the CpG the next reference base makes, filters it, and writes the
 /// base in `PA`; under `--model fgbio` the call keeps REF and, with no `G`
 /// molecule, no posterior.
 #[test]
