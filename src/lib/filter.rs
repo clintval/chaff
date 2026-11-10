@@ -617,7 +617,10 @@ fn snv_context(
 
 /// Score one call, with its reference context when known, under every enabled
 /// filter that applies to it and every base its alternate may have arisen
-/// from, returning the annotations and those parents.
+/// from, returning the annotations and those parents. With `spectrum` set the
+/// parents are found even for a call no filter scores, so its channel does
+/// not depend on which filters run.
+#[allow(clippy::too_many_arguments)]
 fn score_call(
     gt: &Genotype,
     contig: &str,
@@ -626,6 +629,7 @@ fn score_call(
     evidence: &mut dyn Evidence,
     context: Option<(Option<u8>, u8, Option<u8>)>,
     cache: &mut Option<((String, usize), Vec<Molecule>)>,
+    spectrum: bool,
 ) -> Result<(Vec<Annotation>, Option<Parents>)> {
     let kinds: Vec<FilterKind> = FilterKind::ALL
         .into_iter()
@@ -638,7 +642,7 @@ fn score_call(
     let Some(alt_allele) = alt_allele.bytes().next() else {
         return Ok((Vec::new(), None));
     };
-    if kinds.is_empty() {
+    if kinds.is_empty() && !(spectrum && options.takes_parent() && gt.calls_are_single_bases()) {
         return Ok((Vec::new(), None));
     }
     let (ref_base, alt_base) = (
@@ -668,6 +672,9 @@ fn score_call(
             molecules: count(ref_base),
         })
     };
+    if kinds.is_empty() {
+        return Ok((Vec::new(), Some(parents)));
+    }
     let depth = molecules
         .iter()
         .filter(|m| matches!(m.base, b'A' | b'C' | b'G' | b'T'))
@@ -1179,8 +1186,9 @@ pub fn filter_vcf_report(
             }
             _ => None,
         };
-        let (annotations, parents) =
-            score_call(&gt, &contig, pos, options, evidence, context, &mut cache)?;
+        let (annotations, parents) = score_call(
+            &gt, &contig, pos, options, evidence, context, &mut cache, spectrum,
+        )?;
         let in_place = parents.and_then(|p| p.in_place_of_reference());
         channels.push(
             bases
@@ -3038,6 +3046,50 @@ mod tests {
         let (tcg, cca) = (16 * 2 + 4 * 3 + 2, 4);
         assert_eq!(spectrum.before.iter().sum::<f64>(), 2.0);
         assert_eq!((spectrum.before[tcg], spectrum.before[cca]), (1.0, 1.0));
+    }
+
+    /// A call no enabled filter scores still moves to its parent allele's
+    /// channel: with A-tailing alone, a `G>C` on a sample homozygous for `A`
+    /// counts as an A>C, as the `G>T` it scores does as an A>T.
+    #[test]
+    fn test_the_spectrum_channel_does_not_depend_on_the_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = write_fasta(dir.path(), "chr1", &UNIT.repeat(100));
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(1006, &["G", "C"], vec![gt("tumor", "0/1")]));
+        vcf.add(Variant::new(1026, &["G", "T"], vec![gt("tumor", "0/1")]));
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let mut table = MoleculeTable::new();
+        for (pos, alt) in [(1006, b'C'), (1026, b'T')] {
+            let mut molecules = spread(b'A', 150);
+            molecules.extend(crowding(alt));
+            table.insert("chr1", pos, molecules);
+        }
+        let options = FilterOptions {
+            filters: vec![FilterKind::ATailing],
+            ..FilterOptions::default()
+        };
+        let mut reference = Reference::open(&reference).unwrap();
+        let output = dir.path().join("out.vcf");
+        let report = filter_vcf_report(
+            &input,
+            &output,
+            &mut table,
+            Some(&mut reference),
+            &options,
+            true,
+            false,
+        )
+        .unwrap();
+        let before = report.spectrum.unwrap().before;
+        let (prev, next) = (Some(b'T'), Some(b'G'));
+        let a_to_c = channel(prev, b'A', b'C', next).unwrap();
+        let a_to_t = channel(prev, b'A', b'T', next).unwrap();
+        assert_eq!(before.iter().sum::<f64>(), 2.0);
+        assert_eq!((before[a_to_c], before[a_to_t]), (1.0, 1.0));
+        let (_, records) = read_records(&output);
+        assert_eq!(characters(&records[0], PARENT_INFO), None);
+        assert_eq!(characters(&records[1], PARENT_INFO), Some(vec!['A']));
     }
 
     /// `PA` describes the molecules, not a filter, so a later run of another
