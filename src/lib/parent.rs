@@ -29,9 +29,9 @@
 use crate::evidence::Molecule;
 use crate::prior::ln_add_exp;
 
-/// The INFO key of the base other than REF the alternate may have arisen
-/// from, written in place of REF where the sample does not carry REF and
-/// beside it where the sample carries both.
+/// The INFO key of the bases the alternate may have arisen from, written
+/// where one is not REF: that base alone where the sample does not carry REF,
+/// and REF then that base where the sample carries both.
 pub const INFO: &str = "PA";
 
 /// The INFO key of the weight the copied-damage posterior gave the artifact
@@ -78,12 +78,19 @@ impl Parents {
         }
     }
 
-    /// The base other than REF, if any: the value of [`INFO`].
+    /// The base other than REF, if any.
     pub fn other(&self) -> Option<u8> {
         match self {
             Parents::Reference(_) => None,
             Parents::Other(other) | Parents::Both(_, other) => Some(other.base),
         }
+    }
+
+    /// The value of [`INFO`]: each parent's base, REF first where the sample
+    /// carries it, or none where REF is the one parent.
+    pub fn bases(&self) -> Option<Vec<u8>> {
+        self.other()
+            .map(|_| self.each().iter().map(|parent| parent.base).collect())
     }
 
     /// The base standing in place of REF, where the sample does not carry

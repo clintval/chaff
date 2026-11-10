@@ -69,7 +69,7 @@
 //! molecules as the reference molecules, classes the call from it in the
 //! reference neighbours' context, learns its strata from that class, and the
 //! spectrum counts the call in that class's channel. The call's `PA` holds
-//! the base.
+//! that base alone.
 //!
 //! Where REF and another base each hold more than 2% of those molecules, as
 //! at a heterozygous germline site or under allelic imbalance, the
@@ -89,8 +89,8 @@
 //! base's it is REF alone. Such a call takes its priors and scales from the
 //! strata the single-parent calls teach and teaches none itself, is counted
 //! in the metrics and `CDAC` and `CDRC` under the heavier parent, keeps REF's
-//! channel in the spectrum, and writes the other base in `PA` and its weight
-//! in `CDPW`. The library's single-strand profile (see [`simplex`]) still
+//! channel in the spectrum, and writes REF then the other base in `PA` and
+//! the other base's weight in `CDPW`. The library's single-strand profile (see [`simplex`]) still
 //! reads every position's base from the reference.
 //!
 //! ## Priors and posteriors

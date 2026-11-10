@@ -929,7 +929,7 @@ fn run_with_metrics(
 /// it, but for a few `T` reads whose templates start at the site: under the
 /// `chaff` model copied damage classes the call from the `C` molecules, a
 /// `C>T` at the CpG the next reference base makes, filters it, and writes the
-/// base in `PA`; under `--model fgbio` the call keeps REF and, with no `G`
+/// base alone in `PA`; under `--model fgbio` the call keeps REF and, with no `G`
 /// molecule, no posterior.
 #[test]
 fn test_a_call_is_scored_from_the_base_the_reads_carry_in_place_of_ref() {
@@ -978,8 +978,8 @@ fn test_a_call_is_scored_from_the_base_the_reads_carry_in_place_of_ref() {
         run_filter_on(&args, reads.to_pileup_builder()).unwrap();
         let (header, records) = read_vcf(&output);
         let record = &records[0];
-        let parent = match record.info().get(parent::INFO) {
-            Some(Some(Value::Character(c))) => Some(*c),
+        let parent: Option<Vec<char>> = match record.info().get(parent::INFO) {
+            Some(Some(Value::Array(Array::Character(values)))) => values.iter().copied().collect(),
             _ => None,
         };
         let counts = |key: &str| match record.info().get(key) {
@@ -989,7 +989,7 @@ fn test_a_call_is_scored_from_the_base_the_reads_carry_in_place_of_ref() {
         match model {
             Model::Chaff => {
                 assert!(header.infos().contains_key(parent::INFO));
-                assert_eq!(parent, Some('C'));
+                assert_eq!(parent, Some(vec!['C']));
                 assert!(float(record, CopiedDamage::INFO_POSTERIOR).unwrap() < 0.05);
                 assert!(has_filter(record, CopiedDamage::FILTER));
                 assert_eq!(counts(CopiedDamage::INFO_ALT), [Some(5), Some(5)]);

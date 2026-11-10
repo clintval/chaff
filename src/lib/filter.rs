@@ -247,10 +247,10 @@ impl FilterOptions {
             add_info(
                 header,
                 PARENT_INFO,
-                Number::Count(1),
+                Number::Unknown,
                 Type::Character,
                 &format!(
-                    "The base other than REF the alternate allele may have arisen from, {MIN_PARENT_MOLECULES} or more molecules of it: in place of REF where REF holds at most {share}% of the molecules that are not the alternate, which the filters count as the reference molecules and class the call from; or beside REF where each holds more than {share}% of them, when each filter scores the call under both and weighs each parent's artifact hypothesis by its molecules times its stratum's artifact odds.",
+                    "The bases the alternate allele may have arisen from, written where one is a base other than REF on {MIN_PARENT_MOLECULES} or more molecules: that base alone where REF holds at most {share}% of the molecules that are not the alternate, which the filters count as the reference molecules and class the call from; or REF then that base where each holds more than {share}% of them, when each filter scores the call under both and weighs each parent's artifact hypothesis by its molecules times its stratum's artifact odds.",
                     share = (100.0 * MIN_ALLELE_SHARE).round()
                 ),
             );
@@ -307,7 +307,7 @@ impl FilterOptions {
                     WEIGHT_INFO,
                     Number::Count(1),
                     Type::Float,
-                    "The weight in CDAP of the artifact hypothesis of the base PA holds, where the sample carries REF and that base both: its molecules times its stratum's artifact odds over the two parents' such products; CDAC and CDRC count that base's hypothesis at or above 0.5 and REF's below.",
+                    "The weight in CDAP of the artifact hypothesis of the base other than REF in PA, where the sample carries REF and that base both: its molecules times its stratum's artifact odds over the two parents' such products; CDAC and CDRC count that base's hypothesis at or above 0.5 and REF's below.",
                 );
             }
             add_filter(
@@ -441,9 +441,9 @@ pub struct Annotation {
     /// Those whose base is the alternate allele, as a library profile counts
     /// a position's changes, whether or not the filter measures them.
     pub changes: u32,
-    /// The base other than REF the alternate may have arisen from, in place
-    /// of REF or beside it (see [`crate::parent`]).
-    pub other: Option<u8>,
+    /// The bases the alternate may have arisen from where one is not REF,
+    /// REF first where the sample carries it (see [`crate::parent`]).
+    pub parents: Option<Vec<u8>>,
 }
 
 impl Annotation {
@@ -728,7 +728,7 @@ fn score_call(
                 posterior: None,
                 depth,
                 changes: count(alt_base),
-                other: parents.other(),
+                parents: parents.bases(),
             });
         }
     }
@@ -1017,10 +1017,11 @@ impl Fractions {
 /// Write one call's annotations into its record.
 fn annotate_record(record: &mut RecordBuf, annotations: &[Annotation], options: &FilterOptions) {
     let mut new_filters = Vec::new();
-    if let Some(other) = annotations.iter().find_map(|a| a.other) {
+    if let Some(bases) = annotations.iter().find_map(|a| a.parents.as_ref()) {
+        let bases = bases.iter().map(|&base| Some(base as char)).collect();
         record.info_mut().insert(
             PARENT_INFO.to_string(),
-            Some(Value::Character(other as char)),
+            Some(Value::Array(Array::Character(bases))),
         );
     }
     for annotation in annotations {
@@ -1273,7 +1274,7 @@ fn log_scored(sample: &str, calls: &[Vec<Annotation>], skipped: &BTreeMap<Skip, 
             .iter()
             .filter(|call| {
                 call.first()
-                    .is_some_and(|a| a.other.is_some() && a.teaches() != both)
+                    .is_some_and(|a| a.parents.is_some() && a.teaches() != both)
             })
             .count()
     };
@@ -2601,7 +2602,7 @@ mod tests {
             posterior: None,
             depth,
             changes: 2,
-            other: None,
+            parents: None,
         };
         let mut calls = vec![vec![call(200)], vec![call(2000)], vec![call(8000)]];
         assign_posteriors(
@@ -2881,15 +2882,15 @@ mod tests {
         (reference, input, table)
     }
 
-    fn character(record: &RecordBuf, key: &str) -> Option<char> {
+    fn characters(record: &RecordBuf, key: &str) -> Option<Vec<char>> {
         match record.info().get(key) {
-            Some(Some(Value::Character(c))) => Some(*c),
+            Some(Some(Value::Array(Array::Character(values)))) => values.iter().copied().collect(),
             _ => None,
         }
     }
 
     /// A `G>T` call on a sample homozygous for `C` is a `C>T` at a CpG,
-    /// scored against the `C` molecules and named by `PA`, while the site
+    /// scored against the `C` molecules and listed in `PA`, while the site
     /// beside it, whose `C` is on too few molecules, keeps REF and its `G>T`
     /// class.
     #[test]
@@ -2912,8 +2913,8 @@ mod tests {
         let (header, records) = read_records(&output);
         assert!(header.infos().contains_key(PARENT_INFO));
         let (homozygous, heterozygous) = (&records[0], &records[1]);
-        assert_eq!(character(homozygous, PARENT_INFO), Some('C'));
-        assert_eq!(character(heterozygous, PARENT_INFO), None);
+        assert_eq!(characters(homozygous, PARENT_INFO), Some(vec!['C']));
+        assert_eq!(characters(heterozygous, PARENT_INFO), None);
         assert!(float(homozygous, CopiedDamage::INFO_POSTERIOR).unwrap() < 0.05);
         assert!(homozygous.filters().as_ref().contains(CopiedDamage::FILTER));
         assert_eq!(
@@ -2964,7 +2965,7 @@ mod tests {
         let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
         let (header, records) = read_records(&output);
         assert!(!header.infos().contains_key(PARENT_INFO));
-        assert_eq!(character(&records[0], PARENT_INFO), None);
+        assert_eq!(characters(&records[0], PARENT_INFO), None);
         assert_eq!(float(&records[0], CopiedDamage::INFO_POSTERIOR), None);
         assert_eq!(
             records[0].info().get(CopiedDamage::INFO_REF),
@@ -3038,8 +3039,8 @@ mod tests {
         filter_vcf(&first, &second, &mut table, None, &again).unwrap();
         let (header, records) = read_records(&second);
         assert!(header.infos().contains_key(PARENT_INFO));
-        assert_eq!(character(&records[0], PARENT_INFO), Some('C'));
-        assert_eq!(character(&records[1], PARENT_INFO), None);
+        assert_eq!(characters(&records[0], PARENT_INFO), Some(vec!['C']));
+        assert_eq!(characters(&records[1], PARENT_INFO), None);
         assert!(float(&records[0], ATailing::INFO).is_some());
     }
 
@@ -3097,7 +3098,8 @@ mod tests {
     }
 
     /// A call on a sample carrying REF and another base is scored under
-    /// both: `PA` holds the other base, `CDPW` its weight, which its 150
+    /// both: `PA` holds REF then the other base, `CDPW` the other base's
+    /// weight, which its 150
     /// molecules against 100 and its stratum's higher artifact fraction put
     /// well above half, so `CDAC` and `CDRC` count its hypothesis and the
     /// call is counted in its stratum; the alternates crowding the shared 5'
@@ -3113,7 +3115,7 @@ mod tests {
         let (header, records) = read_records(&output);
         assert!(header.infos().contains_key(WEIGHT_INFO));
         let shared = &records[8];
-        assert_eq!(character(shared, PARENT_INFO), Some('C'));
+        assert_eq!(characters(shared, PARENT_INFO), Some(vec!['G', 'C']));
         let weight = float(shared, WEIGHT_INFO).unwrap();
         assert!(weight > 0.6 && weight < 1.0, "{weight}");
         assert!(float(shared, CopiedDamage::INFO_POSTERIOR).unwrap() < 0.05);
@@ -3127,7 +3129,7 @@ mod tests {
         );
         assert!(float(shared, EndRepairFillIn::INFO).is_some());
         for record in &records[..8] {
-            assert_eq!(character(record, PARENT_INFO), None);
+            assert_eq!(characters(record, PARENT_INFO), None);
             assert_eq!(float(record, WEIGHT_INFO), None);
         }
         let calls = |stratum: &str| {
@@ -3153,7 +3155,7 @@ mod tests {
         filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
         let (_, records) = read_records(&output);
         let one_sided = &records[9];
-        assert_eq!(character(one_sided, PARENT_INFO), Some('G'));
+        assert_eq!(characters(one_sided, PARENT_INFO), Some(vec!['T', 'G']));
         assert_eq!(float(one_sided, WEIGHT_INFO), Some(1.0));
         assert_eq!(
             one_sided.info().get(CopiedDamage::INFO_ALT),
@@ -3176,7 +3178,7 @@ mod tests {
         )
         .unwrap();
         let (_, records) = read_records(&undiluted);
-        assert_eq!(character(&records[9], PARENT_INFO), Some('G'));
+        assert_eq!(characters(&records[9], PARENT_INFO), Some(vec!['G']));
         assert_eq!(float(&records[9], WEIGHT_INFO), None);
         let whole = float(&records[9], CopiedDamage::INFO_POSTERIOR).unwrap();
         assert!(diluted > whole, "{diluted} {whole}");
