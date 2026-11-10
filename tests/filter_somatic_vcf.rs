@@ -1005,3 +1005,74 @@ fn test_a_call_is_scored_from_the_base_the_reads_carry_in_place_of_ref() {
         }
     }
 }
+
+/// A `G>T` call where the reads carry `G` and `C` both, 2 to 3, with a few
+/// `T` reads whose templates start at the site: copied damage scores the call
+/// under both parents, a `G>T` from the `G` molecules and a `C>T` at the CpG
+/// from the `C` molecules, writes `PA=G,C`, and, with no single-parent call to
+/// teach either stratum a prior, weighs the `C` hypothesis by its share of
+/// the two parents' molecules in `CDPW`, counting it in `CDRC`.
+#[test]
+fn test_a_call_is_scored_from_both_bases_the_reads_carry() {
+    use chaff::copied_damage::CopiedDamage;
+    use chaff::model::{CopiedDamagePrior, Distance};
+    use chaff::parent;
+    use chaff::testing::write_fasta;
+    use noodles::vcf::variant::record_buf::info::field::value::Array;
+
+    let dir = TempDir::new().unwrap();
+    let reference = write_fasta(dir.path(), "chr1", &"AAAATGGA".repeat(250));
+    let mut vcf = VcfBuilder::new(&["tumor"]);
+    vcf.add(Variant::new(1006, &["G", "T"], vec![gt("tumor", "0/1")]));
+    let input = vcf.write(&dir.path().join("calls.vcf"));
+    let mut reads = SamBuilder::new().read_length(RLEN).base_quality(40);
+    for start in 967..=1006 {
+        for (base, n) in [('G', 2), ('C', 3)] {
+            for _ in 0..n {
+                reads.add_pair(Pair::filled(start, start + RLEN, base, RLEN));
+                reads.add_pair(Pair::filled(start - RLEN, start, base, RLEN));
+            }
+        }
+    }
+    for start in 1002..=1006 {
+        reads.add_pair(Pair::filled(start, start + RLEN, 'T', RLEN));
+    }
+    let output = dir.path().join("filtered.vcf");
+    let args = FilterArgs {
+        input,
+        output: output.clone(),
+        bam: PathBuf::from("reads.bam"),
+        reference: Some(reference),
+        metrics: None,
+        spectrum: None,
+        pileup: PileupOptions::default(),
+        options: FilterOptions {
+            filters: vec![FilterKind::CopiedDamage],
+            copied_damage: CopiedDamage {
+                distance: Distance::Bases(30.0),
+                prior: CopiedDamagePrior::Learned,
+                ..CopiedDamage::default()
+            },
+            copied_damage_threshold: Some(0.05),
+            ..FilterOptions::default()
+        },
+    };
+    run_filter_on(&args, reads.to_pileup_builder()).unwrap();
+    let (header, records) = read_vcf(&output);
+    let record = &records[0];
+    let parents: Option<Vec<char>> = match record.info().get(parent::INFO) {
+        Some(Some(Value::Array(Array::Character(values)))) => values.iter().copied().collect(),
+        _ => None,
+    };
+    let counts = |key: &str| match record.info().get(key) {
+        Some(Some(Value::Array(Array::Integer(values)))) => values.clone(),
+        _ => Vec::new(),
+    };
+    assert!(header.infos().contains_key(parent::INFO_WEIGHT));
+    assert_eq!(parents, Some(vec!['G', 'C']));
+    assert_eq!(float(record, parent::INFO_WEIGHT), Some(0.6));
+    assert!(float(record, CopiedDamage::INFO_POSTERIOR).unwrap() < 0.05);
+    assert!(has_filter(record, CopiedDamage::FILTER));
+    assert_eq!(counts(CopiedDamage::INFO_ALT), [Some(5), Some(5)]);
+    assert_eq!(counts(CopiedDamage::INFO_REF)[1], Some(240));
+}

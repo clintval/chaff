@@ -3339,6 +3339,57 @@ mod tests {
         assert_eq!((calls("C>T:CpG"), calls("G>T:non-CpG")), (6, 4));
     }
 
+    /// Calls on two parents teach no scale, so where every call is one, a
+    /// learned distance falls back to each filter's default, the reads'
+    /// rather than a duplex consensus's for end repair fill-in, and the call
+    /// is still scored with it.
+    #[test]
+    fn test_only_two_parent_calls_fall_back_to_the_default_scale() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = write_fasta(dir.path(), "chr1", &UNIT.repeat(100));
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(1086, &["G", "T"], vec![gt("tumor", "0/1")]));
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let mut table = MoleculeTable::new();
+        let mut shared = spread(b'G', 100);
+        shared.extend(spread(b'C', 150));
+        shared.extend(crowding(b'T'));
+        table.insert("chr1", 1086, shared);
+        let options = FilterOptions {
+            filters: vec![FilterKind::CopiedDamage, FilterKind::EndRepairFillIn],
+            copied_damage: CopiedDamage {
+                distance: Distance::Learned,
+                ..CopiedDamage::default()
+            },
+            end_repair_fill_in: EndRepairFillIn {
+                distance: Distance::Learned,
+                ..EndRepairFillIn::default()
+            },
+            ..FilterOptions::default()
+        };
+        let output = dir.path().join("out.vcf");
+        let mut reference = Reference::open(&reference).unwrap();
+        filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
+        let (header, records) = read_records(&output);
+        let description = |id: &str| header.infos().get(id).unwrap().description().to_string();
+        for (id, scale) in [
+            (CopiedDamage::INFO_POSTERIOR, CopiedDamage::FALLBACK_SCALE),
+            (
+                EndRepairFillIn::INFO,
+                EndRepairFillIn::fallback_scale(false),
+            ),
+        ] {
+            let expected = format!(
+                "a {} bp decay, the default without a call to learn it from,",
+                significant(scale, 3)
+            );
+            assert!(description(id).contains(&expected), "{}", description(id));
+        }
+        assert_eq!(characters(&records[0], PARENT_INFO), Some(vec!['G', 'C']));
+        assert!(float(&records[0], CopiedDamage::INFO_POSTERIOR).is_some());
+        assert!(float(&records[0], EndRepairFillIn::INFO).is_some());
+    }
+
     /// A parent whose change is no damage class can only have given a
     /// mutation: the other parent takes the whole weight, and the call's
     /// prior is the other parent's diluted by REF's share, so the same
