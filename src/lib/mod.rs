@@ -58,6 +58,39 @@
 //! A-tailing call without one under the `chaff` model, which would otherwise
 //! take its prior alone.
 //!
+//! ## The parent allele
+//!
+//! Under the `chaff` model the reference molecules are those of the base the
+//! alternate arose from, which is REF unless the sample carries another base
+//! (see [`parent`]). Where REF holds at most 2% of the molecules that hold no
+//! called alternate, or at most 2 of them, and another base holds 10 or more,
+//! as at a site the sample is homozygous for another germline allele at, that
+//! base is the *parent allele*: every filter counts its molecules as the
+//! reference molecules, classes the call from it in the reference neighbours'
+//! context, learns its strata from that class, and the spectrum counts the call
+//! in that class's channel. The call's `PA` holds that base alone.
+//!
+//! Where REF and another base each hold more than 2% of those molecules, as at
+//! a heterozygous germline site or under allelic imbalance, the alternate's
+//! parent is unknown, so each filter scores the call under both parents `p`,
+//! each with its own molecules as the reference molecules and the class `p>ALT`
+//! makes, giving a ratio `l_p`. Artifacts arise on `p`'s molecules at its
+//! class's damage rate and mutations on any molecule at one rate, so with `π_p`
+//! the artifact share of `p`'s stratum, 0 for a change the filter does not
+//! score, and `q_p` the parent's share of the two parents' molecules, the
+//! posterior odds of an artifact are `Σ q_p (π_p / (1 - π_p)) exp(l_p)`: the
+//! call takes the prior `π = A / (1 + A)` with `A = Σ q_p π_p / (1 - π_p)` and
+//! the ratio `l = ln Σ ω_p exp(l_p)` with `ω_p = q_p π_p / ((1 - π_p) A)`, each
+//! parent's damage hypothesis weighing its molecules times its stratum's
+//! artifact odds (see [`parent::combine`]). Without REF's molecules this is the
+//! parent allele above, and without the other base's it is REF alone. Such a
+//! call takes its priors and scales from the strata the single-parent calls
+//! teach and teaches none itself, is counted in the metrics and `CDAC` and
+//! `CDRC` under the heavier parent, keeps REF's channel in the spectrum, and
+//! writes REF then the other base in `PA` and the other base's weight in
+//! `CDPW`. The library's single-strand profile (see [`simplex`]) still reads
+//! every position's base from the reference.
+//!
 //! ## Priors and posteriors
 //!
 //! The posterior probability of a real mutation is `σ(-(l_i + logit π))` for
@@ -172,6 +205,10 @@
 //!   alternate allele under either model; fgbio scores only called
 //!   heterozygous genotypes, so `--model fgbio` writes values on such a call
 //!   where fgbio writes none.
+//! - **The parent allele.** Under the `chaff` model a call at a site the
+//!   sample carries another base at, in place of REF or beside it, is scored
+//!   from that base, alone or weighed against REF (see [`parent`]);
+//!   `--model fgbio` scores every call from REF, as fgbio does.
 //! - **Streaming.** The BAM is always streamed, never queried by index.
 //! - **Number format.** Values keep htsjdk's rounding but are written in
 //!   decimal: `0.00003218` for fgbio's `3.218e-05`.
@@ -185,6 +222,7 @@ pub mod filter;
 pub mod io;
 pub mod metrics;
 pub mod model;
+pub mod parent;
 pub mod prior;
 pub mod read_end;
 pub mod reference;
