@@ -98,10 +98,9 @@ The filters score SNVs whose genotype is heterozygous, or missing as many somati
 Copied damage scores the SNVs in its damage classes on either strand: C>T covers C>T and G>A calls, and G>T covers G>T and C>A calls.
 A-tailing scores those whose alternate base is A or T, and end repair fill-in all of them.
 
-Where the sample does not carry REF, as at a site where it is homozygous for another germline allele, the alternate arose from the base it does carry, so each filter counts that base's molecules as the reference molecules and classes the call from it: a G>T call on a sample homozygous for C there is a C>T, at a CpG when the next reference base is G, and the call's `PA` holds that base alone.
-The base is read from the molecules at the site, with nothing to phase: the most common base other than REF and the alternate, on 10 or more molecules, where REF holds at most 2% of the molecules that are not the alternate.
-Where the sample carries REF and another base both, each on more than 2% of those molecules, as at a heterozygous germline site or under allelic imbalance, the alternate arose from either one, so each filter scores the call under both parents, each with its own molecules as the reference molecules and the class it makes, and folds the two into one posterior: an artifact arises on a parent's molecules at its stratum's damage rate, the odds its artifact fraction gives, and a mutation on any molecule at one rate, so a parent's damage hypothesis weighs its molecules times its stratum's artifact odds, and a parent whose change no filter scores can only have given a mutation.
-Such a call's `PA` holds REF then the other base, as `PA=G,C` for a G>T call on a sample carrying G and C, and its `CDPW` the other base's weight in `CDAP`; a second base on fewer than 10 molecules, or on at most 2% of them, leaves REF the one parent, as does `--model fgbio` everywhere.
+Where the sample does not carry REF, as at a site homozygous for another germline allele, each filter scores the call from the base it does carry: a G>T call on a sample homozygous for C is scored as a C>T.
+Where it carries REF and another base, each filter scores the call from both, weighing each by its molecules and its artifact rate.
+A base other than REF counts on 10 or more molecules and more than 2% of those that are not the alternate, and `PA` lists the bases a call was scored from.
 
 ### Copied Damage
 
@@ -356,8 +355,8 @@ Each filter writes its posteriors and counts into the INFO of the calls it score
 | `CDRC` | Copied Damage Reference Counts | The same two counts for the reference molecules. |
 | `ERFAP` | End Repair Fill-in Artifact Posterior | The posterior probability that the call is a real mutation rather than an end repair fill-in error; a low value means a likely error. |
 | `ATAP` | A-Tailing Artifact Posterior | The posterior probability that the call is a real mutation rather than an A-tailing artifact; a low value means a likely artifact. |
-| `PA` | Parent Alleles | The bases the alternate may have arisen from, written where one is not REF: that base alone where the sample does not carry REF, or REF then that base where the sample carries both; every filter counted that base's molecules as reference molecules and classed the call from it, alone or weighed against REF. |
-| `CDPW` | Copied Damage Parent Weight | The weight in `CDAP` of the damage hypothesis of the base other than REF in `PA`, written where `PA` holds two bases: that base's molecules times its stratum's artifact odds over the two parents' such products; `CDAC` and `CDRC` count that base's hypothesis at or above 0.5 and REF's below. |
+| `PA` | Parent Alleles | The bases the call was scored from, written where one is not REF: that base alone, or REF then that base. |
+| `CDPW` | Copied Damage Parent Weight | The weight in `CDAP` of the second base in `PA`, written where `PA` holds two. |
 | `CopiedDamageArtifact` | A FILTER | Applied where `CDAP` is at or below the copied damage threshold. |
 | `EndRepairFillInArtifact` | A FILTER | Applied where `ERFAP` is at or below the end repair fill-in threshold. |
 | `ATailingArtifact` | A FILTER | Applied where `ATAP` is at or below the A-tailing threshold. |
@@ -374,7 +373,7 @@ The tool learns per sample how common each artifact is and how far it reaches, s
 | `--ref` | The reference FASTA, with its `.fai`, for CpG context, which the copied-damage filter and `--spectrum` need; giving it with neither is an error (short `-r`). |
 | `--sample` | The sample the BAM holds, required when the VCF has more than one (short `-s`). |
 | `--metrics` | The per-sample metrics TSV, one row per filter and stratum (default none). |
-| `--spectrum` | A PDF of the sample's SNVs by trinucleotide context, before and after filtering, its panels on one scale: every heterozygous SNV, whatever its FILTER, a call scored from a base in place of REF in that base's channel; the expected real SNVs, each weighed by the product of its posteriors from the filters `--filters` enables; and, when a filter has a threshold, the SNVs no filter flagged (default none). |
+| `--spectrum` | A PDF of the sample's SNVs by trinucleotide context, before and after filtering, its panels on one scale: every heterozygous SNV, whatever its FILTER, in the channel of the base it was scored from; the expected real SNVs, each weighed by the product of its posteriors from the filters `--filters` enables; and, when a filter has a threshold, the SNVs no filter flagged (default none). |
 | `--min-mapping-quality` | The minimum mapping quality of a read or consensus (short `-m`; default 20). |
 | `--min-base-quality` | The minimum base quality at the call (short `-q`; default 20). |
 | `--paired-reads-only` | Use only paired reads or consensus whose mate is also mapped; duplicate, secondary, and supplementary records are always left out (short `-p`; default off). |
