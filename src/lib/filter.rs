@@ -33,7 +33,7 @@ use crate::metrics::{null_fraction, write_metrics, StratumMetrics};
 use crate::model::{CopiedDamagePrior, Distance, Model};
 use crate::parent::{
     combine, parents, Parent, Parents, Weighed, INFO as PARENT_INFO, INFO_WEIGHT as WEIGHT_INFO,
-    MIN_ALLELE_SHARE, MIN_PARENT_MOLECULES,
+    MAX_STRAY_MOLECULES, MIN_ALLELE_SHARE, MIN_PARENT_MOLECULES,
 };
 use crate::prior::{
     fgbio_artifact_prior, learn_artifact_fraction, learn_scale, posterior_mutation, BetaPrior,
@@ -89,6 +89,7 @@ impl FilterKind {
                 CopiedDamage::INFO_RATIO,
                 CopiedDamage::INFO_ALT,
                 CopiedDamage::INFO_REF,
+                WEIGHT_INFO,
             ],
             FilterKind::ATailing => &[ATailing::INFO],
             FilterKind::EndRepairFillIn => &[EndRepairFillIn::INFO],
@@ -249,10 +250,7 @@ impl FilterOptions {
                 PARENT_INFO,
                 Number::Unknown,
                 Type::Character,
-                &format!(
-                    "The bases the alternate allele may have arisen from, written where one is a base other than REF on {MIN_PARENT_MOLECULES} or more molecules: that base alone where REF holds at most {share}% of the molecules that are not the alternate, which the filters count as the reference molecules and class the call from; or REF then that base where each holds more than {share}% of them, when each filter scores the call under both and weighs each parent's artifact hypothesis by its molecules times its stratum's artifact odds.",
-                    share = (100.0 * MIN_ALLELE_SHARE).round()
-                ),
+                &parent_description(),
             );
         }
         if self.enabled(FilterKind::CopiedDamage) {
@@ -514,11 +512,28 @@ pub fn resolve_sample(header: &vcf::Header, sample: Option<&str>) -> Result<(usi
     }
 }
 
+/// The description of the parent alleles INFO.
+fn parent_description() -> String {
+    format!(
+        "The bases the alternate allele may have arisen from, written where one is a base other than REF and the called alternates on {MIN_PARENT_MOLECULES} or more molecules: that base alone where REF holds at most {share}% of the molecules that hold no called alternate, or at most {MAX_STRAY_MOLECULES} of them, which the filters count as the reference molecules and class the call from; or REF then that base where each holds more, when each filter scores the call under both and weighs each parent's artifact hypothesis by its molecules times its stratum's artifact odds.",
+        share = (100.0 * MIN_ALLELE_SHARE).round()
+    )
+}
+
 /// Refuse a header that already declares an INFO or FILTER of an enabled
 /// filter, from an earlier run of chaff or fgbio, whose values would otherwise
-/// sit under this run's descriptions.
+/// sit under this run's descriptions, or a parent alleles INFO defined other
+/// than this run would define it.
 fn refuse_earlier_annotations(header: &vcf::Header, options: &FilterOptions) -> Result<()> {
     let mut found = Vec::new();
+    if let Some(info) = header.infos().get(PARENT_INFO) {
+        let ours = (Number::Unknown, Type::Character, parent_description());
+        if options.takes_parent()
+            && (info.number(), info.ty(), info.description().to_string()) != ours
+        {
+            found.push(format!("INFO/{PARENT_INFO}"));
+        }
+    }
     for kind in options.filters.iter() {
         for id in kind.info_ids() {
             if header.infos().contains_key(*id) {
@@ -641,7 +656,12 @@ fn score_call(
     let molecules = &cache.as_ref().expect("filled above").1;
     let count = |base: u8| molecules.iter().filter(|m| m.base == base).count() as u32;
     let parents = if options.takes_parent() {
-        parents(molecules, ref_base, alt_base)
+        let alts: Vec<u8> = gt
+            .alts()
+            .filter_map(|alt| alt.bytes().next())
+            .map(|base| base.to_ascii_uppercase())
+            .collect();
+        parents(molecules, ref_base, &alts)
     } else {
         Parents::Reference(Parent {
             base: ref_base,
@@ -1017,6 +1037,9 @@ impl Fractions {
 /// Write one call's annotations into its record.
 fn annotate_record(record: &mut RecordBuf, annotations: &[Annotation], options: &FilterOptions) {
     let mut new_filters = Vec::new();
+    if !annotations.is_empty() {
+        record.info_mut().as_mut().shift_remove(PARENT_INFO);
+    }
     if let Some(bases) = annotations.iter().find_map(|a| a.parents.as_ref()) {
         let bases = bases.iter().map(|&base| Some(base as char)).collect();
         record.info_mut().insert(
@@ -3042,6 +3065,67 @@ mod tests {
         assert_eq!(characters(&records[0], PARENT_INFO), Some(vec!['C']));
         assert_eq!(characters(&records[1], PARENT_INFO), None);
         assert!(float(&records[0], ATailing::INFO).is_some());
+    }
+
+    /// A rerun under the `fgbio` model scores every call from REF, so it
+    /// clears the `PA` an earlier run wrote on each call it scores.
+    #[test]
+    fn test_a_rerun_from_ref_clears_the_parent_allele() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, input, mut table) = parent_allele_fixture(dir.path());
+        let first = dir.path().join("first.vcf");
+        let second = dir.path().join("second.vcf");
+        let end_repair = FilterOptions {
+            filters: vec![FilterKind::EndRepairFillIn],
+            ..FilterOptions::default()
+        };
+        filter_vcf(&input, &first, &mut table, None, &end_repair).unwrap();
+        assert_eq!(
+            characters(&read_records(&first).1[0], PARENT_INFO),
+            Some(vec!['C'])
+        );
+        let fgbio = FilterOptions {
+            filters: vec![FilterKind::ATailing],
+            model: Model::Fgbio,
+            ..FilterOptions::default()
+        };
+        filter_vcf(&first, &second, &mut table, None, &fgbio).unwrap();
+        assert_eq!(characters(&read_records(&second).1[0], PARENT_INFO), None);
+    }
+
+    /// A `PA` declared other than chaff declares it, as by another tool, is
+    /// refused rather than written over, and a copied-damage rerun names
+    /// `CDPW` among the INFO to remove.
+    #[test]
+    fn test_a_foreign_parent_allele_and_an_earlier_weight_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (reference, input, mut table) = parent_allele_fixture(dir.path());
+        let first = dir.path().join("first.vcf");
+        let foreign = dir.path().join("foreign.vcf");
+        let second = dir.path().join("second.vcf");
+        let copied = FilterOptions {
+            filters: vec![FilterKind::CopiedDamage],
+            ..FilterOptions::default()
+        };
+        let mut reference = Reference::open(&reference).unwrap();
+        filter_vcf(&input, &first, &mut table, Some(&mut reference), &copied).unwrap();
+        let error =
+            filter_vcf(&first, &second, &mut table, Some(&mut reference), &copied).unwrap_err();
+        assert!(format!("{error:#}").contains("INFO CDPW"), "{error:#}");
+        let text = std::fs::read_to_string(&first).unwrap();
+        let renamed = text.replace(
+            "The bases the alternate allele may have arisen from",
+            "Another tool's PA",
+        );
+        assert_ne!(text, renamed);
+        std::fs::write(&foreign, renamed).unwrap();
+        let a_tailing = FilterOptions {
+            filters: vec![FilterKind::ATailing],
+            ..FilterOptions::default()
+        };
+        let error = filter_vcf(&foreign, &second, &mut table, None, &a_tailing).unwrap_err();
+        assert!(format!("{error:#}").contains("INFO PA"), "{error:#}");
+        filter_vcf(&first, &second, &mut table, None, &a_tailing).unwrap();
     }
 
     /// Four `C>T` calls at CpG with alternates crowding the 5' end and four

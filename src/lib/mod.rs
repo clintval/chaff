@@ -62,8 +62,8 @@
 //!
 //! Under the `chaff` model the reference molecules are those of the base the
 //! alternate arose from, which is REF unless the sample carries another base
-//! (see [`parent`]). Where REF holds at most 2% of the molecules that are not
-//! alternate and another base holds 10 or more of them, as at a site the
+//! (see [`parent`]). Where REF holds at most 2% of the molecules that hold no
+//! called alternate, or at most 2 of them, and another base holds 10 or more, as at a site the
 //! sample is homozygous for another germline allele at, that base is the
 //! *parent allele*: every filter counts its
 //! molecules as the reference molecules, classes the call from it in the

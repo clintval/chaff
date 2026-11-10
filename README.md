@@ -100,7 +100,7 @@ A-tailing scores those whose alternate base is A or T, and end repair fill-in al
 
 Where the sample does not carry REF, as at a site homozygous for another germline allele, each filter scores the call from the base it does carry: a G>T call on a sample homozygous for C is scored as a C>T.
 Where it carries REF and another base, each filter scores the call from both, weighing each by its molecules and its artifact rate.
-A base other than REF counts on 10 or more molecules and more than 2% of those that are not the alternate, and `PA` lists the bases a call was scored from.
+A base other than REF or a called alternate counts on 10 or more molecules and more than 2% of those holding no called alternate, while REF on 2 or fewer is a stray, and `PA` lists the bases a call was scored from.
 
 ### Copied Damage
 

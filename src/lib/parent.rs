@@ -42,11 +42,16 @@ pub const INFO_WEIGHT: &str = "CDPW";
 /// molecules at a thinly covered site cannot make one.
 pub const MIN_PARENT_MOLECULES: usize = 10;
 
-/// The share of the molecules that are not the alternate base at or below
-/// which REF or another base drops out as a parent, leaving the other alone;
-/// above it both are parents. Two percent sits well above a consensus's
-/// error rate, so a stray molecule of either base makes no parent.
+/// The share of the molecules that hold no called alternate base at or
+/// below which REF or another base drops out as a parent, leaving the other
+/// alone; above it both are parents. Two percent sits well above a
+/// consensus's error rate.
 pub const MIN_ALLELE_SHARE: f64 = 0.02;
+
+/// The most molecules of REF that still drop out as strays beside another
+/// parent, whatever their share, since at a thinly covered site one or two
+/// molecules already pass [`MIN_ALLELE_SHARE`].
+pub const MAX_STRAY_MOLECULES: usize = 2;
 
 /// A base the alternate allele may have arisen from, with its molecules at
 /// the site.
@@ -103,21 +108,23 @@ impl Parents {
     }
 }
 
-/// The bases the alternate allele may have arisen from. Only `A`, `C`, `G`,
-/// and `T` molecules count, and the base other than `alt_base` and `ref_base`
-/// that the most of them hold is the candidate, with [`MIN_PARENT_MOLECULES`]
-/// or more of them. Of the molecules not holding `alt_base`, `ref_base` on at
-/// most [`MIN_ALLELE_SHARE`] leaves the candidate the one parent, in place of
-/// `ref_base`; the candidate on at most that share leaves `ref_base` the one
-/// parent; and both above it are the two parents. A third base takes no part.
-pub fn parents(molecules: &[Molecule], ref_base: u8, alt_base: u8) -> Parents {
+/// The bases the alternate allele may have arisen from, where `alts` are the
+/// sample's called alternate bases. Only `A`, `C`, `G`, and `T` molecules
+/// count, and the base other than `ref_base` and every called alternate that
+/// the most of them hold is the candidate, with [`MIN_PARENT_MOLECULES`] or
+/// more of them. Of the molecules holding no called alternate, `ref_base` on
+/// at most [`MIN_ALLELE_SHARE`] or at most [`MAX_STRAY_MOLECULES`] leaves the
+/// candidate the one parent, in place of `ref_base`; the candidate on at most
+/// that share leaves `ref_base` the one parent; and both above it are the two
+/// parents. A third base takes no part.
+pub fn parents(molecules: &[Molecule], ref_base: u8, alts: &[u8]) -> Parents {
     const BASES: [u8; 4] = *b"ACGT";
     let count = |base: u8| molecules.iter().filter(|m| m.base == base).count();
     let counts = BASES.map(count);
     let others = BASES
         .iter()
         .zip(counts)
-        .filter(|(&base, _)| base != alt_base)
+        .filter(|(base, _)| !alts.contains(base))
         .map(|(_, n)| n)
         .sum::<usize>() as f64;
     let reference = Parent {
@@ -127,7 +134,7 @@ pub fn parents(molecules: &[Molecule], ref_base: u8, alt_base: u8) -> Parents {
     let candidate = BASES
         .iter()
         .zip(counts)
-        .filter(|(&base, _)| base != alt_base && base != ref_base)
+        .filter(|(base, _)| **base != ref_base && !alts.contains(base))
         .max_by_key(|(_, n)| *n)
         .filter(|(_, n)| *n >= MIN_PARENT_MOLECULES);
     let Some((&base, n)) = candidate else {
@@ -138,7 +145,7 @@ pub fn parents(molecules: &[Molecule], ref_base: u8, alt_base: u8) -> Parents {
         molecules: n as u32,
     };
     let (n, r) = (n as f64, f64::from(reference.molecules));
-    if r <= MIN_ALLELE_SHARE * others {
+    if r <= MIN_ALLELE_SHARE * others || reference.molecules as usize <= MAX_STRAY_MOLECULES {
         Parents::Other(other)
     } else if n <= MIN_ALLELE_SHARE * others {
         Parents::Reference(reference)
@@ -149,8 +156,8 @@ pub fn parents(molecules: &[Molecule], ref_base: u8, alt_base: u8) -> Parents {
 
 /// The base standing in place of `ref_base`, where the sample does not carry
 /// it: see [`parents`].
-pub fn parent_allele(molecules: &[Molecule], ref_base: u8, alt_base: u8) -> Option<u8> {
-    parents(molecules, ref_base, alt_base).in_place_of_reference()
+pub fn parent_allele(molecules: &[Molecule], ref_base: u8, alts: &[u8]) -> Option<u8> {
+    parents(molecules, ref_base, alts).in_place_of_reference()
 }
 
 /// One parent's artifact hypothesis as [`combine`] weighs it.
@@ -294,7 +301,7 @@ mod tests {
         #[case] bases: &[(u8, usize)],
         #[case] expected: Option<u8>,
     ) {
-        assert_eq!(parent_allele(&molecules(bases), G, T), expected);
+        assert_eq!(parent_allele(&molecules(bases), G, &[T]), expected);
     }
 
     /// A site carrying REF and another base, each above 2% of the molecules
@@ -314,12 +321,12 @@ mod tests {
         #[case] reference: Parent,
         #[case] other: Parent,
     ) {
-        let found = parents(&molecules(bases), G, T);
+        let found = parents(&molecules(bases), G, &[T]);
         assert_eq!(found, Parents::Both(reference, other));
         assert_eq!(found.each(), [reference, other]);
         assert_eq!(found.other(), Some(other.base));
         assert_eq!(found.in_place_of_reference(), None);
-        assert_eq!(parent_allele(&molecules(bases), G, T), None);
+        assert_eq!(parent_allele(&molecules(bases), G, &[T]), None);
     }
 
     /// At or under 2% of the molecules that are not alternate a base drops
@@ -333,18 +340,18 @@ mod tests {
         #[case] bases: &[(u8, usize)],
         #[case] expected: Parents,
     ) {
-        assert_eq!(parents(&molecules(bases), G, T), expected);
+        assert_eq!(parents(&molecules(bases), G, &[T]), expected);
     }
 
     /// A site homozygous for REF keeps it, whatever else is there.
     #[test]
     fn test_a_site_homozygous_for_ref_keeps_it() {
         assert_eq!(
-            parents(&molecules(&[(G, 183), (T, 2)]), G, T),
+            parents(&molecules(&[(G, 183), (T, 2)]), G, &[T]),
             Parents::Reference(parent(G, 183))
         );
         assert_eq!(
-            parents(&molecules(&[(G, 183), (C, 1), (T, 2)]), G, T),
+            parents(&molecules(&[(G, 183), (C, 1), (T, 2)]), G, &[T]),
             Parents::Reference(parent(G, 183))
         );
     }
@@ -357,7 +364,35 @@ mod tests {
         #[case] bases: &[(u8, usize)],
         #[case] expected: Option<u8>,
     ) {
-        assert_eq!(parents(&molecules(bases), G, T).other(), expected);
+        assert_eq!(parents(&molecules(bases), G, &[T]).other(), expected);
+    }
+
+    /// At a thinly covered site one or two stray REF molecules pass 2% of
+    /// the others but still drop out, leaving the base the sample carries
+    /// alone; a third makes REF a parent beside it.
+    #[rstest]
+    #[case(&[(C, 39), (G, 1), (T, 2)], Parents::Other(parent(C, 39)))]
+    #[case(&[(C, 39), (G, 2), (T, 2)], Parents::Other(parent(C, 39)))]
+    #[case(&[(C, 39), (G, 3), (T, 2)], Parents::Both(parent(G, 3), parent(C, 39)))]
+    fn test_stray_ref_molecules_drop_out_at_low_depth(
+        #[case] bases: &[(u8, usize)],
+        #[case] expected: Parents,
+    ) {
+        assert_eq!(parents(&molecules(bases), G, &[T]), expected);
+    }
+
+    /// A second called alternate is no parent: at a `G>C,T` site called
+    /// `1/2` with no `G`, REF stays the one parent rather than `T`, and the
+    /// `T` molecules count toward no share.
+    #[test]
+    fn test_a_second_called_alternate_is_no_parent() {
+        let bases = molecules(&[(C, 50), (T, 50)]);
+        assert_eq!(
+            parents(&bases, G, &[C, T]),
+            Parents::Reference(parent(G, 0))
+        );
+        let bases = molecules(&[(C, 50), (T, 50), (A, 30)]);
+        assert_eq!(parents(&bases, G, &[C, T]), Parents::Other(parent(A, 30)));
     }
 
     /// Disagreeing mates and deletions are neither allele, so they count
@@ -365,7 +400,7 @@ mod tests {
     #[test]
     fn test_n_and_deletions_do_not_count() {
         let bases = [(C, 20), (b'N', 50), (DELETION, 50), (T, 2)];
-        assert_eq!(parent_allele(&molecules(&bases), G, T), Some(C));
+        assert_eq!(parent_allele(&molecules(&bases), G, &[T]), Some(C));
     }
 
     /// With every molecule alternate, or none at all, no base can be the
@@ -373,10 +408,10 @@ mod tests {
     #[test]
     fn test_no_other_molecules_give_no_parent() {
         assert_eq!(
-            parents(&molecules(&[(T, 100)]), G, T),
+            parents(&molecules(&[(T, 100)]), G, &[T]),
             Parents::Reference(parent(G, 0))
         );
-        assert_eq!(parents(&[], G, T), Parents::Reference(parent(G, 0)));
+        assert_eq!(parents(&[], G, &[T]), Parents::Reference(parent(G, 0)));
     }
 
     /// The parent is read from the molecules, whatever REF and ALT are, so a
@@ -385,7 +420,7 @@ mod tests {
     #[test]
     fn test_the_parent_can_be_any_base_but_ref_and_alt() {
         assert_eq!(
-            parent_allele(&molecules(&[(G, 300), (A, 2), (T, 2)]), A, T),
+            parent_allele(&molecules(&[(G, 300), (A, 2), (T, 2)]), A, &[T]),
             Some(G)
         );
     }
