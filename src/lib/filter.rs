@@ -3363,7 +3363,6 @@ mod tests {
             },
             end_repair_fill_in: EndRepairFillIn {
                 distance: Distance::Learned,
-                ..EndRepairFillIn::default()
             },
             ..FilterOptions::default()
         };
