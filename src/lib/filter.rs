@@ -414,7 +414,7 @@ pub struct Hypothesis {
     /// in a profiled stratum, whichever prior the posterior used.
     pub chance_prior: Option<f64>,
     /// The hypothesis's weight among the call's parents, once known: its
-    /// molecules times its prior over their sum.
+    /// molecules times its prior odds over their sum.
     pub weight: Option<f64>,
 }
 
@@ -681,7 +681,7 @@ fn score_call(
         .count() as u32;
     let fgbio_prior = fgbio_artifact_prior(
         count(alt_base),
-        parents.each()[0].molecules,
+        parents.first().molecules,
         molecules.len() as u32,
     );
 
@@ -743,7 +743,6 @@ fn score_call(
     for kind in kinds {
         let hypotheses: Vec<Hypothesis> = parents
             .each()
-            .into_iter()
             .map(|parent| hypothesis(kind, parent))
             .collect();
         if hypotheses.iter().any(|h| h.stratum.is_some()) {
@@ -962,16 +961,21 @@ fn assign_posteriors(
         let (kind, depth, changes) = (annotation.kind, annotation.depth, annotation.changes);
         let fgbio_prior = annotation.fgbio_prior;
         let beyond_chance = changes < MIN_CHANCE_CHANGES || germline(changes, depth);
+        let in_play =
+            |h: &Hypothesis| h.stratum.is_none() || h.score.log_likelihood_ratio.is_some();
         let total: f64 = annotation
             .hypotheses
             .iter()
+            .filter(|h| in_play(h))
             .map(|h| f64::from(h.molecules))
             .sum();
-        let parents = annotation.hypotheses.len() as f64;
+        let parents = annotation.hypotheses.iter().filter(|h| in_play(h)).count() as f64;
         let mut took_chance = false;
         let mut weighed = Vec::with_capacity(annotation.hypotheses.len());
         for hypothesis in annotation.hypotheses.iter_mut() {
-            let share = if total > 0.0 {
+            let share = if !in_play(hypothesis) {
+                0.0
+            } else if total > 0.0 {
                 f64::from(hypothesis.molecules) / total
             } else {
                 1.0 / parents
@@ -2651,6 +2655,50 @@ mod tests {
         assert!(priors[2] > priors[1], "{priors:?}");
     }
 
+    /// A parent whose change the filter scores but whose evidence gives no
+    /// ratio drops out of the weighing rather than counting as a parent that
+    /// can only have given a mutation, so the other parent's prior is not
+    /// diluted by its molecules.
+    #[test]
+    fn test_a_parent_without_a_ratio_drops_out_of_the_weighing() {
+        let hypothesis = |parent, ratio| Hypothesis {
+            parent,
+            molecules: 100,
+            stratum: Some(format!("{}>T", parent as char)),
+            score: Score {
+                log_likelihood_ratio: ratio,
+                alt_molecules: 2,
+                ..Score::default()
+            },
+            distances: None,
+            prior: None,
+            chance_prior: None,
+            weight: None,
+        };
+        let mut calls = vec![vec![Annotation {
+            kind: FilterKind::EndRepairFillIn,
+            hypotheses: vec![hypothesis(b'G', None), hypothesis(b'C', Some(1.5))],
+            fgbio_prior: 0.5,
+            ratio: None,
+            posterior: None,
+            depth: 202,
+            changes: 2,
+            parents: Some(vec![b'G', b'C']),
+        }]];
+        assign_posteriors(
+            &mut calls,
+            Model::Chaff,
+            CopiedDamagePrior::Learned,
+            &BTreeMap::new(),
+        );
+        let annotation = &calls[0][0];
+        let scored = &annotation.hypotheses[1];
+        assert_eq!(annotation.hypotheses[0].weight, Some(0.0));
+        assert_eq!(scored.weight, Some(1.0));
+        let expected = posterior_mutation(1.5, scored.prior.unwrap());
+        assert_eq!(annotation.posterior, Some(expected));
+    }
+
     /// A call's chance prior counts every alternate molecule with a base at
     /// the quality floor, as the library profile does, including those whose
     /// distances are unknown and that the copied-damage score leaves out, so
@@ -3253,7 +3301,21 @@ mod tests {
         let shared = &records[8];
         assert_eq!(characters(shared, PARENT_INFO), Some(vec!['G', 'C']));
         let weight = float(shared, WEIGHT_INFO).unwrap();
-        assert!(weight > 0.6 && weight < 1.0, "{weight}");
+        let odds = |stratum: &str| {
+            let row = rows
+                .iter()
+                .find(|r| r.filter == "copied-damage" && r.stratum == stratum)
+                .unwrap();
+            let fraction = row.artifact_fraction.unwrap();
+            fraction / (1.0 - fraction)
+        };
+        let (other, reference) = (150.0 * odds("C>T:CpG"), 100.0 * odds("G>T:non-CpG"));
+        let expected = other / (other + reference);
+        assert!(
+            (f64::from(weight) - expected).abs() <= 5e-4,
+            "{weight} vs {expected}"
+        );
+        assert!(expected > 0.6, "{expected}");
         assert!(float(shared, CopiedDamage::INFO_POSTERIOR).unwrap() < 0.05);
         assert!(shared.filters().as_ref().contains(CopiedDamage::FILTER));
         assert_eq!(

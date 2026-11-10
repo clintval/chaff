@@ -76,10 +76,21 @@ pub enum Parents {
 
 impl Parents {
     /// Each parent, REF first where the sample carries it.
-    pub fn each(&self) -> Vec<Parent> {
-        match self {
-            Parents::Reference(parent) | Parents::Other(parent) => vec![*parent],
-            Parents::Both(reference, other) => vec![*reference, *other],
+    pub fn each(&self) -> impl Iterator<Item = Parent> {
+        let (first, second) = match *self {
+            Parents::Reference(parent) | Parents::Other(parent) => (parent, None),
+            Parents::Both(reference, other) => (reference, Some(other)),
+        };
+        std::iter::once(first).chain(second)
+    }
+
+    /// The first parent: REF where the sample carries it, else the base in
+    /// its place.
+    pub fn first(&self) -> Parent {
+        match *self {
+            Parents::Reference(parent) | Parents::Other(parent) | Parents::Both(parent, _) => {
+                parent
+            }
         }
     }
 
@@ -95,7 +106,7 @@ impl Parents {
     /// carries it, or none where REF is the one parent.
     pub fn bases(&self) -> Option<Vec<u8>> {
         self.other()
-            .map(|_| self.each().iter().map(|parent| parent.base).collect())
+            .map(|_| self.each().map(|parent| parent.base).collect())
     }
 
     /// The base standing in place of REF, where the sample does not carry
@@ -112,7 +123,8 @@ impl Parents {
 /// sample's called alternate bases. Only `A`, `C`, `G`, and `T` molecules
 /// count, and the base other than `ref_base` and every called alternate that
 /// the most of them hold is the candidate, with [`MIN_PARENT_MOLECULES`] or
-/// more of them. Of the molecules holding no called alternate, `ref_base` on
+/// more of them; a tie for the most makes no candidate, since which base the
+/// sample carries is then unclear. Of the molecules holding no called alternate, `ref_base` on
 /// at most [`MIN_ALLELE_SHARE`] or at most [`MAX_STRAY_MOLECULES`] leaves the
 /// candidate the one parent, in place of `ref_base`; the candidate on at most
 /// that share leaves `ref_base` the one parent; and both above it are the two
@@ -131,15 +143,19 @@ pub fn parents(molecules: &[Molecule], ref_base: u8, alts: &[u8]) -> Parents {
         base: ref_base,
         molecules: count(ref_base) as u32,
     };
-    let candidate = BASES
-        .iter()
+    let candidates: Vec<(u8, usize)> = BASES
+        .into_iter()
         .zip(counts)
-        .filter(|(base, _)| **base != ref_base && !alts.contains(base))
-        .max_by_key(|(_, n)| *n)
-        .filter(|(_, n)| *n >= MIN_PARENT_MOLECULES);
-    let Some((&base, n)) = candidate else {
+        .filter(|(base, _)| *base != ref_base && !alts.contains(base))
+        .collect();
+    let most = candidates.iter().map(|(_, n)| *n).max().unwrap_or(0);
+    let mut top = candidates.into_iter().filter(|(_, n)| *n == most);
+    let (Some((base, n)), None) = (top.next(), top.next()) else {
         return Parents::Reference(reference);
     };
+    if n < MIN_PARENT_MOLECULES {
+        return Parents::Reference(reference);
+    }
     let other = Parent {
         base,
         molecules: n as u32,
@@ -152,12 +168,6 @@ pub fn parents(molecules: &[Molecule], ref_base: u8, alts: &[u8]) -> Parents {
     } else {
         Parents::Both(reference, other)
     }
-}
-
-/// The base standing in place of `ref_base`, where the sample does not carry
-/// it: see [`parents`].
-pub fn parent_allele(molecules: &[Molecule], ref_base: u8, alts: &[u8]) -> Option<u8> {
-    parents(molecules, ref_base, alts).in_place_of_reference()
 }
 
 /// One parent's artifact hypothesis as [`combine`] weighs it.
@@ -285,6 +295,12 @@ mod tests {
             .collect()
     }
 
+    /// The base standing in place of `ref_base`, where the sample does not
+    /// carry it.
+    fn parent_allele(molecules: &[Molecule], ref_base: u8, alts: &[u8]) -> Option<u8> {
+        parents(molecules, ref_base, alts).in_place_of_reference()
+    }
+
     fn parent(base: u8, molecules: u32) -> Parent {
         Parent { base, molecules }
     }
@@ -323,7 +339,8 @@ mod tests {
     ) {
         let found = parents(&molecules(bases), G, &[T]);
         assert_eq!(found, Parents::Both(reference, other));
-        assert_eq!(found.each(), [reference, other]);
+        assert_eq!(found.each().collect::<Vec<_>>(), [reference, other]);
+        assert_eq!(found.first(), reference);
         assert_eq!(found.other(), Some(other.base));
         assert_eq!(found.in_place_of_reference(), None);
         assert_eq!(parent_allele(&molecules(bases), G, &[T]), None);
@@ -393,6 +410,14 @@ mod tests {
         );
         let bases = molecules(&[(C, 50), (T, 50), (A, 30)]);
         assert_eq!(parents(&bases, G, &[C, T]), Parents::Other(parent(A, 30)));
+    }
+
+    /// Two bases tied for the most molecules leave which one the sample
+    /// carries unclear, so REF stays the one parent.
+    #[test]
+    fn test_a_tie_for_the_candidate_keeps_ref() {
+        let bases = molecules(&[(A, 50), (C, 50), (T, 2)]);
+        assert_eq!(parents(&bases, G, &[T]), Parents::Reference(parent(G, 0)));
     }
 
     /// Disagreeing mates and deletions are neither allele, so they count
