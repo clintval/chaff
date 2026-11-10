@@ -924,3 +924,84 @@ fn run_with_metrics(
         .collect();
     (read_vcf(&output).1, rows)
 }
+
+/// A `G>T` call where every read holds `C`, the sample being homozygous for
+/// it, but for a few `T` reads whose templates start at the site: under the
+/// `chaff` model copied damage classes the call from the `C` molecules, a
+/// `C>T` at the CpG the next reference base makes, filters it, and names the
+/// base in `PA`; under `--model fgbio` the call keeps REF and, with no `G`
+/// molecule, no posterior.
+#[test]
+fn test_a_call_is_scored_from_the_base_the_reads_carry_in_place_of_ref() {
+    use chaff::copied_damage::CopiedDamage;
+    use chaff::model::Distance;
+    use chaff::parent;
+    use chaff::testing::write_fasta;
+    use noodles::vcf::variant::record_buf::info::field::value::Array;
+
+    let dir = TempDir::new().unwrap();
+    let reference = write_fasta(dir.path(), "chr1", &"AAAATGGA".repeat(250));
+    let mut vcf = VcfBuilder::new(&["tumor"]);
+    vcf.add(Variant::new(1006, &["G", "T"], vec![gt("tumor", "0/1")]));
+    let input = vcf.write(&dir.path().join("calls.vcf"));
+    let mut reads = SamBuilder::new().read_length(RLEN).base_quality(40);
+    for start in 967..=1006 {
+        for _ in 1..=3 {
+            reads.add_pair(Pair::filled(start, start + RLEN, 'C', RLEN));
+            reads.add_pair(Pair::filled(start - RLEN, start, 'C', RLEN));
+        }
+    }
+    for start in 1002..=1006 {
+        reads.add_pair(Pair::filled(start, start + RLEN, 'T', RLEN));
+    }
+    for model in [Model::Chaff, Model::Fgbio] {
+        let output = dir.path().join("filtered.vcf");
+        let args = FilterArgs {
+            input: input.clone(),
+            output: output.clone(),
+            bam: PathBuf::from("reads.bam"),
+            reference: Some(reference.clone()),
+            metrics: None,
+            spectrum: None,
+            pileup: PileupOptions::default(),
+            options: FilterOptions {
+                filters: vec![FilterKind::CopiedDamage],
+                model,
+                copied_damage: CopiedDamage {
+                    distance: Distance::Bases(30.0),
+                    ..CopiedDamage::default()
+                },
+                copied_damage_threshold: Some(0.05),
+                ..FilterOptions::default()
+            },
+        };
+        run_filter_on(&args, reads.to_pileup_builder()).unwrap();
+        let (header, records) = read_vcf(&output);
+        let record = &records[0];
+        let parent = match record.info().get(parent::INFO) {
+            Some(Some(Value::Character(c))) => Some(*c),
+            _ => None,
+        };
+        let counts = |key: &str| match record.info().get(key) {
+            Some(Some(Value::Array(Array::Integer(values)))) => values.clone(),
+            _ => Vec::new(),
+        };
+        match model {
+            Model::Chaff => {
+                assert!(header.infos().contains_key(parent::INFO));
+                assert_eq!(parent, Some('C'));
+                assert!(float(record, CopiedDamage::INFO_POSTERIOR).unwrap() < 0.05);
+                assert!(has_filter(record, CopiedDamage::FILTER));
+                assert_eq!(counts(CopiedDamage::INFO_ALT), [Some(5), Some(5)]);
+                assert_eq!(counts(CopiedDamage::INFO_REF), [Some(90), Some(240)]);
+            }
+            Model::Fgbio => {
+                assert!(!header.infos().contains_key(parent::INFO));
+                assert_eq!(parent, None);
+                assert_eq!(float(record, CopiedDamage::INFO_POSTERIOR), None);
+                assert!(!has_filter(record, CopiedDamage::FILTER));
+                assert_eq!(counts(CopiedDamage::INFO_REF), [Some(0), Some(0)]);
+            }
+        }
+    }
+}

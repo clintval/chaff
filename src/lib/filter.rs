@@ -31,6 +31,9 @@ use crate::evidence::{Evidence, Molecule, PendingLibrary, PileupEvidence, Pileup
 use crate::io::{add_filter, add_info, significant, vcf_float, VariantReader, VariantWriter};
 use crate::metrics::{null_fraction, write_metrics, StratumMetrics};
 use crate::model::{CopiedDamagePrior, Distance, Model};
+use crate::parent::{
+    parent_allele, INFO as PARENT_INFO, MAX_REFERENCE_SHARE, MIN_PARENT_MOLECULES, MIN_PARENT_SHARE,
+};
 use crate::prior::{
     fgbio_artifact_prior, learn_artifact_fraction, learn_scale, posterior_mutation, BetaPrior,
     FILTER_PRIOR, STRATUM_PRIOR_STRENGTH,
@@ -208,6 +211,12 @@ impl FilterOptions {
         self.model == Model::Chaff && self.enabled(FilterKind::CopiedDamage)
     }
 
+    /// Whether a call can be scored from its parent allele in place of REF:
+    /// under the `chaff` model, when any filter runs.
+    fn takes_parent(&self) -> bool {
+        self.model == Model::Chaff && !self.filters.is_empty()
+    }
+
     fn threshold_text(&self, kind: FilterKind) -> String {
         match kind.threshold(self) {
             Some(t) => format!("at or below a posterior of {t}"),
@@ -233,6 +242,19 @@ impl FilterOptions {
             };
             format!("a {} bp decay{learned} from {end}", significant(scale, 3))
         };
+        if self.takes_parent() {
+            add_info(
+                header,
+                PARENT_INFO,
+                Number::Count(1),
+                Type::Character,
+                &format!(
+                    "The base the alternate allele arose from, in place of REF, where the sample does not carry REF: the one base held by at least {}% of the molecules that are not the alternate, {MIN_PARENT_MOLECULES} or more of them, with REF on at most {}%; the filters count its molecules as the reference molecules and class the call from it.",
+                    (100.0 * MIN_PARENT_SHARE).round(),
+                    (100.0 * MAX_REFERENCE_SHARE).round()
+                ),
+            );
+        }
         if self.enabled(FilterKind::CopiedDamage) {
             let classes: Vec<String> = self
                 .copied_damage
@@ -389,6 +411,9 @@ pub struct Annotation {
     /// Those whose base is the alternate allele, as a library profile counts
     /// a position's changes, whether or not the filter measures them.
     pub changes: u32,
+    /// The base the call was scored from in place of REF, where the sample
+    /// does not carry REF (see [`crate::parent`]).
+    pub parent: Option<u8>,
 }
 
 /// The index of the sample under test, resolved as fgbio does: the named
@@ -499,7 +524,8 @@ fn snv_context(
 }
 
 /// Score one call, with its reference context when known, under every enabled
-/// filter that applies to it.
+/// filter that applies to it, from its parent allele in place of REF where
+/// the sample does not carry REF, returning the annotations and that allele.
 fn score_call(
     gt: &Genotype,
     contig: &str,
@@ -508,20 +534,20 @@ fn score_call(
     evidence: &mut dyn Evidence,
     context: Option<(Option<u8>, u8, Option<u8>)>,
     cache: &mut Option<((String, usize), Vec<Molecule>)>,
-) -> Result<Vec<Annotation>> {
+) -> Result<(Vec<Annotation>, Option<u8>)> {
     let kinds: Vec<FilterKind> = FilterKind::ALL
         .into_iter()
         .filter(|k| options.enabled(*k) && k.applies_to(gt))
         .collect();
     let (Some(ref_allele), Some(alt_allele)) = (gt.reference().bytes().next(), gt.first_alt())
     else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     };
     let Some(alt_allele) = alt_allele.bytes().next() else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     };
     if kinds.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
     let (ref_base, alt_base) = (
         ref_allele.to_ascii_uppercase(),
@@ -536,6 +562,12 @@ fn score_call(
         *cache = Some((key, molecules));
     }
     let molecules = &cache.as_ref().expect("filled above").1;
+    let parent = options
+        .takes_parent()
+        .then(|| parent_allele(molecules, ref_base, alt_base))
+        .flatten();
+    let ref_base = parent.unwrap_or(ref_base);
+    let context = context.map(|(prev, base, next)| (prev, parent.unwrap_or(base), next));
     let count = |base: u8| molecules.iter().filter(|m| m.base == base).count() as u32;
     let depth = molecules
         .iter()
@@ -599,10 +631,11 @@ fn score_call(
                 chance_prior: None,
                 depth,
                 changes: count(alt_base),
+                parent,
             });
         }
     }
-    Ok(annotations)
+    Ok((annotations, parent))
 }
 
 /// The distance each filter scored with, in bases: a decay's scale, learned
@@ -816,6 +849,12 @@ fn assign_posteriors(
 /// Write one call's annotations into its record.
 fn annotate_record(record: &mut RecordBuf, annotations: &[Annotation], options: &FilterOptions) {
     let mut new_filters = Vec::new();
+    if let Some(parent) = annotations.iter().find_map(|a| a.parent) {
+        record.info_mut().insert(
+            PARENT_INFO.to_string(),
+            Some(Value::Character(parent as char)),
+        );
+    }
     for annotation in annotations {
         let (kind, score) = (annotation.kind, &annotation.score);
         let info = record.info_mut();
@@ -942,14 +981,15 @@ pub fn filter_vcf_report(
             }
             _ => None,
         };
+        let (annotations, parent) =
+            score_call(&gt, &contig, pos, options, evidence, context, &mut cache)?;
         channels.push(
             bases
                 .zip(context)
                 .and_then(|((_, alt_base), (prev, base, next))| {
-                    channel(prev, base, alt_base, next)
+                    channel(prev, parent.unwrap_or(base), alt_base, next)
                 }),
         );
-        let annotations = score_call(&gt, &contig, pos, options, evidence, context, &mut cache)?;
         if annotations.is_empty() {
             *skipped.entry(Skip::NoFilter).or_default() += 1;
         }
@@ -1051,6 +1091,16 @@ fn log_scored(sample: &str, calls: &[Vec<Annotation>], skipped: &BTreeMap<Skip, 
             "skipped {}: {}",
             plural(*count as usize, "call"),
             skip.reason()
+        );
+    }
+    let parented = calls
+        .iter()
+        .filter(|a| a.iter().any(|a| a.parent.is_some()))
+        .count();
+    if parented > 0 {
+        info!(
+            "scored {} from the base the sample carries in place of REF ({PARENT_INFO})",
+            plural(parented, "call")
         );
     }
     if scored == 0 {
@@ -2358,6 +2408,7 @@ mod tests {
             chance_prior: None,
             depth,
             changes: 2,
+            parent: None,
         };
         let mut calls = vec![vec![call(200)], vec![call(2000)], vec![call(8000)]];
         assign_posteriors(
@@ -2590,6 +2641,187 @@ mod tests {
                 (_, passing) => panic!("{threshold:?} {passing:?}"),
             }
         }
+    }
+
+    /// A reference `G` between a `T` and a `G`, on a sample homozygous for
+    /// `C` there, with alternate `T` molecules crowding the `C` strand's 5'
+    /// end, and a heterozygous `G/C` site beside it with the same alternates.
+    fn parent_allele_fixture(dir: &Path) -> (PathBuf, PathBuf, MoleculeTable) {
+        let reference = write_fasta(dir, "chr1", &"AAAATGGA".repeat(250));
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(1006, &["G", "T"], vec![gt("tumor", "0/1")]));
+        vcf.add(Variant::new(1007, &["G", "T"], vec![gt("tumor", "0/1")]));
+        let input = vcf.write(&dir.join("in.vcf"));
+        let mut table = MoleculeTable::new();
+        let at = |base, d| Molecule::new(base, 90, d, 149 - d);
+        let mut homozygous: Vec<Molecule> = (0..150).map(|d| at(b'C', d)).collect();
+        homozygous.extend((0..6).map(|d| at(b'T', d)));
+        table.insert("chr1", 1006, homozygous);
+        let mut heterozygous: Vec<Molecule> = (0..150).map(|d| at(b'C', d)).collect();
+        heterozygous.extend((0..150).map(|d| at(b'G', d)));
+        heterozygous.extend((0..6).map(|d| at(b'T', d)));
+        table.insert("chr1", 1007, heterozygous);
+        (reference, input, table)
+    }
+
+    fn character(record: &RecordBuf, key: &str) -> Option<char> {
+        match record.info().get(key) {
+            Some(Some(Value::Character(c))) => Some(*c),
+            _ => None,
+        }
+    }
+
+    /// A `G>T` call on a sample homozygous for `C` is a `C>T` at a CpG,
+    /// scored against the `C` molecules and named by `PA`, while the
+    /// heterozygous site beside it keeps REF and its `G>T` class.
+    #[test]
+    fn test_a_call_is_scored_from_the_base_the_sample_carries_in_place_of_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let (reference, input, mut table) = parent_allele_fixture(dir.path());
+        let output = dir.path().join("out.vcf");
+        let options = FilterOptions {
+            filters: vec![FilterKind::CopiedDamage, FilterKind::EndRepairFillIn],
+            copied_damage: CopiedDamage {
+                distance: Distance::Bases(30.0),
+                ..CopiedDamage::default()
+            },
+            copied_damage_threshold: Some(0.05),
+            ..FilterOptions::default()
+        };
+        let mut reference = Reference::open(&reference).unwrap();
+        let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
+
+        let (header, records) = read_records(&output);
+        assert!(header.infos().contains_key(PARENT_INFO));
+        let (homozygous, heterozygous) = (&records[0], &records[1]);
+        assert_eq!(character(homozygous, PARENT_INFO), Some('C'));
+        assert_eq!(character(heterozygous, PARENT_INFO), None);
+        assert!(float(homozygous, CopiedDamage::INFO_POSTERIOR).unwrap() < 0.05);
+        assert!(homozygous.filters().as_ref().contains(CopiedDamage::FILTER));
+        assert_eq!(
+            homozygous.info().get(CopiedDamage::INFO_REF),
+            Some(Some(&Value::Array(Array::Integer(vec![
+                Some(30),
+                Some(150)
+            ]))))
+        );
+        assert_eq!(
+            heterozygous.info().get(CopiedDamage::INFO_REF),
+            Some(Some(&Value::Array(Array::Integer(vec![
+                Some(30),
+                Some(150)
+            ]))))
+        );
+        assert!(float(homozygous, EndRepairFillIn::INFO).is_some());
+
+        let calls = |filter: &str, stratum: &str| {
+            rows.iter()
+                .find(|r| r.filter == filter && r.stratum == stratum)
+                .map(|r| r.calls)
+                .unwrap()
+        };
+        assert_eq!(calls("copied-damage", "C>T:CpG"), 1);
+        assert_eq!(calls("copied-damage", "G>T:non-CpG"), 1);
+        assert_eq!(calls("end-repair-fill-in", "C>T"), 1);
+        assert_eq!(calls("end-repair-fill-in", "C>A"), 1);
+    }
+
+    /// The `fgbio` model scores every call from REF, as fgbio does, so the
+    /// same call has no reference molecules, no posterior, and no `PA`.
+    #[test]
+    fn test_the_fgbio_model_keeps_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let (reference, input, mut table) = parent_allele_fixture(dir.path());
+        let output = dir.path().join("out.vcf");
+        let options = FilterOptions {
+            filters: vec![FilterKind::CopiedDamage],
+            model: Model::Fgbio,
+            copied_damage: CopiedDamage {
+                distance: Distance::Bases(30.0),
+                ..CopiedDamage::default()
+            },
+            ..FilterOptions::default()
+        };
+        let mut reference = Reference::open(&reference).unwrap();
+        let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
+        let (header, records) = read_records(&output);
+        assert!(!header.infos().contains_key(PARENT_INFO));
+        assert_eq!(character(&records[0], PARENT_INFO), None);
+        assert_eq!(float(&records[0], CopiedDamage::INFO_POSTERIOR), None);
+        assert_eq!(
+            records[0].info().get(CopiedDamage::INFO_REF),
+            Some(Some(&Value::Array(Array::Integer(vec![Some(0), Some(0)]))))
+        );
+        let strata: Vec<(&str, u64)> = rows.iter().map(|r| (r.stratum.as_str(), r.calls)).collect();
+        assert_eq!(
+            strata,
+            [
+                ("C>T:CpG", 0),
+                ("C>T:non-CpG", 0),
+                ("G>T:CpG", 0),
+                ("G>T:non-CpG", 2)
+            ]
+        );
+    }
+
+    /// The spectrum counts a call scored from its parent allele in that
+    /// base's channel: the `T[C]G` C>T of the homozygous site, where the
+    /// heterozygous `G>T` between `G` and `A` reads as a C>A at `T[C]C`.
+    #[test]
+    fn test_the_spectrum_counts_a_call_in_its_parent_allele_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let (reference, input, mut table) = parent_allele_fixture(dir.path());
+        let output = dir.path().join("out.vcf");
+        let options = FilterOptions {
+            filters: vec![FilterKind::CopiedDamage],
+            copied_damage: CopiedDamage {
+                distance: Distance::Bases(30.0),
+                ..CopiedDamage::default()
+            },
+            ..FilterOptions::default()
+        };
+        let mut reference = Reference::open(&reference).unwrap();
+        let report = filter_vcf_report(
+            &input,
+            &output,
+            &mut table,
+            Some(&mut reference),
+            &options,
+            true,
+            false,
+        )
+        .unwrap();
+        let spectrum = report.spectrum.unwrap();
+        let (tcg, tcc) = (16 * 2 + 4 * 3 + 2, 4 * 3 + 1);
+        assert_eq!(spectrum.before.iter().sum::<f64>(), 2.0);
+        assert_eq!((spectrum.before[tcg], spectrum.before[tcc]), (1.0, 1.0));
+    }
+
+    /// `PA` describes the molecules, not a filter, so a later run of another
+    /// filter on a run's output is not refused for it and writes the same
+    /// base again.
+    #[test]
+    fn test_a_later_run_keeps_the_parent_allele() {
+        let dir = tempfile::tempdir().unwrap();
+        let (reference, input, mut table) = parent_allele_fixture(dir.path());
+        let first = dir.path().join("first.vcf");
+        let second = dir.path().join("second.vcf");
+        let options = FilterOptions {
+            filters: vec![FilterKind::EndRepairFillIn],
+            ..FilterOptions::default()
+        };
+        let mut reference = Reference::open(&reference).unwrap();
+        filter_vcf(&input, &first, &mut table, Some(&mut reference), &options).unwrap();
+        let again = FilterOptions {
+            filters: vec![FilterKind::ATailing],
+            ..FilterOptions::default()
+        };
+        filter_vcf(&first, &second, &mut table, None, &again).unwrap();
+        let (header, records) = read_records(&second);
+        assert!(header.infos().contains_key(PARENT_INFO));
+        assert_eq!(character(&records[0], PARENT_INFO), Some('C'));
+        assert_eq!(character(&records[1], PARENT_INFO), None);
+        assert!(float(&records[0], ATailing::INFO).is_some());
     }
 
     #[test]

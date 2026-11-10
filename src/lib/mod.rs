@@ -58,6 +58,21 @@
 //! A-tailing call without one under the `chaff` model, which would otherwise
 //! take its prior alone.
 //!
+//! ## The parent allele
+//!
+//! Under the `chaff` model the reference molecules are those of the base the
+//! alternate arose from, which is REF unless the sample does not carry REF
+//! (see [`parent`]). Where one base other than the alternate holds at least
+//! 95% of the molecules that are not alternate, 10 or more of them, with REF
+//! on at most 2%, as at a site the sample is homozygous for another germline
+//! allele at, that base is the *parent allele*: every filter counts its
+//! molecules as the reference molecules, classes the call from it in the
+//! reference neighbours' context, learns its strata from that class, and the
+//! spectrum counts the call in that class's channel. The call's `PA` names
+//! the base. A heterozygous site keeps REF, since the alternate's parent
+//! there is unknown. The library's single-strand profile (see [`simplex`])
+//! still reads every position's base from the reference.
+//!
 //! ## Priors and posteriors
 //!
 //! The posterior probability of a real mutation is `σ(-(l_i + logit π))` for
@@ -172,6 +187,9 @@
 //!   alternate allele under either model; fgbio scores only called
 //!   heterozygous genotypes, so `--model fgbio` writes values on such a call
 //!   where fgbio writes none.
+//! - **The parent allele.** Under the `chaff` model a call at a site the
+//!   sample does not carry REF at is scored from the base it does carry (see
+//!   [`parent`]); `--model fgbio` scores every call from REF, as fgbio does.
 //! - **Streaming.** The BAM is always streamed, never queried by index.
 //! - **Number format.** Values keep htsjdk's rounding but are written in
 //!   decimal: `0.00003218` for fgbio's `3.218e-05`.
@@ -185,6 +203,7 @@ pub mod filter;
 pub mod io;
 pub mod metrics;
 pub mod model;
+pub mod parent;
 pub mod prior;
 pub mod read_end;
 pub mod reference;

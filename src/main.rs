@@ -60,9 +60,10 @@ pub(crate) const CARGO_STYLING: Styles = Styles::styled()
 /// somatic calls and the coordinate-sorted BAM of one of its samples,
 /// merge-joins them without an index, and scores each SNV whose genotype is
 /// heterozygous or missing by where its alternate molecules sit compared with
-/// the reference molecules at the same site; homozygous, haploid, and indel
-/// calls pass unscored. It writes the calls with INFO annotations and, past a
-/// threshold, FILTERs.
+/// the reference molecules at the same site, or, where the sample does not
+/// carry REF, the molecules of the base it does carry (INFO PA); homozygous,
+/// haploid, and indel calls pass unscored. It writes the calls with INFO
+/// annotations and, past a threshold, FILTERs.
 ///
 /// MENTAL MODEL
 ///
