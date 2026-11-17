@@ -41,7 +41,7 @@ env_logger = "0.11"
 kuva = { version = "0.6.0", features = ["pdf"] }
 log = "0.4"
 mimalloc = "0.1"
-noodles = { version = "0.116", features = ["bam", "bcf", "bgzf", "core", "fasta", "sam", "vcf"] }
+noodles = { version = "0.116", features = ["bam", "bcf", "bgzf", "core", "csi", "fasta", "sam", "tabix", "vcf"] }
 noodles-bgzf = { version = "0.51", features = ["libdeflate"] }
 serde = { version = "1", features = ["derive"] }
 streampile = "0.2"

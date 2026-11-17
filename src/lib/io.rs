@@ -1,5 +1,7 @@
 //! VCF and BCF reading and writing, header lines, and value formatting.
 
+use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -7,9 +9,16 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use noodles::bcf;
 use noodles::bgzf;
+use noodles::core::Position;
+use noodles::csi;
+use noodles::csi::binning_index::index::reference_sequence::bin::Chunk;
+use noodles::csi::binning_index::index::reference_sequence::index::BinnedIndex;
+use noodles::tabix;
 use noodles::vcf;
 use noodles::vcf::header::record::value::map::info::{Number, Type};
 use noodles::vcf::header::record::value::map::{Filter, Info, Map};
+use noodles::vcf::header::string_maps::ContigStringMap;
+use noodles::vcf::header::StringMaps;
 use noodles::vcf::variant::io::Write as _;
 use noodles::vcf::variant::record_buf::samples::sample::Value as SampleValue;
 use noodles::vcf::variant::record_buf::samples::Keys;
@@ -167,6 +176,7 @@ impl StagedFile {
 pub struct VariantWriter {
     stream: Stream,
     staged: Option<StagedFile>,
+    index: Option<RecordIndex>,
 }
 
 /// The record stream of a [`VariantWriter`], by format.
@@ -174,6 +184,143 @@ enum Stream {
     Vcf(vcf::io::Writer<BufWriter<Box<dyn Write>>>),
     VcfGz(vcf::io::Writer<bgzf::io::Writer<Box<dyn Write>>>),
     Bcf(Box<bcf::io::Writer<bgzf::io::Writer<Box<dyn Write>>>>),
+}
+
+impl Stream {
+    /// The BGZF virtual position the next write starts at, `None` for plain VCF.
+    fn virtual_position(&self) -> Option<bgzf::VirtualPosition> {
+        match self {
+            Stream::Vcf(_) => None,
+            Stream::VcfGz(w) => Some(w.get_ref().virtual_position()),
+            Stream::Bcf(w) => Some(w.get_ref().virtual_position()),
+        }
+    }
+}
+
+/// The index of a BGZF output, built from each record's span and the virtual
+/// positions around it as the record is written.
+struct RecordIndex {
+    path: PathBuf,
+    indexer: Indexer,
+    start: bgzf::VirtualPosition,
+    last: Option<(usize, Position, String)>,
+}
+
+/// A tabix indexer, its contigs numbered as they appear, or a CSI indexer, its
+/// contigs numbered as the BCF header numbers them, with the header's count.
+enum Indexer {
+    Tabix(tabix::index::Indexer, HashMap<String, usize>),
+    Csi(
+        csi::binning_index::Indexer<BinnedIndex>,
+        ContigStringMap,
+        usize,
+    ),
+}
+
+impl RecordIndex {
+    /// An index of `path` in `format` at its usual path beside it, `None` for
+    /// plain VCF.
+    fn of(path: &Path, format: Format) -> Option<Self> {
+        let (indexer, extension) = match format {
+            Format::Vcf => return None,
+            Format::VcfGz => {
+                let mut indexer = tabix::index::Indexer::default();
+                indexer.set_header(csi::binning_index::index::header::Builder::vcf().build());
+                (Indexer::Tabix(indexer, HashMap::new()), ".tbi")
+            }
+            Format::Bcf => (
+                Indexer::Csi(Default::default(), Default::default(), 0),
+                ".csi",
+            ),
+        };
+        let mut name = OsString::from(path);
+        name.push(extension);
+        Some(Self {
+            path: name.into(),
+            indexer,
+            start: bgzf::VirtualPosition::default(),
+            last: None,
+        })
+    }
+
+    /// Take the BCF contig numbering from the header.
+    fn set_header(&mut self, header: &vcf::Header) -> io::Result<()> {
+        if let Indexer::Csi(_, contigs, count) = &mut self.indexer {
+            *contigs = StringMaps::try_from(header)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?
+                .contigs()
+                .clone();
+            *count = header.contigs().len();
+        }
+        Ok(())
+    }
+
+    /// Add a record written between `self.start` and `end`, refusing one that
+    /// steps backwards in coordinate order.
+    fn add(
+        &mut self,
+        header: &vcf::Header,
+        record: &RecordBuf,
+        end: bgzf::VirtualPosition,
+    ) -> io::Result<()> {
+        let invalid = |message: String| io::Error::new(io::ErrorKind::InvalidData, message);
+        let contig = record.reference_sequence_name();
+        let start = record.variant_start().ok_or_else(|| {
+            invalid(format!(
+                "cannot index a record on {contig} without a position"
+            ))
+        })?;
+        let id = match &mut self.indexer {
+            Indexer::Tabix(_, ids) => match ids.get(contig) {
+                Some(&id) => id,
+                None => {
+                    let id = ids.len();
+                    ids.insert(contig.to_string(), id);
+                    id
+                }
+            },
+            Indexer::Csi(_, contigs, _) => contigs.get_index_of(contig).ok_or_else(|| {
+                invalid(format!(
+                    "cannot index contig {contig}: it is not in the header"
+                ))
+            })?,
+        };
+        match &mut self.last {
+            Some((last_id, last_start, last_contig)) if (id, start) < (*last_id, *last_start) => {
+                return Err(invalid(format!(
+                    "cannot index the output, which is not coordinate sorted: {contig}:{start} follows {last_contig}:{last_start}"
+                )));
+            }
+            Some((last_id, last_start, _)) if *last_id == id => *last_start = start,
+            _ => self.last = Some((id, start, contig.to_string())),
+        }
+        let stop = vcf::variant::Record::variant_end(record, header)?;
+        let chunk = Chunk::new(self.start, end);
+        self.start = end;
+        match &mut self.indexer {
+            Indexer::Tabix(indexer, _) => indexer.add_record(contig, start, stop, chunk),
+            Indexer::Csi(indexer, _, _) => indexer.add_record(Some((id, start, stop, true)), chunk),
+        }
+    }
+
+    /// Write the index to a file staged beside its path.
+    fn write(self) -> Result<StagedFile> {
+        let staged = StagedFile::create(&self.path)?;
+        let file = staged.writer()?;
+        match self.indexer {
+            Indexer::Tabix(indexer, _) => {
+                let mut writer = tabix::io::Writer::new(file);
+                writer.write_index(&indexer.build())?;
+                writer.into_inner().finish()?.flush()?;
+            }
+            Indexer::Csi(indexer, _, count) => {
+                let mut writer = csi::io::Writer::new(file);
+                writer.write_index(&indexer.build(count))?;
+                writer.into_inner().finish()?.flush()?;
+            }
+        }
+        Ok(staged)
+    }
 }
 
 impl VariantWriter {
@@ -187,19 +334,23 @@ impl VariantWriter {
         Self {
             stream,
             staged: None,
+            index: None,
         }
     }
 
     /// Create a VCF or BCF by its extension, staged beside it until
-    /// [`finish`](Self::finish); `-` writes VCF to standard output.
+    /// [`finish`](Self::finish), with a tabix index for BGZF VCF and a CSI
+    /// index for BCF; `-` writes VCF to standard output.
     pub fn create(path: &Path) -> Result<Self> {
         if path == Path::new("-") {
             return Ok(Self::new(Box::new(io::stdout()), Format::Vcf));
         }
+        let format = Format::of(path);
         let staged = StagedFile::create(path)?;
-        let writer = Self::new(Box::new(staged.writer()?), Format::of(path));
+        let writer = Self::new(Box::new(staged.writer()?), format);
         Ok(Self {
             staged: Some(staged),
+            index: RecordIndex::of(path, format),
             ..writer
         })
     }
@@ -210,7 +361,12 @@ impl VariantWriter {
             Stream::Vcf(w) => w.write_header(header),
             Stream::VcfGz(w) => w.write_header(header),
             Stream::Bcf(w) => w.write_header(header),
+        }?;
+        if let (Some(index), Some(start)) = (&mut self.index, self.stream.virtual_position()) {
+            index.set_header(header)?;
+            index.start = start;
         }
+        Ok(())
     }
 
     /// Write one record, a sample whose every field is missing as `.`.
@@ -221,19 +377,27 @@ impl VariantWriter {
             Stream::Vcf(w) => w.write_variant_record(header, record),
             Stream::VcfGz(w) => w.write_variant_record(header, record),
             Stream::Bcf(w) => w.write_variant_record(header, record),
+        }?;
+        match (&mut self.index, self.stream.virtual_position()) {
+            (Some(index), Some(end)) => index.add(header, record, end),
+            _ => Ok(()),
         }
     }
 
     /// Flush and close the stream, finishing any BGZF blocks, and move a staged
-    /// file onto its path.
+    /// file onto its path, then its index beside it.
     pub fn finish(self) -> Result<()> {
         match self.stream {
             Stream::Vcf(w) => w.into_inner().flush(),
             Stream::VcfGz(w) => w.into_inner().finish()?.flush(),
             Stream::Bcf(w) => w.into_inner().finish()?.flush(),
         }?;
-        match self.staged {
-            Some(staged) => staged.persist(),
+        let index = self.index.map(RecordIndex::write).transpose()?;
+        if let Some(staged) = self.staged {
+            staged.persist()?;
+        }
+        match index {
+            Some(index) => index.persist(),
             None => Ok(()),
         }
     }
@@ -443,6 +607,97 @@ mod tests {
         }
         let text = std::fs::read_to_string(dir.path().join("out.vcf")).unwrap();
         assert!(text.ends_with("\tGT\t.\t0/1\n"), "{text}");
+    }
+
+    /// Write `sites` as records under a header of chr1 and chr2.
+    fn write_sites(path: &Path, sites: &[(&str, usize)]) -> Result<()> {
+        let header: vcf::Header = "##fileformat=VCFv4.2\n\
+             ##contig=<ID=chr1,length=1000>\n##contig=<ID=chr2,length=1000>\n\
+             #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+            .parse()?;
+        let mut writer = VariantWriter::create(path)?;
+        writer.write_header(&header)?;
+        for &(contig, pos) in sites {
+            let record = RecordBuf::builder()
+                .set_reference_sequence_name(contig)
+                .set_variant_start(Position::try_from(pos)?)
+                .set_reference_bases("G")
+                .build();
+            writer.write_record(&header, &record)?;
+        }
+        writer.finish()
+    }
+
+    #[test]
+    fn test_compressed_output_is_indexed_for_region_queries() {
+        use noodles::core::Region;
+        let dir = tempfile::tempdir().unwrap();
+        let sites = [("chr1", 10), ("chr1", 20), ("chr1", 900), ("chr2", 5)];
+        let region = |text: &str| -> Region { text.parse().unwrap() };
+
+        let path = dir.path().join("out.vcf.gz");
+        write_sites(&path, &sites).unwrap();
+        let index = tabix::fs::read(dir.path().join("out.vcf.gz.tbi")).unwrap();
+        let mut reader = vcf::io::indexed_reader::Builder::default()
+            .set_index(index)
+            .build_from_path(&path)
+            .unwrap();
+        let header = reader.read_header().unwrap();
+        for (query, expected) in [("chr1:15-100", vec![20]), ("chr2", vec![5])] {
+            let starts: Vec<usize> = reader
+                .query(&header, &region(query))
+                .unwrap()
+                .records()
+                .map(|r| r.unwrap().variant_start().unwrap().unwrap().get())
+                .collect();
+            assert_eq!(starts, expected, "{query}");
+        }
+
+        let path = dir.path().join("out.bcf");
+        write_sites(&path, &sites).unwrap();
+        let index = csi::fs::read(dir.path().join("out.bcf.csi")).unwrap();
+        let mut reader = bcf::io::indexed_reader::Builder::default()
+            .set_index(index)
+            .build_from_path(&path)
+            .unwrap();
+        let header = reader.read_header().unwrap();
+        for (query, expected) in [("chr1:15-100", vec![20]), ("chr2", vec![5])] {
+            let starts: Vec<usize> = reader
+                .query(&header, &region(query))
+                .unwrap()
+                .records()
+                .map(|r| r.unwrap().variant_start().unwrap().unwrap().get())
+                .collect();
+            assert_eq!(starts, expected, "{query}");
+        }
+    }
+
+    #[test]
+    fn test_plain_and_standard_output_are_not_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.vcf");
+        write_sites(&path, &[("chr1", 10)]).unwrap();
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert!(VariantWriter::create(Path::new("-"))
+            .unwrap()
+            .index
+            .is_none());
+    }
+
+    #[test]
+    fn test_unsorted_compressed_output_is_refused_and_left_unwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["out.vcf.gz", "out.bcf"] {
+            let path = dir.path().join(name);
+            for sites in [
+                &[("chr1", 20), ("chr1", 10)][..],
+                &[("chr1", 10), ("chr2", 5), ("chr1", 20)],
+            ] {
+                let error = write_sites(&path, sites).unwrap_err().to_string();
+                assert!(error.contains("not coordinate sorted"), "{name}: {error}");
+            }
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]
