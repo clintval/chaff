@@ -205,6 +205,12 @@
 //!   alternate allele under either model; fgbio scores only called
 //!   heterozygous genotypes, so `--model fgbio` writes values on such a call
 //!   where fgbio writes none.
+//! - **Pooled samples.** With `--pooled`, or a VCF without samples, the BAM
+//!   is one sample, labelled `pooled`: every SNV is scored as a missing
+//!   genotype against all its molecules, whatever the VCF's genotypes, and
+//!   every sample column is written back as it was. This suits many samples
+//!   that share one library and one BAM and each carry too few molecules at
+//!   a site to score alone. fgbio needs one sample.
 //! - **The parent allele.** Under the `chaff` model a call at a site the
 //!   sample carries another base at, in place of REF or beside it, is scored
 //!   from that base, alone or weighed against REF (see [`parent`]);

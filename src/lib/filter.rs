@@ -159,8 +159,12 @@ impl fmt::Display for FilterKind {
 /// How calls are scored and filtered.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FilterOptions {
-    /// The sample the BAM holds; required with several samples.
+    /// The sample the BAM holds; required with several samples unless
+    /// `pooled` is set.
     pub sample: Option<String>,
+    /// Score every SNV against the whole BAM as one pooled sample, whatever
+    /// the genotypes of the VCF's samples.
+    pub pooled: bool,
     /// The filters to run.
     pub filters: Vec<FilterKind>,
     /// The model: its prior and the shape of its distance models.
@@ -183,6 +187,7 @@ impl Default for FilterOptions {
     fn default() -> Self {
         Self {
             sample: None,
+            pooled: false,
             filters: FilterKind::ALL.to_vec(),
             model: Model::Chaff,
             copied_damage: CopiedDamage::default(),
@@ -491,22 +496,32 @@ impl Annotation {
     }
 }
 
-/// The index of the sample under test, resolved as fgbio does: the named
-/// sample, or the only sample when none is named.
-pub fn resolve_sample(header: &vcf::Header, sample: Option<&str>) -> Result<(usize, String)> {
+/// The sample label of a pooled run in the metrics, the spectrum, and the log.
+pub const POOLED_SAMPLE: &str = "pooled";
+
+/// The index and label of the sample under test, resolved as fgbio does: the
+/// named sample, or the only sample when none is named. A pooled run, or a
+/// VCF/BCF without samples, has no index and the label [`POOLED_SAMPLE`].
+pub fn resolve_sample(
+    header: &vcf::Header,
+    sample: Option<&str>,
+    pooled: bool,
+) -> Result<(Option<usize>, String)> {
     let names = header.sample_names();
-    match sample {
-        Some(name) => match names.get_index_of(name) {
-            Some(i) => Ok((i, name.to_string())),
+    match (sample, pooled) {
+        (Some(_), true) => bail!("--sample and --pooled cannot be used together"),
+        (None, true) => Ok((None, POOLED_SAMPLE.to_string())),
+        (Some(name), false) => match names.get_index_of(name) {
+            Some(i) => Ok((Some(i), name.to_string())),
             None => {
                 bail!("there is no genotype with the following sample in the input VCF/BCF: {name}")
             }
         },
-        None => match names.len() {
-            1 => Ok((0, names[0].clone())),
-            0 => bail!("the input VCF/BCF has no samples"),
+        (None, false) => match names.len() {
+            1 => Ok((Some(0), names[0].clone())),
+            0 => Ok((None, POOLED_SAMPLE.to_string())),
             n => bail!(
-                "the input VCF/BCF has {n} samples, so --sample must name the one the BAM holds"
+                "the input VCF/BCF has {n} samples, so --sample must name the one the BAM holds, or --pooled must score every call against the whole BAM"
             ),
         },
     }
@@ -1160,7 +1175,16 @@ pub fn filter_vcf_report(
     let header = reader
         .read_header()
         .context("failed to read the VCF/BCF header")?;
-    let (sample_index, sample) = resolve_sample(&header, options.sample.as_deref())?;
+    let (sample_index, sample) =
+        resolve_sample(&header, options.sample.as_deref(), options.pooled)?;
+    if sample_index.is_none() {
+        let why = if options.pooled {
+            "--pooled is set"
+        } else {
+            "the input VCF/BCF has no samples"
+        };
+        info!("scoring every SNV against the whole BAM as one sample, {sample}, heterozygous for REF and its first alternate allele, since {why}");
+    }
     refuse_earlier_annotations(&header, options)?;
     let mut order = CoordinateOrder::new(&header);
     let mut cache = None;
@@ -1610,9 +1634,19 @@ mod tests {
         let path = VcfBuilder::new(&["tumor", "normal"]).write(&dir.path().join("a.vcf"));
         let mut reader = VariantReader::open(&path).unwrap();
         let header = reader.read_header().unwrap();
-        assert_eq!(resolve_sample(&header, Some("normal")).unwrap().0, 1);
-        assert!(resolve_sample(&header, None).is_err());
-        assert!(resolve_sample(&header, Some("WhoDis")).is_err());
+        assert_eq!(
+            resolve_sample(&header, Some("normal"), false).unwrap(),
+            (Some(1), "normal".to_string())
+        );
+        assert!(resolve_sample(&header, None, false).is_err());
+        assert!(resolve_sample(&header, Some("WhoDis"), false).is_err());
+        let pooled = (None, POOLED_SAMPLE.to_string());
+        assert_eq!(resolve_sample(&header, None, true).unwrap(), pooled);
+        assert!(resolve_sample(&header, Some("tumor"), true).is_err());
+        let path = VcfBuilder::new(&[]).write(&dir.path().join("b.vcf"));
+        let header = VariantReader::open(&path).unwrap().read_header().unwrap();
+        assert_eq!(resolve_sample(&header, None, false).unwrap(), pooled);
+        assert!(resolve_sample(&header, Some("tumor"), false).is_err());
     }
 
     #[test]
