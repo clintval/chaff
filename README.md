@@ -368,7 +368,7 @@ The tool learns per sample how common each artifact is and how far it reaches, s
 | Option&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | Sets |
 | --- | --- |
 | `--input` | The coordinate-sorted VCF or BCF of somatic calls, read twice, so a file and never standard input (short `-i`; required). |
-| `--output` | The output VCF or BCF, its format set by its extension: `.vcf`, `.vcf.gz`, `.bcf`, or `-` for plain VCF to standard output (short `-o`; required). |
+| `--output` | The output VCF or BCF, its format set by its extension: `.vcf`, `.vcf.gz`, `.bcf`, or `-` for plain VCF to standard output; a `.vcf.gz` gets a tabix index beside it, at `.vcf.gz.tbi`, and a `.bcf` a CSI index, at `.bcf.csi` (short `-o`; required). |
 | `--bam` | The coordinate-sorted BAM of the sample, reads or consensus, with no index needed; distances from template ends count template bases through both mates' CIGARs, so each mate of a pair on one contig needs its mate's CIGAR in its `MC` tag, and the insert size is never read (short `-b`; required). |
 | `--ref` | The reference FASTA, with its `.fai`, for CpG context, which the copied-damage filter and `--spectrum` need; giving it with neither is an error (short `-r`). |
 | `--sample` | The sample the BAM holds, required when the VCF has more than one (short `-s`). |
@@ -389,6 +389,7 @@ The tool learns per sample how common each artifact is and how far it reaches, s
 | `--a-tailing-threshold` | Apply `ATailingArtifact` at or below this posterior (default none). |
 
 The VCF/BCF and the BAM must be coordinate sorted, with their contigs in the same order, and need no index; the FASTA needs a `.fai`.
+A compressed output is indexed as it is written, so it needs no `bcftools index` afterwards.
 Each template counts once, and a read or consensus whose mate maps to the same contig needs the mate's CIGAR in its `MC` tag.
 Both ends of a template are measured for an FR pair, whose forward mate starts at or before its reverse mate's 5′ end, and for an unpaired duplex consensus, from its outermost bases; a mate of any other pair knows only its own end.
 An option of a filter that `--filters` leaves out is a usage error, and so are `--ref` without `copied-damage` or `--spectrum`, and `--copied-damage-prior` or `--end-repair-fill-in-distance learned` typed under `--model fgbio`.

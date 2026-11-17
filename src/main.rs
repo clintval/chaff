@@ -130,11 +130,12 @@ struct Cli {
     #[arg(short = 'i', long, value_name = "VCF", value_parser = file, verbatim_doc_comment)]
     input: PathBuf,
 
-    /// Output VCF/BCF; the format follows the extension.
+    /// Output VCF/BCF; the format follows the extension, and a compressed
+    /// file is indexed beside it.
     ///
     ///   out.vcf      plain VCF
-    ///   out.vcf.gz   BGZF-compressed VCF
-    ///   out.bcf      BCF
+    ///   out.vcf.gz   BGZF-compressed VCF, with a tabix index (out.vcf.gz.tbi)
+    ///   out.bcf      BCF, with a CSI index (out.bcf.csi)
     ///   -            plain VCF to standard output
     #[arg(short = 'o', long, value_name = "VCF", verbatim_doc_comment)]
     output: PathBuf,

@@ -1357,8 +1357,10 @@ dependencies = [
  "noodles-bcf",
  "noodles-bgzf",
  "noodles-core",
+ "noodles-csi",
  "noodles-fasta",
  "noodles-sam",
+ "noodles-tabix",
  "noodles-vcf",
 ]
 
