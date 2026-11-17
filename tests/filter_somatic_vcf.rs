@@ -1076,3 +1076,130 @@ fn test_a_call_is_scored_from_both_bases_the_reads_carry() {
     assert_eq!(counts(CopiedDamage::INFO_ALT), [Some(5), Some(5)]);
     assert_eq!(counts(CopiedDamage::INFO_REF)[1], Some(240));
 }
+
+/// The shared VCF's five calls on `samples`, none of them heterozygous, so a
+/// run scoring any one sample would score none.
+fn samples_vcf(dir: &Path, samples: &[&str]) -> PathBuf {
+    let calls = ["0/0", "1/1", "./.", "1"];
+    let gts = || {
+        samples
+            .iter()
+            .zip(calls.iter().cycle())
+            .map(|(sample, call)| gt(sample, call))
+            .collect::<Vec<_>>()
+    };
+    let mut builder = VcfBuilder::new(samples);
+    for (pos, alleles) in [
+        (100, ["C", "A"]),
+        (200, ["G", "A"]),
+        (300, ["AAA", "A"]),
+        (400, ["A", "T"]),
+        (500, ["C", "G"]),
+    ] {
+        builder.add(Variant::new(pos, &alleles, gts()));
+    }
+    builder.write(&dir.join("samples.vcf"))
+}
+
+/// Run on `input` with a metrics TSV, returning the records and the metrics'
+/// sample column.
+fn run_for_metrics_samples(
+    dir: &TempDir,
+    input: &Path,
+    options: FilterOptions,
+) -> anyhow::Result<(Vec<RecordBuf>, Vec<String>)> {
+    let output = dir.path().join("filtered.vcf");
+    let metrics = dir.path().join("metrics.tsv");
+    let args = FilterArgs {
+        input: input.to_path_buf(),
+        output: output.clone(),
+        bam: PathBuf::from("reads.bam"),
+        reference: None,
+        metrics: Some(metrics.clone()),
+        spectrum: None,
+        pileup: PileupOptions::default(),
+        options,
+    };
+    run_filter_on(&args, tumor_bam().to_pileup_builder())?;
+    let samples = std::fs::read_to_string(&metrics)?
+        .lines()
+        .skip(1)
+        .map(|line| line.split('\t').next().unwrap().to_string())
+        .collect();
+    Ok((read_vcf(&output).1, samples))
+}
+
+/// A pooled run scores every SNV of a VCF of many samples, whatever their
+/// genotypes, with the values a run on one heterozygous sample writes, and
+/// writes every sample column back as it was.
+#[test]
+fn test_pooled_scores_every_snv_of_many_samples_and_keeps_their_columns() {
+    for model in [Model::Fgbio, Model::Chaff] {
+        let dir = TempDir::new().unwrap();
+        let (tumor, _) = tumor_vcfs(dir.path());
+        let single = run(&dir, &tumor, &tumor_bam(), options(None, model)).unwrap();
+        let input = samples_vcf(
+            dir.path(),
+            &["sample1", "sample2", "sample3", "sample4", "sample5"],
+        );
+        let pooled = FilterOptions {
+            pooled: true,
+            ..options(None, model)
+        };
+        let (records, samples) = run_for_metrics_samples(&dir, &input, pooled).unwrap();
+        assert_annotated_as_fgbio(&records);
+        for (pooled, single) in records.iter().zip(&single) {
+            assert_eq!(pooled.info(), single.info());
+        }
+        let (header, original) = read_vcf(&input);
+        let (out_header, _) = read_vcf(&dir.path().join("filtered.vcf"));
+        assert_eq!(out_header.sample_names(), header.sample_names());
+        for (record, original) in records.iter().zip(&original) {
+            assert_eq!(record.samples(), original.samples());
+        }
+        assert!(!samples.is_empty());
+        assert!(
+            samples.iter().all(|sample| sample == "pooled"),
+            "{samples:?}"
+        );
+    }
+}
+
+/// A VCF without samples is scored as one pooled sample, unasked.
+#[test]
+fn test_a_vcf_without_samples_is_scored_as_one_pooled_sample() {
+    let dir = TempDir::new().unwrap();
+    let (tumor, _) = tumor_vcfs(dir.path());
+    let single = run(&dir, &tumor, &tumor_bam(), options(None, Model::Fgbio)).unwrap();
+    let input = samples_vcf(dir.path(), &[]);
+    let (records, samples) =
+        run_for_metrics_samples(&dir, &input, options(None, Model::Fgbio)).unwrap();
+    assert_annotated_as_fgbio(&records);
+    for (pooled, single) in records.iter().zip(&single) {
+        assert_eq!(pooled.info(), single.info());
+        assert!(pooled.samples().values().next().is_none());
+    }
+    assert!(
+        samples.iter().all(|sample| sample == "pooled"),
+        "{samples:?}"
+    );
+}
+
+/// Without --pooled a VCF of many samples needs --sample, and the two cannot
+/// be used together.
+#[test]
+fn test_pooled_is_needed_for_many_samples_and_conflicts_with_a_sample() {
+    let dir = TempDir::new().unwrap();
+    let input = samples_vcf(dir.path(), &["sample1", "sample2"]);
+    let error = run(&dir, &input, &tumor_bam(), fgbio_options()).unwrap_err();
+    assert!(error.to_string().contains("or --pooled"), "{error}");
+    let both = FilterOptions {
+        pooled: true,
+        ..options(Some("sample1"), Model::Chaff)
+    };
+    let error = run(&dir, &input, &tumor_bam(), both).unwrap_err();
+    assert!(
+        error.to_string().contains("--sample and --pooled"),
+        "{error}"
+    );
+}

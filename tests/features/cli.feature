@@ -133,3 +133,27 @@ Feature: CLI contract
     When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --sample tumor --filters a-tailing --ref ref.fa --spectrum spectrum.pdf`
     Then the exit code is 0
     And the file "spectrum.pdf" is a PDF
+
+  Scenario: --pooled scores a multi-sample VCF as one sample and keeps its columns
+    When I run `chaff -i calls.vcf -o - -b sorted.bam --pooled --filters a-tailing`
+    Then the exit code is 0
+    And stdout contains "chr1\t100\t.\tC\tA\t.\tPASS\t.\tGT\t0/1\t0/0"
+    And stderr contains "as one sample, pooled"
+
+  Scenario: --pooled cannot be used with --sample
+    When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --pooled --sample tumor --filters a-tailing`
+    Then the exit code is 2
+    And stderr contains "the argument '--pooled' cannot be used with '--sample <NAME>'"
+
+  Scenario: a VCF without samples is scored as one pooled sample
+    Given a file "sites.vcf" containing:
+      """
+      ##fileformat=VCFv4.2
+      ##contig=<ID=chr1,length=1000>
+      #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO
+      chr1\t100\t.\tC\tA\t.\tPASS\t.
+      """
+    When I run `chaff -i sites.vcf -o - -b sorted.bam --filters a-tailing`
+    Then the exit code is 0
+    And stdout contains "chr1\t100\t.\tC\tA\t.\tPASS\t."
+    And stderr contains "the input VCF/BCF has no samples"

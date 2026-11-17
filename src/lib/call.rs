@@ -84,11 +84,13 @@ impl Genotype {
     ///
     /// A heterozygous SNV is scored as called. A genotype that calls no
     /// allele, `.` or no `GT` at all, as many somatic callers write, is scored
-    /// as heterozygous for the reference and the first alternate allele. A
-    /// genotype calling only the reference, or only one alternate allele, or
-    /// one allele beside a no-call, is not: the filters compare alternate
-    /// molecules with the reference molecules of the sample at the site.
-    pub fn scored(record: &RecordBuf, sample_index: usize) -> Result<Self, Skip> {
+    /// as heterozygous for the reference and the first alternate allele, and
+    /// so is every record when `sample_index` is `None`, as a pooled run
+    /// scores it. A genotype calling only the reference, or only one
+    /// alternate allele, or one allele beside a no-call, is not: the filters
+    /// compare alternate molecules with the reference molecules of the sample
+    /// at the site.
+    pub fn scored(record: &RecordBuf, sample_index: Option<usize>) -> Result<Self, Skip> {
         let missing = |alleles: Vec<String>| {
             let alt = alleles[1..]
                 .iter()
@@ -100,7 +102,7 @@ impl Genotype {
                 alleles,
             })
         };
-        let gt = match Self::from_record(record, sample_index) {
+        let gt = match sample_index.and_then(|i| Self::from_record(record, i)) {
             Some(gt) if gt.called().next().is_some() => gt,
             Some(gt) => missing(gt.alleles)?,
             None => {
@@ -234,7 +236,7 @@ mod tests {
         ];
         let scored: Vec<Result<Option<String>, Skip>> = records(&lines)
             .iter()
-            .map(|r| Genotype::scored(r, 0).map(|gt| gt.first_alt().map(String::from)))
+            .map(|r| Genotype::scored(r, Some(0)).map(|gt| gt.first_alt().map(String::from)))
             .collect();
         let alt = |a: &str| Ok(Some(a.to_string()));
         assert_eq!(
@@ -256,6 +258,40 @@ mod tests {
                 Err(Skip::PartlyCalled),
                 alt("T"),
                 alt("T"),
+            ]
+        );
+    }
+
+    /// Without a sample every SNV is scored as heterozygous for its first
+    /// alternate allele, whatever its genotype, and only non-SNVs are not.
+    #[test]
+    fn test_every_snv_is_scored_without_a_sample() {
+        let lines = [
+            "chr1\t10\t.\tC\tT\t.\t.\t.\tGT\t0/1",
+            "chr1\t11\t.\tC\tT\t.\t.\t.\tGT\t1/1",
+            "chr1\t12\t.\tC\tT\t.\t.\t.\tGT\t0/0",
+            "chr1\t13\t.\tC\tT\t.\t.\t.\tGT\t1",
+            "chr1\t14\t.\tC\tT\t.\t.\t.\tGT\t./1",
+            "chr1\t15\t.\tC\t*,A\t.\t.\t.\tGT\t0/1",
+            "chr1\t16\t.\tCT\tC\t.\t.\t.\tGT\t0/1",
+            "chr1\t17\t.\tC\t*\t.\t.\t.\tGT\t0/1",
+        ];
+        let scored: Vec<Result<Vec<String>, Skip>> = records(&lines)
+            .iter()
+            .map(|r| Genotype::scored(r, None).map(|gt| gt.calls))
+            .collect();
+        let het = |a: &str| Ok(vec!["C".to_string(), a.to_string()]);
+        assert_eq!(
+            scored,
+            [
+                het("T"),
+                het("T"),
+                het("T"),
+                het("T"),
+                het("T"),
+                het("A"),
+                Err(Skip::NotSnv),
+                Err(Skip::NotSnv),
             ]
         );
     }

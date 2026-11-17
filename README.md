@@ -67,6 +67,34 @@ Its strands each rest on one raw read, below the single-strand floor of 2, so th
 
 Every filter runs and only annotates by default; a threshold makes it filter, as [Setting and Tuning](#setting-and-tuning) describes.
 
+## One Library, Many Samples
+
+Some runs call variants for many samples into one VCF with a column for each sample, from one BAM that contains every sample's molecules.
+An artifact belongs to the library rather than to a sample, and when each sample has only one or two molecules at a site, too few to score alone, `--pooled` scores each SNV once against every molecule in the BAM, as one sample.
+Each SNV is scored as heterozygous for REF and its first alternate allele, whatever its genotypes, and written back with every sample column as it was, its INFO annotations and FILTERs added as usual; the metrics and the spectrum label the sample `pooled`.
+A VCF without samples, such as a sites-only VCF, is scored the same way without the option, which cannot be combined with `--sample`.
+Here the two samples of the test VCF are scored as one pool, the `normal` column's `0/0` kept beside the `tumor` column's `0/1`:
+
+```console
+chaff \
+    --input tests/data/calls.vcf \
+    --bam tests/data/tumor.bam \
+    --ref tests/data/ref.fa \
+    --pooled \
+    --copied-damage-threshold 0.05 \
+    --metrics pooled.chaff.tsv \
+    --output calls.pooled.vcf.gz
+gzip -dc calls.pooled.vcf.gz | grep -v '^#' | cut -f 2,4,5,7,10,11 | column -t
+```
+
+```text
+100  C    A  CopiedDamageArtifact  0/1  0/0
+200  G    A  .                     0/1  0/0
+300  AAA  A  .                     0/1  0/0
+400  A    T  .                     0/1  0/0
+500  C    G  .                     0/1  0/0
+```
+
 ## How DNA Damage Becomes a Variant Call
 
 A *template* is one DNA fragment as its two mates, reads or consensus, hold it, counted as one *molecule*, and its *template ends* are its outermost bases, the 5′ ends of its two strands.
@@ -94,7 +122,7 @@ Each filter models one library-preparation step that leaves an artifact near a k
 ![One fragment with the end each artifact sits near: copied damage, a methylated C deaminated to T and its copy, near the lesion strand's 5′ end, end repair fill-in errors in the new bases near the extended strand's 3′ end, and an A that fills a base end repair removed at the last base of a 3′ end.](.github/img/reference-points.svg)
 
 The length a polymerase fills in varies from fragment to fragment, so the evidence for copied damage and end repair fill-in fades with distance from the end, by an exponential *decay* whose *scale*, the mean fill-in length, is learned per sample, while A-tailing changes only the last base of a 3′ end and is scored within a 2 bp window.
-The filters score SNVs whose genotype is heterozygous, or missing as many somatic callers write it; homozygous, haploid, and indel calls pass unscored, since the filters weigh alternate molecules against the sample's reference molecules at the site.
+The filters score SNVs whose genotype is heterozygous, or missing as many somatic callers write it, and every SNV of a [pooled run](#one-library-many-samples); indels, and homozygous and haploid calls outside a pooled run, pass unscored, since the filters weigh alternate molecules against the sample's reference molecules at the site.
 Copied damage scores the SNVs in its damage classes on either strand: C>T covers C>T and G>A calls, and G>T covers G>T and C>A calls.
 A-tailing scores those whose alternate base is A or T, and end repair fill-in all of them.
 
@@ -371,7 +399,8 @@ The tool learns per sample how common each artifact is and how far it reaches, s
 | `--output` | The output VCF or BCF, its format set by its extension: `.vcf`, `.vcf.gz`, `.bcf`, or `-` for plain VCF to standard output (short `-o`; required). |
 | `--bam` | The coordinate-sorted BAM of the sample, reads or consensus, with no index needed; distances from template ends count template bases through both mates' CIGARs, so each mate of a pair on one contig needs its mate's CIGAR in its `MC` tag, and the insert size is never read (short `-b`; required). |
 | `--ref` | The reference FASTA, with its `.fai`, for CpG context, which the copied-damage filter and `--spectrum` need; giving it with neither is an error (short `-r`). |
-| `--sample` | The sample the BAM holds, required when the VCF has more than one (short `-s`). |
+| `--sample` | The sample the BAM holds, required when the VCF has more than one unless `--pooled` is given (short `-s`). |
+| `--pooled` | Score every SNV against the whole BAM as one sample, labelled `pooled`, whatever its genotypes, and write every sample column back as it was, for many samples that share one library and one BAM; a VCF without samples is scored this way unasked, and `--sample` cannot be combined with it (default off). |
 | `--metrics` | The per-sample metrics TSV, one row per filter and stratum (default none). |
 | `--spectrum` | A PDF of the sample's SNVs by trinucleotide context, before and after filtering, its panels on one scale: every heterozygous SNV, whatever its FILTER, in the channel of the base it was scored from; the expected real SNVs, each weighed by the product of its posteriors from the filters `--filters` enables; and, when a filter has a threshold, the SNVs no filter flagged (default none). |
 | `--min-mapping-quality` | The minimum mapping quality of a read or consensus (short `-m`; default 20). |

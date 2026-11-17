@@ -65,6 +65,10 @@ pub(crate) const CARGO_STYLING: Styles = Styles::styled()
 /// PA); homozygous, haploid, and indel calls pass unscored. It writes the
 /// calls with INFO annotations and, past a threshold, FILTERs.
 ///
+/// With --pooled, or a VCF/BCF without samples, the BAM is one pooled sample:
+/// every SNV is scored against all its molecules, whatever the genotypes, as
+/// for many samples that share one library and one BAM.
+///
 /// MENTAL MODEL
 ///
 ///  1. Each template covering a call is one molecule; mates count once
@@ -113,6 +117,11 @@ pub(crate) const CARGO_STYLING: Styles = Styles::styled()
 ///
 ///   chaff -i calls.vcf -b tumor.bam -o out.vcf --model fgbio \
 ///       --filters end-repair-fill-in,a-tailing
+///
+///  4. Score many samples' calls once each against all their molecules:
+///
+///   chaff -i calls.vcf.gz -b pooled.bam -r ref.fa --pooled \
+///       -o calls.chaff.vcf.gz --metrics pooled.chaff.tsv
 #[derive(Debug, Parser)]
 #[command(
     author,
@@ -157,9 +166,21 @@ struct Cli {
 
     /// The sample the BAM holds.
     ///
-    /// Required when the VCF has more than one sample.
+    /// Required when the VCF has more than one sample, unless --pooled.
     #[arg(short = 's', long, value_name = "NAME", verbatim_doc_comment)]
     sample: Option<String>,
+
+    /// Score every SNV against the whole BAM as one pooled sample.
+    ///
+    /// Each SNV is scored as heterozygous for REF and its first alternate
+    /// allele, whatever its genotypes, and written with every sample column
+    /// as it was. Use it when many samples share one library and one BAM,
+    /// where an artifact belongs to the library and each sample holds too few
+    /// molecules to score alone. The
+    /// metrics and the spectrum label the sample `pooled`. A VCF/BCF without
+    /// samples is scored this way unasked.
+    #[arg(long, conflicts_with = "sample", verbatim_doc_comment)]
+    pooled: bool,
 
     /// Per-sample metrics TSV: one row per filter and stratum.
     #[arg(long, value_name = "TSV", value_parser = report_file, verbatim_doc_comment)]
@@ -465,6 +486,7 @@ impl Cli {
     fn into_args(self) -> FilterArgs {
         let options = FilterOptions {
             sample: self.sample,
+            pooled: self.pooled,
             filters: self.filters,
             model: self.model,
             copied_damage: CopiedDamage {
@@ -883,6 +905,21 @@ mod tests {
             error.to_string().contains("needs '--model chaff'"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn test_pooled_with_a_sample_is_a_usage_error() {
+        let filters = ["--filters", "a-tailing"];
+        let error = args(&[&filters[..], &["--pooled", "--sample", "tumor"]].concat()).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+        assert_eq!(error.exit_code(), 2);
+        let message = "the argument '--pooled' cannot be used with '--sample <NAME>'";
+        assert!(error.to_string().contains(message), "{error}");
+        let options = args(&[&filters[..], &["--pooled"]].concat())
+            .unwrap()
+            .options;
+        assert!(options.pooled);
+        assert_eq!(options.sample, None);
     }
 
     #[test]
