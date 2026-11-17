@@ -7,7 +7,7 @@
 //! posterior is known, so the VCF is read twice: once to score the calls and
 //! once to write them.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1433,6 +1433,14 @@ fn metrics_rows(
     chances: &BTreeMap<String, Chance>,
 ) -> Vec<StratumMetrics> {
     let learned = options.model == Model::Chaff;
+    let scored: BTreeSet<FilterKind> = calls.iter().flatten().map(|a| a.kind).collect();
+    let learns_distance = |kind: FilterKind| match kind {
+        FilterKind::CopiedDamage => options.copied_damage.distance == Distance::Learned,
+        FilterKind::EndRepairFillIn => {
+            learned && options.end_repair_fill_in.distance == Distance::Learned
+        }
+        FilterKind::ATailing => false,
+    };
     let empty = |key: &Stratum| {
         let (kind, stratum) = key;
         let row = StratumMetrics {
@@ -1445,7 +1453,7 @@ fn metrics_rows(
             filter_artifact_fraction: learned
                 .then(|| fractions.filters.get(kind).copied())
                 .flatten(),
-            distance: scales.of(*kind),
+            distance: (scored.contains(kind) || !learns_distance(*kind)).then(|| scales.of(*kind)),
             ..StratumMetrics::default()
         };
         let row = match (kind, library.and_then(|l| l.stratum(stratum))) {
@@ -2109,7 +2117,7 @@ mod tests {
         };
         let mut reference = Reference::open(&reference).unwrap();
         let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
-        let scale = rows[0].distance;
+        let scale = rows[0].distance.unwrap();
         assert!((scale - 20.0).abs() < 3.0, "{scale}");
         let fraction = rows[0].artifact_fraction.unwrap();
         assert!((fraction - 0.5).abs() < 0.1, "{fraction}");
@@ -2148,7 +2156,7 @@ mod tests {
                 ..FilterOptions::default()
             };
             let rows = filter_vcf(&input, &output, &mut table, None, &options).unwrap();
-            let scale = rows[0].distance;
+            let scale = rows[0].distance.unwrap();
             assert!((scale - default).abs() < 0.1, "{origin:?}: {scale}");
         }
     }
@@ -2638,6 +2646,49 @@ mod tests {
         assert!(rows.iter().all(|r| r.calls == 0), "{rows:?}");
         assert_eq!(rows[0].change_rate, scored.change_rate);
         assert_eq!(rows[3].single_strand_rate, scored.single_strand_rate);
+    }
+
+    /// A filter without a call learns nothing, so its rows leave the learned
+    /// fractions and a learned distance empty rather than report the
+    /// starting scale, while a fixed distance or window is still reported.
+    #[test]
+    fn test_a_filter_without_a_call_reports_no_learned_distance() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = write_fasta(dir.path(), "chr1", &"ACGTTCAA".repeat(250));
+        let input = VcfBuilder::new(&["tumor"]).write(&dir.path().join("in.vcf"));
+        let output = dir.path().join("out.vcf");
+        let mut reference = Reference::open(&reference).unwrap();
+        let mut run = |options: &FilterOptions| {
+            let mut table = MoleculeTable::new();
+            filter_vcf(&input, &output, &mut table, Some(&mut reference), options).unwrap()
+        };
+        let rows = run(&FilterOptions::default());
+        assert!(!rows.is_empty());
+        for row in &rows {
+            assert_eq!(row.calls, 0, "{row:?}");
+            assert_eq!(row.artifact_fraction, None, "{row:?}");
+            assert_eq!(row.filter_artifact_fraction, None, "{row:?}");
+            let window = (row.filter == "a-tailing").then_some(2.0);
+            assert_eq!(row.distance, window, "{row:?}");
+        }
+        let metrics = dir.path().join("metrics.tsv");
+        crate::metrics::write_metrics(&metrics, &rows).unwrap();
+        let text = std::fs::read_to_string(&metrics).unwrap();
+        let fields: Vec<&str> = text.lines().nth(1).unwrap().split('\t').collect();
+        assert_eq!(
+            fields[2..10],
+            ["C>T:CpG", "0", "0", "", "", "", "0.0", "0.0"]
+        );
+
+        let fixed = FilterOptions {
+            filters: vec![FilterKind::CopiedDamage],
+            copied_damage: CopiedDamage {
+                distance: Distance::Bases(12.0),
+                ..CopiedDamage::default()
+            },
+            ..FilterOptions::default()
+        };
+        assert!(run(&fixed).iter().all(|r| r.distance == Some(12.0)));
     }
 
     /// A two-molecule call takes the share of positions chance explains at

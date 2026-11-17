@@ -51,9 +51,10 @@ pub struct StratumMetrics {
     #[serde(serialize_with = "six_digits_or_empty")]
     pub filter_artifact_fraction: Option<f64>,
     /// The filter's distance in bases, shared by its strata: a decay's scale,
-    /// learned or fixed, or a window.
-    #[serde(serialize_with = "six_digits")]
-    pub distance: f64,
+    /// learned or fixed, or a window; empty when the scale is to be learned
+    /// and the filter has no call to learn it from or score at it.
+    #[serde(serialize_with = "six_digits_or_empty")]
+    pub distance: Option<f64>,
     /// The sum over calls of the posterior probability of an artifact.
     #[serde(serialize_with = "six_digits")]
     pub expected_artifacts: f64,
@@ -216,7 +217,7 @@ mod tests {
             calls: 3,
             filtered: 1,
             artifact_fraction: Some(0.4),
-            distance: 30.0,
+            distance: Some(30.0),
             expected_artifacts: 1.2,
             alt_molecules: 10,
             alt_congruent: 9,
