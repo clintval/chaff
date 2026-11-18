@@ -283,7 +283,7 @@ Expect copied damage in old, stored, or degraded specimens, and when C>T at CpG 
 
 Profile the raw reads before consensus with the `error` tool of [Riker](https://github.com/fulcrumgenomics/riker):
 
-```console
+```bash
 riker error -i raw.bam -r ref.fa -o raw --stratify-by ref_base,read_base,read_num,cycle
 ```
 
