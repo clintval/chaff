@@ -10,6 +10,7 @@ use chaff::evidence::PileupOptions;
 use chaff::filter::{run_filter, FilterArgs, FilterKind, FilterOptions};
 use chaff::model::{CopiedDamagePrior, Distance, Model};
 use chaff::read_end::{ATailing, EndRepairFillIn};
+use chaff::tagmentation::{EndProfile, Tagmentation};
 use clap::builder::styling::{AnsiColor, Effects, Style, Styles};
 use clap::error::ErrorKind;
 use clap::parser::ValueSource;
@@ -98,6 +99,10 @@ pub(crate) const CARGO_STYLING: Styles = Styles::styled()
 ///                        changes both strands carry near either end
 ///   a-tailing            adenines added to an over-digested 3' end: a T near
 ///                        the left end or an A near the right (fgbio ATAP)
+///   tagmentation         errors at fixed positions from the ends of a
+///                        transposase's fragments, learned from the BAM net
+///                        of the transposase's base preference; chaff model
+///                        only, and silent where the BAM shows none
 ///
 /// EXAMPLES
 ///
@@ -228,12 +233,15 @@ struct Cli {
     ///
     ///   --filters copied-damage                   only the copied damage filter
     ///   --filters end-repair-fill-in,a-tailing    only the fgbio filters
+    ///   --filters copied-damage,tagmentation      a transposase library
+    ///
+    /// Under `--model fgbio` the default leaves `tagmentation` out.
     #[arg(
         long,
         value_enum,
         value_delimiter = ',',
         value_name = "FILTER",
-        default_value = "copied-damage,a-tailing,end-repair-fill-in",
+        default_value = "copied-damage,a-tailing,end-repair-fill-in,tagmentation",
         hide_possible_values = true,
         verbatim_doc_comment
     )]
@@ -350,6 +358,29 @@ struct Cli {
         verbatim_doc_comment
     )]
     a_tailing_threshold: Option<f64>,
+
+    /// Apply `TagmentationArtifact` at or below this posterior.
+    #[arg(long, value_name = "P", value_parser = probability, verbatim_doc_comment)]
+    tagmentation_threshold: Option<f64>,
+
+    /// A tagmentation profile to score with in place of the BAM's own.
+    ///
+    /// The TSV another run wrote with `--tagmentation-profile-output`. A BAM
+    /// with too few records to learn from, as a duplex consensus often is,
+    /// can borrow the profile of a larger BAM of the same library.
+    #[arg(long, value_name = "TSV", value_parser = profile, verbatim_doc_comment)]
+    tagmentation_profile: Option<EndProfile>,
+
+    /// Write the tagmentation profile the run scored with.
+    ///
+    /// A TSV of the BAM's bases by position from each record's 5' end.
+    #[arg(long, value_name = "TSV", value_parser = report_file, verbatim_doc_comment)]
+    tagmentation_profile_output: Option<PathBuf>,
+}
+
+/// Read a tagmentation profile from the file at a path.
+fn profile(text: &str) -> Result<EndProfile, String> {
+    EndProfile::read(Path::new(text)).map_err(|error| format!("{error:#}"))
 }
 
 /// Parse a path to a file, refusing `-` for standard input.
@@ -401,8 +432,10 @@ impl Cli {
                 continue;
             }
             for id in kind.arguments() {
+                let reads_reference =
+                    self.spectrum.is_some() || self.filters.contains(&FilterKind::Tagmentation);
                 if matches.value_source(id) != Some(ValueSource::CommandLine)
-                    || (*id == "reference" && self.spectrum.is_some())
+                    || (*id == "reference" && reads_reference)
                 {
                     continue;
                 }
@@ -434,6 +467,26 @@ impl Cli {
                 "'--copied-damage-prior' needs '--model chaff'; under '--model fgbio' each call takes fgbio's prior",
             ));
         }
+        let tagmentation = self.filters.contains(&FilterKind::Tagmentation);
+        if tagmentation
+            && self.model == Model::Fgbio
+            && matches.value_source("filters") == Some(ValueSource::CommandLine)
+        {
+            return Err(cmd.error(
+                ErrorKind::ArgumentConflict,
+                "the tagmentation filter needs '--model chaff'; under '--model fgbio' leave it out of '--filters'",
+            ));
+        }
+        if tagmentation
+            && self.model == Model::Chaff
+            && self.reference.is_none()
+            && matches.value_source("filters") == Some(ValueSource::CommandLine)
+        {
+            return Err(cmd.error(
+                ErrorKind::MissingRequiredArgument,
+                "the tagmentation filter needs a reference FASTA: '--ref <FASTA>'",
+            ));
+        }
         if self.filters.contains(&FilterKind::CopiedDamage) && self.reference.is_none() {
             return Err(cmd.error(
                 ErrorKind::MissingRequiredArgument,
@@ -454,6 +507,10 @@ impl Cli {
             ),
             ("--metrics", self.metrics.as_ref()),
             ("--spectrum", self.spectrum.as_ref()),
+            (
+                "--tagmentation-profile-output",
+                self.tagmentation_profile_output.as_ref(),
+            ),
         ];
         for (i, (a, first)) in files.iter().enumerate() {
             for (b, second) in &files[i + 1..] {
@@ -504,6 +561,11 @@ impl Cli {
                 distance: self.a_tailing_distance,
             },
             a_tailing_threshold: self.a_tailing_threshold,
+            tagmentation: Tagmentation {
+                profile: self.tagmentation_profile,
+                profile_output: self.tagmentation_profile_output,
+            },
+            tagmentation_threshold: self.tagmentation_threshold,
         };
         FilterArgs {
             input: self.input,
@@ -968,7 +1030,7 @@ mod tests {
         let classes = [DamageClass::DEAMINATION, DamageClass::OXIDATION];
         assert_eq!(options.copied_damage.classes, classes);
         let help = Cli::command().render_long_help().to_string();
-        assert!(help.contains("[default: copied-damage,a-tailing,end-repair-fill-in]"));
+        assert!(help.contains("[default: copied-damage,a-tailing,end-repair-fill-in,tagmentation]"));
         assert!(help.contains("[default: C>T,G>T]"));
     }
 
