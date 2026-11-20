@@ -31,6 +31,7 @@ use streampile::{
 
 use crate::classes::Strand;
 use crate::simplex::LibraryProfile;
+use crate::tagmentation::EndProfile;
 
 /// How the quality of agreeing mates is called: the higher of the two.
 const AGREEMENT: AgreementStrategy = AgreementStrategy::MaxQual;
@@ -103,6 +104,12 @@ pub trait Evidence {
         Ok(None)
     }
 
+    /// The library's bases by position from each record's 5' end, asked for
+    /// once every site is read, or `None` without them.
+    fn ends(&mut self) -> Result<Option<EndProfile>> {
+        Ok(None)
+    }
+
     /// The molecules measured so far from both ends of an unpaired duplex
     /// consensus, as a CODEC consensus is, one per template at each site.
     fn spanning_molecules(&self) -> u64 {
@@ -112,6 +119,9 @@ pub trait Evidence {
 
 /// A library profile still being made, which [`Evidence::library`] waits for.
 pub type PendingLibrary<'f> = Box<dyn FnOnce() -> Result<Option<LibraryProfile>> + 'f>;
+
+/// An end profile still being made, which [`Evidence::ends`] waits for.
+pub type PendingEnds<'f> = Box<dyn FnOnce() -> Result<Option<EndProfile>> + 'f>;
 
 /// Which records and bases count as evidence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,6 +173,7 @@ impl PileupOptions {
 pub struct PileupEvidence<'f, S: RecordSource> {
     builder: StreamingPileupBuilder<'f, S>,
     library: Option<PendingLibrary<'f>>,
+    ends: Option<PendingEnds<'f>>,
     spanning: u64,
 }
 
@@ -172,6 +183,7 @@ impl<'f, S: RecordSource> PileupEvidence<'f, S> {
         Self {
             builder: options.configure(builder),
             library: None,
+            ends: None,
             spanning: 0,
         }
     }
@@ -183,11 +195,23 @@ impl<'f, S: RecordSource> PileupEvidence<'f, S> {
             ..self
         }
     }
+
+    /// The same evidence with the end profile `ends` makes.
+    pub fn with_ends(self, ends: PendingEnds<'f>) -> Self {
+        Self {
+            ends: Some(ends),
+            ..self
+        }
+    }
 }
 
 impl<S: RecordSource> Evidence for PileupEvidence<'_, S> {
     fn library(&mut self) -> Result<Option<LibraryProfile>> {
         self.library.take().map_or(Ok(None), |library| library())
+    }
+
+    fn ends(&mut self) -> Result<Option<EndProfile>> {
+        self.ends.take().map_or(Ok(None), |ends| ends())
     }
 
     fn spanning_molecules(&self) -> u64 {
@@ -364,6 +388,7 @@ fn spanning_ends<R: AlignmentRecord>(
 pub struct MoleculeTable {
     sites: HashMap<(String, usize), Vec<Molecule>>,
     library: Option<LibraryProfile>,
+    ends: Option<EndProfile>,
 }
 
 impl MoleculeTable {
@@ -381,11 +406,20 @@ impl MoleculeTable {
     pub fn set_library(&mut self, library: LibraryProfile) {
         self.library = Some(library);
     }
+
+    /// Set the library's end profile.
+    pub fn set_ends(&mut self, ends: EndProfile) {
+        self.ends = Some(ends);
+    }
 }
 
 impl Evidence for MoleculeTable {
     fn library(&mut self) -> Result<Option<LibraryProfile>> {
         Ok(self.library.clone())
+    }
+
+    fn ends(&mut self) -> Result<Option<EndProfile>> {
+        Ok(self.ends.clone())
     }
 
     fn molecules(&mut self, contig: &str, pos: Position) -> Result<Vec<Molecule>> {

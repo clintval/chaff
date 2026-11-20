@@ -25,6 +25,8 @@ Feature: CLI contract
     And stdout contains "copied-damage"
     And stdout contains "end-repair-fill-in"
     And stdout contains "a-tailing"
+    And stdout contains "tagmentation"
+    And stdout contains "--tagmentation-profile <TSV>"
     And stdout contains "--model"
 
   Scenario: the input, output, and BAM are required
@@ -157,3 +159,23 @@ Feature: CLI contract
     Then the exit code is 0
     And stdout contains "chr1\t100\t.\tC\tA\t.\tPASS\t."
     And stderr contains "the input VCF/BCF has no samples"
+
+  Scenario: the tagmentation filter needs a reference
+    When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --sample tumor --filters tagmentation`
+    Then the exit code is 2
+    And stderr contains "error: the tagmentation filter needs a reference FASTA: '--ref <FASTA>'"
+
+  Scenario: the tagmentation filter belongs to the chaff model
+    When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam -r ref.fa --model fgbio --filters tagmentation`
+    Then the exit code is 2
+    And stderr contains "error: the tagmentation filter needs '--model chaff'"
+
+  Scenario: a tagmentation option without the filter is an error
+    When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam --filters a-tailing --tagmentation-threshold 0.5`
+    Then the exit code is 2
+    And stderr contains "applies only to the tagmentation filter"
+
+  Scenario: a tagmentation profile must be a profile file
+    When I run `chaff -i calls.vcf -o out.vcf -b sorted.bam -r ref.fa --tagmentation-profile calls.vcf`
+    Then the exit code is 2
+    And stderr contains "must start with the columns"

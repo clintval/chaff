@@ -32,7 +32,8 @@ use crate::io::StagedFile;
 pub struct StratumMetrics {
     /// The sample whose molecules were measured.
     pub sample: String,
-    /// The filter: `copied-damage`, `end-repair-fill-in`, or `a-tailing`.
+    /// The filter: `copied-damage`, `end-repair-fill-in`, `a-tailing`, or
+    /// `tagmentation`.
     pub filter: String,
     /// The stratum the artifact fraction is learned in.
     pub stratum: String,
@@ -110,6 +111,11 @@ pub struct StratumMetrics {
     /// when the model fits.
     #[serde(serialize_with = "six_digits_or_empty")]
     pub chance_excess: Option<f64>,
+    /// Tagmentation only: the substitutions and 1-based positions from a
+    /// template end learned for the stratum, as `T>G@1,A>C@1`, each
+    /// substitution as a read from that end shows it; empty when none is
+    /// learned.
+    pub learned_positions: Option<String>,
 }
 
 /// Serialize `value` rounded to six significant digits.
