@@ -1,4 +1,6 @@
-# chaff
+![Banner for chaff](https://raw.githubusercontent.com/clintval/chaff/main/.github/img/chaff_banner.svg)
+
+---
 
 [![Install with bioconda](https://img.shields.io/badge/Install%20with-bioconda-brightgreen.svg)](http://bioconda.github.io/recipes/chaff/README.html)
 [![Anaconda Version](https://anaconda.org/bioconda/chaff/badges/version.svg)](http://bioconda.github.io/recipes/chaff/README.html)
