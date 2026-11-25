@@ -91,6 +91,19 @@
 //! `CDPW`. The library's single-strand profile (see [`simplex`]) still reads
 //! every position's base from the reference.
 //!
+//! ## Tagmentation
+//!
+//! The tagmentation filter (see [`tagmentation`]) scores with neither a decay
+//! nor a window but with positions learned from the library: the positions
+//! from a template end, and the substitutions, whose rate over all the BAM's
+//! records exceeds the interior's by more than the transposase's base
+//! preference explains. A call's alternate molecules follow its reference
+//! molecules tilted by the excess rate at their position under the artifact,
+//! and by the preference under a mutation. It runs under the `chaff` model
+//! only, learns its fraction as the other filters do, and gives a posterior
+//! of one to a call none of whose alternate molecules sits at a learned
+//! position.
+//!
 //! ## Priors and posteriors
 //!
 //! The posterior probability of a real mutation is `σ(-(l_i + logit π))` for
@@ -234,4 +247,5 @@ pub mod read_end;
 pub mod reference;
 pub mod simplex;
 pub mod spectrum;
+pub mod tagmentation;
 pub mod testing;

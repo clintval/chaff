@@ -27,7 +27,9 @@ use streampile::{RecordSource, StreamingPileupBuilder};
 use crate::call::{Genotype, Skip};
 use crate::classes::{sbs6, sbs6_of, Context};
 use crate::copied_damage::{CopiedDamage, DamageSite};
-use crate::evidence::{Evidence, Molecule, PendingLibrary, PileupEvidence, PileupOptions};
+use crate::evidence::{
+    Evidence, Molecule, PendingEnds, PendingLibrary, PileupEvidence, PileupOptions,
+};
 use crate::io::{add_filter, add_info, significant, vcf_float, VariantReader, VariantWriter};
 use crate::metrics::{null_fraction, write_metrics, StratumMetrics};
 use crate::model::{CopiedDamagePrior, Distance, Model};
@@ -43,6 +45,9 @@ use crate::read_end::{is_filtered, ATailing, Distances, EndRepairFillIn, Referen
 use crate::reference::Reference;
 use crate::simplex::{germline, profile_library, Chance, LibraryProfile, MIN_CHANCE_CHANGES};
 use crate::spectrum::{channel, Spectrum};
+use crate::tagmentation::{
+    self, profile_ends, EndClass, EndEvidence, EndProfile, Ends, Tagmentation, Weights,
+};
 
 /// One of the artifact filters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ValueEnum)]
@@ -53,14 +58,17 @@ pub enum FilterKind {
     ATailing,
     /// Errors in a recessed 3' end that end repair fills in.
     EndRepairFillIn,
+    /// Errors at fixed positions from the ends of a transposase's fragments.
+    Tagmentation,
 }
 
 impl FilterKind {
     /// Every filter, in output order.
-    pub const ALL: [FilterKind; 3] = [
+    pub const ALL: [FilterKind; 4] = [
         FilterKind::CopiedDamage,
         FilterKind::ATailing,
         FilterKind::EndRepairFillIn,
+        FilterKind::Tagmentation,
     ];
 
     /// The FILTER the filter applies.
@@ -69,6 +77,7 @@ impl FilterKind {
             FilterKind::CopiedDamage => CopiedDamage::FILTER,
             FilterKind::ATailing => ATailing::FILTER,
             FilterKind::EndRepairFillIn => EndRepairFillIn::FILTER,
+            FilterKind::Tagmentation => Tagmentation::FILTER,
         }
     }
 
@@ -78,6 +87,25 @@ impl FilterKind {
             FilterKind::CopiedDamage => CopiedDamage::INFO_POSTERIOR,
             FilterKind::ATailing => ATailing::INFO,
             FilterKind::EndRepairFillIn => EndRepairFillIn::INFO,
+            FilterKind::Tagmentation => Tagmentation::INFO_POSTERIOR,
+        }
+    }
+
+    /// The INFO keys of the log10 likelihood ratio and of the alternate and
+    /// reference molecule counts, for the filters that write them.
+    pub fn evidence_ids(self) -> Option<[&'static str; 3]> {
+        match self {
+            FilterKind::CopiedDamage => Some([
+                CopiedDamage::INFO_RATIO,
+                CopiedDamage::INFO_ALT,
+                CopiedDamage::INFO_REF,
+            ]),
+            FilterKind::Tagmentation => Some([
+                Tagmentation::INFO_RATIO,
+                Tagmentation::INFO_ALT,
+                Tagmentation::INFO_REF,
+            ]),
+            FilterKind::ATailing | FilterKind::EndRepairFillIn => None,
         }
     }
 
@@ -93,6 +121,12 @@ impl FilterKind {
             ],
             FilterKind::ATailing => &[ATailing::INFO],
             FilterKind::EndRepairFillIn => &[EndRepairFillIn::INFO],
+            FilterKind::Tagmentation => &[
+                Tagmentation::INFO_POSTERIOR,
+                Tagmentation::INFO_RATIO,
+                Tagmentation::INFO_ALT,
+                Tagmentation::INFO_REF,
+            ],
         }
     }
 
@@ -102,6 +136,7 @@ impl FilterKind {
             FilterKind::CopiedDamage => CopiedDamage::applies_to(gt),
             FilterKind::ATailing => ATailing::applies_to(gt),
             FilterKind::EndRepairFillIn => EndRepairFillIn::applies_to(gt),
+            FilterKind::Tagmentation => Tagmentation::applies_to(gt),
         }
     }
 
@@ -111,6 +146,7 @@ impl FilterKind {
             FilterKind::CopiedDamage => options.copied_damage_threshold,
             FilterKind::ATailing => options.a_tailing_threshold,
             FilterKind::EndRepairFillIn => options.end_repair_fill_in_threshold,
+            FilterKind::Tagmentation => options.tagmentation_threshold,
         }
     }
 
@@ -122,6 +158,7 @@ impl FilterKind {
             FilterKind::CopiedDamage => options.copied_damage.strata(),
             FilterKind::ATailing => sbs6_of(|alt| matches!(alt, b'A' | b'T')),
             FilterKind::EndRepairFillIn => sbs6_of(|_| true),
+            FilterKind::Tagmentation => tagmentation::strata(),
         }
     }
 
@@ -142,6 +179,11 @@ impl FilterKind {
                 "end_repair_fill_in_distance",
                 "end_repair_fill_in_threshold",
             ],
+            FilterKind::Tagmentation => &[
+                "tagmentation_threshold",
+                "tagmentation_profile",
+                "tagmentation_profile_output",
+            ],
         }
     }
 }
@@ -152,6 +194,7 @@ impl fmt::Display for FilterKind {
             FilterKind::CopiedDamage => write!(f, "copied-damage"),
             FilterKind::EndRepairFillIn => write!(f, "end-repair-fill-in"),
             FilterKind::ATailing => write!(f, "a-tailing"),
+            FilterKind::Tagmentation => write!(f, "tagmentation"),
         }
     }
 }
@@ -181,6 +224,10 @@ pub struct FilterOptions {
     pub a_tailing: ATailing,
     /// Apply `ATailingArtifact` at or below this posterior.
     pub a_tailing_threshold: Option<f64>,
+    /// The tagmentation model.
+    pub tagmentation: Tagmentation,
+    /// Apply `TagmentationArtifact` at or below this posterior.
+    pub tagmentation_threshold: Option<f64>,
 }
 
 impl Default for FilterOptions {
@@ -196,13 +243,19 @@ impl Default for FilterOptions {
             end_repair_fill_in_threshold: None,
             a_tailing: ATailing::default(),
             a_tailing_threshold: None,
+            tagmentation: Tagmentation::default(),
+            tagmentation_threshold: None,
         }
     }
 }
 
 impl FilterOptions {
-    fn enabled(&self, kind: FilterKind) -> bool {
+    /// Whether a filter runs: one of `filters`, but for tagmentation under
+    /// the `fgbio` model, whose prior near one would flag a call without a
+    /// molecule at a learned position.
+    pub fn enabled(&self, kind: FilterKind) -> bool {
         self.filters.contains(&kind)
+            && !(kind == FilterKind::Tagmentation && self.model == Model::Fgbio)
     }
 
     fn prior_text(&self) -> &'static str {
@@ -234,7 +287,13 @@ impl FilterOptions {
     /// Add the INFO and FILTER lines of every enabled filter to a header, with
     /// the distances the filters scored with and whether any copied-damage
     /// call took its prior from the library's chance model.
-    pub fn add_header_lines(&self, header: &mut vcf::Header, scales: &Scales, chance: bool) {
+    pub fn add_header_lines(
+        &self,
+        header: &mut vcf::Header,
+        scales: &Scales,
+        chance: bool,
+        weights: Option<&Weights>,
+    ) {
         let prior = self.prior_text();
         let copied_prior = if chance {
             "an artifact prior learned per sample and stratum, or, for a call with two or more alternate molecules in under 20% of its molecules, the share of the library's positions as deep with as many duplex changes that chance explains beyond noise, shrunk toward the share of the depths beside it"
@@ -369,6 +428,50 @@ impl FilterOptions {
                 ),
             );
         }
+        if self.enabled(FilterKind::Tagmentation) {
+            let learned = match weights.map(|weights| weights.learned_text(|_| true)) {
+                Some(Some(learned)) => format!(
+                    "the substitutions and positions from a template end learned from the library's records, {learned}, each as a read from that end shows it,"
+                ),
+                _ => "no position from a template end learned from the library's records, so no call scored,".to_string(),
+            };
+            add_info(
+                header,
+                Tagmentation::INFO_POSTERIOR,
+                Number::Count(1),
+                Type::Float,
+                &format!("Posterior probability that the call is a real mutation rather than a tagmentation artifact, with {learned} and {prior}; one for a call without an alternate molecule at a learned position."),
+            );
+            add_info(
+                header,
+                Tagmentation::INFO_RATIO,
+                Number::Count(1),
+                Type::Float,
+                "Log10 likelihood ratio of a tagmentation artifact to a real mutation.",
+            );
+            add_info(
+                header,
+                Tagmentation::INFO_ALT,
+                Number::Count(2),
+                Type::Integer,
+                "Alternate molecules at a learned position from a template end, and all alternate molecules measured.",
+            );
+            add_info(
+                header,
+                Tagmentation::INFO_REF,
+                Number::Count(2),
+                Type::Integer,
+                "Reference molecules at a learned position from a template end, and all reference molecules measured.",
+            );
+            add_filter(
+                header,
+                Tagmentation::FILTER,
+                &format!(
+                    "Call is likely a tagmentation artifact, with {learned} {}.",
+                    self.threshold_text(FilterKind::Tagmentation)
+                ),
+            );
+        }
     }
 }
 
@@ -413,6 +516,9 @@ pub struct Hypothesis {
     pub score: Score,
     /// The distances a decay scores the call by once its scale is known.
     pub distances: Option<Distances>,
+    /// The molecules the tagmentation filter scores the call by once the
+    /// library's learned positions are known.
+    pub ends: Option<EndEvidence>,
     /// The artifact prior the posterior used, once known.
     pub prior: Option<f64>,
     /// The artifact prior the library's chance model gives, for copied damage
@@ -711,8 +817,14 @@ fn score_call(
                         substitution,
                         Score::default(),
                         Some(filter.distances(molecules, base, alt_base)),
+                        None,
                     ),
-                    Model::Fgbio => (substitution, filter.score(molecules, base, alt_base), None),
+                    Model::Fgbio => (
+                        substitution,
+                        filter.score(molecules, base, alt_base),
+                        None,
+                        None,
+                    ),
                 })
             }
             FilterKind::ATailing => {
@@ -720,8 +832,16 @@ fn score_call(
                 if options.model == Model::Chaff && score.alt_molecules == 0 {
                     score.log_likelihood_ratio = None;
                 }
-                Some((substitution, score, None))
+                Some((substitution, score, None, None))
             }
+            FilterKind::Tagmentation => match context {
+                Some((prev, _, next)) if base != alt_base => {
+                    let class = EndClass::of(base, alt_base, Context::of(prev, base, next));
+                    let ends = EndEvidence::of(molecules, base, alt_base, class);
+                    Some((class.stratum(), Score::default(), None, Some(ends)))
+                }
+                _ => None,
+            },
             FilterKind::CopiedDamage => {
                 match (options.copied_damage.classify(base, alt_base), context) {
                     (Some((class, strand)), Some((prev, _, next))) => {
@@ -733,15 +853,15 @@ fn score_call(
                         let distances = options
                             .copied_damage
                             .distances(molecules, base, alt_base, strand);
-                        Some((damage.stratum(), Score::default(), Some(distances)))
+                        Some((damage.stratum(), Score::default(), Some(distances), None))
                     }
                     _ => None,
                 }
             }
         };
-        let (stratum, score, distances) = match scored {
-            Some((stratum, score, distances)) => (Some(stratum), score, distances),
-            None => (None, Score::default(), None),
+        let (stratum, score, distances, ends) = match scored {
+            Some((stratum, score, distances, ends)) => (Some(stratum), score, distances, ends),
+            None => (None, Score::default(), None, None),
         };
         Hypothesis {
             parent: base,
@@ -749,6 +869,7 @@ fn score_call(
             stratum,
             score,
             distances,
+            ends,
             prior: None,
             chance_prior: None,
             weight: None,
@@ -800,7 +921,7 @@ impl Scales {
         match kind {
             FilterKind::CopiedDamage => self.copied_damage_learned,
             FilterKind::EndRepairFillIn => self.end_repair_fill_in_learned,
-            FilterKind::ATailing => false,
+            FilterKind::ATailing | FilterKind::Tagmentation => false,
         }
     }
 
@@ -810,6 +931,7 @@ impl Scales {
             FilterKind::CopiedDamage => self.copied_damage,
             FilterKind::EndRepairFillIn => self.end_repair_fill_in,
             FilterKind::ATailing => self.a_tailing,
+            FilterKind::Tagmentation => tagmentation::WINDOW as f64,
         }
     }
 }
@@ -913,6 +1035,68 @@ fn score_decays(calls: &mut [Vec<Annotation>], options: &FilterOptions) -> Scale
         }
     }
     scales
+}
+
+/// Score every call the tagmentation filter has molecules for with the
+/// weights the library's profile gives its class, each call's reference
+/// molecules shrunk toward those of the calls of its class, and drop the
+/// annotations of the calls whose class has no learned position, returning
+/// how many calls that leaves without an annotation.
+fn score_tagmentation(calls: &mut [Vec<Annotation>], weights: Option<&Weights>) -> u64 {
+    let kind = FilterKind::Tagmentation;
+    let mut pools: BTreeMap<EndClass, Ends> = BTreeMap::new();
+    for annotation in calls.iter_mut().flatten().filter(|a| a.kind == kind) {
+        let teaches = annotation.teaches();
+        for hypothesis in annotation.hypotheses.iter_mut() {
+            let scored = hypothesis
+                .ends
+                .as_ref()
+                .is_some_and(|ends| weights.is_some_and(|w| w.of(ends.class).is_some()));
+            if !scored {
+                hypothesis.stratum = None;
+                hypothesis.ends = None;
+            } else if let (true, Some(ends)) = (teaches, &hypothesis.ends) {
+                pools.entry(ends.class).or_default().merge(&ends.reference);
+            }
+        }
+    }
+    let mut unscored = 0;
+    for annotations in calls.iter_mut() {
+        let before = annotations.len();
+        annotations.retain(|a| a.kind != kind || a.hypotheses.iter().any(|h| h.stratum.is_some()));
+        if before > 0 && annotations.is_empty() {
+            unscored += 1;
+        }
+    }
+    let Some(weights) = weights else {
+        return unscored;
+    };
+    for annotation in calls.iter_mut().flatten().filter(|a| a.kind == kind) {
+        for hypothesis in annotation.hypotheses.iter_mut() {
+            if let Some(ends) = hypothesis.ends.take() {
+                if let Some(call) = weights.of(ends.class) {
+                    hypothesis.score = ends.score(&call, pools.get(&ends.class));
+                }
+            }
+        }
+    }
+    unscored
+}
+
+/// Give a posterior of one to every tagmentation call none of whose
+/// alternate molecules sits at a learned position: no molecule of it is one
+/// the artifact could have made, so no prior, however near one, flags it.
+fn keep_calls_without_tagmentation_evidence(calls: &mut [Vec<Annotation>]) {
+    for annotation in calls.iter_mut().flatten() {
+        let without = annotation
+            .hypotheses
+            .iter()
+            .all(|h| h.score.alt_congruent == 0);
+        if annotation.kind == FilterKind::Tagmentation && annotation.posterior.is_some() && without
+        {
+            annotation.posterior = Some(1.0);
+        }
+    }
 }
 
 /// The learned artifact fractions of each filter and each of its strata,
@@ -1081,9 +1265,9 @@ fn annotate_record(record: &mut RecordBuf, annotations: &[Annotation], options: 
                 kind.posterior_id().to_string(),
                 Some(Value::Float(vcf_float(posterior))),
             );
-            if kind == FilterKind::CopiedDamage {
+            if let Some([ratio_id, ..]) = kind.evidence_ids() {
                 info.insert(
-                    CopiedDamage::INFO_RATIO.to_string(),
+                    ratio_id.to_string(),
                     Some(Value::Float(CopiedDamage::log10_ratio(ratio))),
                 );
             }
@@ -1091,7 +1275,7 @@ fn annotate_record(record: &mut RecordBuf, annotations: &[Annotation], options: 
                 new_filters.push(kind.filter_id().to_string());
             }
         }
-        if kind == FilterKind::CopiedDamage {
+        if let Some([_, alt_id, ref_id]) = kind.evidence_ids() {
             let pair = |a: u32, b: u32| {
                 Some(Value::Array(Array::Integer(vec![
                     Some(a as i32),
@@ -1099,13 +1283,15 @@ fn annotate_record(record: &mut RecordBuf, annotations: &[Annotation], options: 
                 ])))
             };
             info.insert(
-                CopiedDamage::INFO_ALT.to_string(),
+                alt_id.to_string(),
                 pair(score.alt_congruent, score.alt_molecules),
             );
             info.insert(
-                CopiedDamage::INFO_REF.to_string(),
+                ref_id.to_string(),
                 pair(score.ref_congruent, score.ref_molecules),
             );
+        }
+        if kind == FilterKind::CopiedDamage {
             if let Some(weight) = annotation.other_weight() {
                 info.insert(
                     WEIGHT_INFO.to_string(),
@@ -1146,6 +1332,8 @@ pub struct Report {
     pub metrics: Vec<StratumMetrics>,
     /// The trinucleotide spectrum of the scored SNVs, when asked for.
     pub spectrum: Option<Spectrum>,
+    /// The end profile the tagmentation filter scored with, when it had one.
+    pub ends: Option<EndProfile>,
 }
 
 /// As [`filter_vcf`], also tallying the sample's trinucleotide spectrum when
@@ -1230,6 +1418,24 @@ pub fn filter_vcf_report(
         }
         calls.push(annotations);
     }
+    let ends = if !options.enabled(FilterKind::Tagmentation) {
+        None
+    } else if let Some(profile) = &options.tagmentation.profile {
+        Some(profile.clone())
+    } else {
+        evidence.ends()?
+    };
+    let weights = ends.as_ref().map(EndProfile::learn);
+    if let Some(weights) = &weights {
+        match weights.learned_text(|_| true) {
+            Some(learned) => info!("tagmentation: learned {learned} from the library's records"),
+            None => info!("tagmentation: learned no position from the library's records, so it scores no call"),
+        }
+    }
+    let unscored = score_tagmentation(&mut calls, weights.as_ref());
+    if unscored > 0 {
+        *skipped.entry(Skip::NoFilter).or_default() += unscored;
+    }
     log_scored(&sample, &calls, &skipped);
     let spanning = evidence.spanning_molecules();
     if spanning > 0 {
@@ -1254,6 +1460,7 @@ pub fn filter_vcf_report(
     log_chance(&chances);
     let prior = options.copied_damage.prior;
     let fractions = assign_posteriors(&mut calls, options.model, prior, &chances);
+    keep_calls_without_tagmentation_evidence(&mut calls);
     match (library.is_some(), prior) {
         (true, CopiedDamagePrior::Chance) => info!(
             "{} took a copied-damage prior from the library's chance model",
@@ -1266,7 +1473,12 @@ pub fn filter_vcf_report(
     }
 
     let mut out_header = header.clone();
-    options.add_header_lines(&mut out_header, &scales, fractions.chance_calls > 0);
+    options.add_header_lines(
+        &mut out_header,
+        &scales,
+        fractions.chance_calls > 0,
+        weights.as_ref(),
+    );
     let mut writer = VariantWriter::create(output)?;
     writer.write_header(&out_header)?;
     let mut reader = VariantReader::open(input)?;
@@ -1290,6 +1502,7 @@ pub fn filter_vcf_report(
         options,
         library.as_ref(),
         &chances,
+        weights.as_ref(),
     );
     for row in rows.iter().filter(|row| row.calls > 0) {
         info!(
@@ -1309,6 +1522,7 @@ pub fn filter_vcf_report(
         sample,
         metrics: rows,
         spectrum,
+        ends,
     })
 }
 
@@ -1423,6 +1637,7 @@ fn log_chance(chances: &BTreeMap<String, Chance>) {
 
 /// Pool every annotation into one metrics row per filter and stratum, with a
 /// row for each stratum of an enabled filter that holds no call.
+#[allow(clippy::too_many_arguments)]
 fn metrics_rows(
     sample: &str,
     calls: &[Vec<Annotation>],
@@ -1431,6 +1646,7 @@ fn metrics_rows(
     options: &FilterOptions,
     library: Option<&LibraryProfile>,
     chances: &BTreeMap<String, Chance>,
+    weights: Option<&Weights>,
 ) -> Vec<StratumMetrics> {
     let learned = options.model == Model::Chaff;
     let scored: BTreeSet<FilterKind> = calls.iter().flatten().map(|a| a.kind).collect();
@@ -1439,7 +1655,7 @@ fn metrics_rows(
         FilterKind::EndRepairFillIn => {
             learned && options.end_repair_fill_in.distance == Distance::Learned
         }
-        FilterKind::ATailing => false,
+        FilterKind::ATailing | FilterKind::Tagmentation => false,
     };
     let empty = |key: &Stratum| {
         let (kind, stratum) = key;
@@ -1453,7 +1669,12 @@ fn metrics_rows(
             filter_artifact_fraction: learned
                 .then(|| fractions.filters.get(kind).copied())
                 .flatten(),
-            distance: (scored.contains(kind) || !learns_distance(*kind)).then(|| scales.of(*kind)),
+            distance: (*kind != FilterKind::Tagmentation
+                && (scored.contains(kind) || !learns_distance(*kind)))
+            .then(|| scales.of(*kind)),
+            learned_positions: weights
+                .filter(|_| *kind == FilterKind::Tagmentation)
+                .and_then(|weights| weights.learned_text(|class| class.stratum() == *stratum)),
             ..StratumMetrics::default()
         };
         let row = match (kind, library.and_then(|l| l.stratum(stratum))) {
@@ -1471,6 +1692,7 @@ fn metrics_rows(
     let mut rows: BTreeMap<Stratum, (StratumMetrics, Vec<(u32, f64)>)> = options
         .filters
         .iter()
+        .filter(|&&kind| kind != FilterKind::Tagmentation || weights.is_some())
         .flat_map(|&kind| kind.strata(options).into_iter().map(move |s| (kind, s)))
         .map(|key| {
             let row = empty(&key);
@@ -1538,6 +1760,14 @@ pub fn run_filter_with(args: &FilterArgs, evidence: &mut dyn Evidence) -> Result
     if let (Some(path), Some(spectrum)) = (&args.spectrum, &report.spectrum) {
         spectrum.write_pdf(path, &report.sample)?;
     }
+    if let Some(path) = &args.options.tagmentation.profile_output {
+        match &report.ends {
+            Some(ends) => ends.write(path)?,
+            None => log::warn!(
+                "no tagmentation profile was made, so none is written to {path:?}: the filter needs to run, under the chaff model, with a reference and a BAM that is a regular file"
+            ),
+        }
+    }
     Ok(())
 }
 
@@ -1558,10 +1788,11 @@ fn rereadable(path: &Path) -> bool {
 }
 
 /// Filter the calls with the BAM named by `args`, streamed through
-/// streampile, and, when it is a regular file and copied damage runs under
-/// the `chaff` model, read again beside it for its single-strand profile; a
-/// profile that fails leaves the priors to the calls, with a warning, as
-/// the pileup reports the BAM's faults itself.
+/// streampile, and, when it is a regular file, read again beside it: for its
+/// single-strand profile when copied damage runs under the `chaff` model, and
+/// for its end profile when tagmentation runs without a profile given. A
+/// profile that fails leaves its filter without one, with a warning, as the
+/// pileup reports the BAM's faults itself.
 pub fn run_filter(args: &FilterArgs) -> Result<()> {
     let mut reader = noodles::bam::io::reader::Builder
         .build_from_path(&args.bam)
@@ -1577,35 +1808,55 @@ pub fn run_filter(args: &FilterArgs) -> Result<()> {
         error => error.into(),
     })?;
     let options = &args.options;
-    let reference = match &args.reference {
-        Some(reference) if options.takes_chance() => reference,
-        _ => return run_filter_on(args, builder),
+    let Some(reference) = &args.reference else {
+        return run_filter_on(args, builder);
     };
+    let takes_ends =
+        options.enabled(FilterKind::Tagmentation) && options.tagmentation.profile.is_none();
+    if !options.takes_chance() && !takes_ends {
+        return run_filter_on(args, builder);
+    }
     if !rereadable(&args.bam) {
-        info!("the BAM is not a regular file chaff can read twice, so it learns its copied-damage priors from the calls alone");
+        info!("the BAM is not a regular file chaff can read twice, so it learns its copied-damage priors from the calls alone and the tagmentation filter scores no call without a profile");
         return run_filter_on(args, builder);
     }
     let stop = AtomicBool::new(false);
     std::thread::scope(|scope| {
-        let profiling = scope.spawn(|| {
-            profile_library(
-                &args.bam,
-                reference,
-                &options.copied_damage.classes,
-                &args.pileup,
-                &stop,
-            )
-        });
-        let pending: PendingLibrary<'_> = Box::new(move || {
-            let profile = profiling
-                .join()
-                .map_err(|_| anyhow!("profiling the BAM's single-strand consensus panicked"))?;
-            Ok(profile.unwrap_or_else(|error| {
-                log::warn!("the BAM's single-strand consensus could not be profiled, so chaff learns its copied-damage priors from the calls alone: {error:#}");
-                None
-            }))
-        });
-        let mut evidence = PileupEvidence::new(builder, &args.pileup).with_library(pending);
+        let mut evidence = PileupEvidence::new(builder, &args.pileup);
+        if options.takes_chance() {
+            let profiling = scope.spawn(|| {
+                profile_library(
+                    &args.bam,
+                    reference,
+                    &options.copied_damage.classes,
+                    &args.pileup,
+                    &stop,
+                )
+            });
+            let pending: PendingLibrary<'_> = Box::new(move || {
+                let profile = profiling
+                    .join()
+                    .map_err(|_| anyhow!("profiling the BAM's single-strand consensus panicked"))?;
+                Ok(profile.unwrap_or_else(|error| {
+                    log::warn!("the BAM's single-strand consensus could not be profiled, so chaff learns its copied-damage priors from the calls alone: {error:#}");
+                    None
+                }))
+            });
+            evidence = evidence.with_library(pending);
+        }
+        if takes_ends {
+            let profiling = scope.spawn(|| profile_ends(&args.bam, reference, &args.pileup, &stop));
+            let pending: PendingEnds<'_> = Box::new(move || {
+                let profile = profiling
+                    .join()
+                    .map_err(|_| anyhow!("profiling the ends of the BAM's records panicked"))?;
+                Ok(profile.unwrap_or_else(|error| {
+                    log::warn!("the ends of the BAM's records could not be profiled, so the tagmentation filter scores no call: {error:#}");
+                    None
+                }))
+            });
+            evidence = evidence.with_ends(pending);
+        }
         let result = run_filter_with(args, &mut evidence);
         stop.store(true, Ordering::Relaxed);
         result
@@ -2713,6 +2964,7 @@ mod tests {
                     ..Score::default()
                 },
                 distances: None,
+                ends: None,
                 prior: None,
                 chance_prior: None,
                 weight: None,
@@ -2756,6 +3008,7 @@ mod tests {
                 ..Score::default()
             },
             distances: None,
+            ends: None,
             prior: None,
             chance_prior: None,
             weight: None,
@@ -3560,5 +3813,442 @@ mod tests {
             error.to_string().contains("the spectrum needs a reference"),
             "{error}"
         );
+    }
+
+    /// An end profile of a million reference bases of each kind at every
+    /// position, a thousandth of them read as each other base, with `spikes`
+    /// of more substitutions `(0-based position, reference, read, context,
+    /// count)`.
+    fn end_profile(spikes: &[(usize, u8, u8, Context, u64)]) -> EndProfile {
+        let mut profile = EndProfile::default();
+        for position in 0..tagmentation::PROFILE_LENGTH {
+            for reference in *b"ACGT" {
+                for read in *b"ACGT" {
+                    let count = if read == reference { 997_000 } else { 1_000 };
+                    profile.add(position, reference, read, Context::NonCpG, count);
+                }
+            }
+        }
+        for &(position, reference, read, context, count) in spikes {
+            profile.add(position, reference, read, context, count);
+        }
+        profile
+    }
+
+    /// A library that reads a T as a G at the first base of its templates.
+    fn t_to_g_at_the_first_base() -> EndProfile {
+        end_profile(&[(0, b'T', b'G', Context::NonCpG, 4_000)])
+    }
+
+    fn tagmentation_options(threshold: f64) -> FilterOptions {
+        FilterOptions {
+            filters: vec![FilterKind::Tagmentation],
+            tagmentation_threshold: Some(threshold),
+            ..FilterOptions::default()
+        }
+    }
+
+    fn unflagged(record: &RecordBuf) -> bool {
+        !record.filters().as_ref().contains(Tagmentation::FILTER)
+    }
+
+    fn integers(record: &RecordBuf, key: &str) -> Option<Vec<i32>> {
+        match record.info().get(key) {
+            Some(Some(Value::Array(Array::Integer(values)))) => values.iter().copied().collect(),
+            _ => None,
+        }
+    }
+
+    /// The reference `ACGTTCAA` repeated, a VCF of `calls` as `(position,
+    /// REF, ALT)`, and their molecules.
+    fn tagmentation_fixture(
+        dir: &Path,
+        calls: &[(usize, &str, &str, Vec<Molecule>)],
+    ) -> (Reference, PathBuf, MoleculeTable) {
+        let fasta = write_fasta(dir, "chr1", &"ACGTTCAA".repeat(250));
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        let mut table = MoleculeTable::new();
+        for (pos, reference, alt, molecules) in calls {
+            vcf.add(Variant::new(
+                *pos,
+                &[reference, alt],
+                vec![gt("tumor", "0/1")],
+            ));
+            table.insert("chr1", *pos, molecules.clone());
+        }
+        let input = vcf.write(&dir.join("in.vcf"));
+        (Reference::open(&fasta).unwrap(), input, table)
+    }
+
+    fn with_alternates(reference: u8, alternate: u8, lefts: &[usize]) -> Vec<Molecule> {
+        let mut molecules = spread(reference, 150);
+        molecules.extend(lefts.iter().map(|&left| at(alternate, left)));
+        molecules
+    }
+
+    /// A call whose alternate molecules all sit at the learned position is
+    /// flagged; one with them elsewhere, one with a molecule elsewhere beside
+    /// one there, and one of a substitution the library does not make there
+    /// are not.
+    #[test]
+    fn test_tagmentation_flags_only_a_call_at_a_learned_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut reference, input, mut table) = tagmentation_fixture(
+            dir.path(),
+            &[
+                (1004, "T", "G", with_alternates(b'T', b'G', &[0, 0])),
+                (1005, "T", "C", with_alternates(b'T', b'C', &[0, 0])),
+                (1012, "T", "G", with_alternates(b'T', b'G', &[60, 80])),
+                (1020, "T", "G", with_alternates(b'T', b'G', &[0, 70])),
+            ],
+        );
+        table.set_ends(t_to_g_at_the_first_base());
+        let output = dir.path().join("out.vcf");
+        let options = tagmentation_options(0.5);
+        let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
+        let (header, records) = read_records(&output);
+        let description = header.infos()[Tagmentation::INFO_POSTERIOR]
+            .description()
+            .to_string();
+        assert!(description.contains("T>G@1"), "{description}");
+        assert!(header.filters().contains_key(Tagmentation::FILTER));
+
+        let flagged = |record: &RecordBuf| record.filters().as_ref().contains(Tagmentation::FILTER);
+        let (artifact, other, elsewhere, mixed) =
+            (&records[0], &records[1], &records[2], &records[3]);
+        assert!(flagged(artifact));
+        assert!(float(artifact, Tagmentation::INFO_POSTERIOR).unwrap() < 0.05);
+        assert!(float(artifact, Tagmentation::INFO_RATIO).unwrap() > 3.0);
+        assert_eq!(integers(artifact, Tagmentation::INFO_ALT), Some(vec![2, 2]));
+        assert_eq!(
+            integers(artifact, Tagmentation::INFO_REF),
+            Some(vec![1, 150])
+        );
+
+        assert!(!flagged(other));
+        for id in FilterKind::Tagmentation.info_ids() {
+            assert!(other.info().get(*id).is_none(), "{id}");
+        }
+
+        assert!(!flagged(elsewhere));
+        assert_eq!(float(elsewhere, Tagmentation::INFO_POSTERIOR), Some(1.0));
+        assert!(float(elsewhere, Tagmentation::INFO_RATIO).unwrap() < -5.0);
+        assert_eq!(
+            integers(elsewhere, Tagmentation::INFO_ALT),
+            Some(vec![0, 2])
+        );
+
+        assert!(!flagged(mixed));
+        assert!(float(mixed, Tagmentation::INFO_POSTERIOR).unwrap() > 0.9);
+        assert_eq!(integers(mixed, Tagmentation::INFO_ALT), Some(vec![1, 2]));
+
+        let row = rows.iter().find(|row| row.stratum == "T>G").unwrap();
+        assert_eq!((row.calls, row.filtered), (3, 1));
+        assert_eq!(row.learned_positions.as_deref(), Some("T>G@1"));
+        assert_eq!(row.distance, None);
+        let silent = rows.iter().find(|row| row.stratum == "T>C").unwrap();
+        assert_eq!((silent.calls, silent.learned_positions.clone()), (0, None));
+        assert_eq!(rows.len(), tagmentation::strata().len());
+    }
+
+    /// Where most calls are artifacts the learned prior is near one, and a
+    /// call none of whose alternate molecules sits at a learned position
+    /// still keeps a posterior of one, under any threshold.
+    #[test]
+    fn test_tagmentation_never_flags_on_the_prior_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut calls: Vec<(usize, &str, &str, Vec<Molecule>)> = (0..40)
+            .map(|i| (1004 + 8 * i, "T", "G", with_alternates(b'T', b'G', &[0])))
+            .collect();
+        let mut faint = spread(b'T', 150);
+        faint.push(Molecule::new(b'G', 20, 70, 79));
+        calls.push((1005, "T", "G", faint));
+        calls.sort_by_key(|call| call.0);
+        let (mut reference, input, mut table) = tagmentation_fixture(dir.path(), &calls);
+        table.set_ends(t_to_g_at_the_first_base());
+        let output = dir.path().join("out.vcf");
+        let options = tagmentation_options(0.999);
+        let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
+        let row = rows.iter().find(|row| row.stratum == "T>G").unwrap();
+        assert!(row.artifact_fraction.unwrap() > 0.9, "{row:?}");
+        assert_eq!((row.calls, row.filtered), (41, 40));
+
+        let (_, records) = read_records(&output);
+        let faint = &records[1];
+        assert_eq!(usize::from(faint.variant_start().unwrap()), 1005);
+        assert!(unflagged(faint));
+        assert_eq!(float(faint, Tagmentation::INFO_POSTERIOR), Some(1.0));
+        assert_eq!(integers(faint, Tagmentation::INFO_ALT), Some(vec![0, 1]));
+        let ratio = f64::from(float(faint, Tagmentation::INFO_RATIO).unwrap());
+        let prior = row.artifact_fraction.unwrap();
+        let unguarded = posterior_mutation(ratio * std::f64::consts::LN_10, prior);
+        assert!(unguarded < 0.999, "{unguarded}");
+    }
+
+    /// A library without the artifact learns nothing: its calls get no
+    /// annotation and no FILTER, whatever the threshold, and its metrics rows
+    /// count no call. Without a profile at all the filter has no rows.
+    #[test]
+    fn test_tagmentation_learns_nothing_and_flags_nothing_without_an_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut reference, input, mut table) = tagmentation_fixture(
+            dir.path(),
+            &[(1004, "T", "G", with_alternates(b'T', b'G', &[0, 0]))],
+        );
+        let output = dir.path().join("out.vcf");
+        let options = tagmentation_options(1.0);
+        let run = |table: &mut MoleculeTable, reference: &mut Reference| {
+            let rows = filter_vcf(&input, &output, table, Some(reference), &options).unwrap();
+            let (header, records) = read_records(&output);
+            let description = header.infos()[Tagmentation::INFO_POSTERIOR]
+                .description()
+                .to_string();
+            assert!(unflagged(&records[0]));
+            assert!(records[0].info().as_ref().is_empty());
+            (rows, description)
+        };
+
+        let (rows, description) = run(&mut table, &mut reference);
+        assert_eq!(rows, vec![]);
+        assert!(description.contains("no position"), "{description}");
+
+        table.set_ends(end_profile(&[]));
+        let (rows, description) = run(&mut table, &mut reference);
+        assert!(description.contains("no position"), "{description}");
+        assert_eq!(rows.len(), tagmentation::strata().len());
+        assert!(rows
+            .iter()
+            .all(|row| row.calls == 0 && row.learned_positions.is_none()));
+    }
+
+    /// A real allele the transposase's preference puts at the first base
+    /// sixteen times as often as its reference base is no artifact there, so
+    /// a call of it at that base is neither scored nor flagged.
+    #[test]
+    fn test_tagmentation_does_not_flag_a_real_allele_the_preference_enriches() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut profile = EndProfile::default();
+        for position in 0..tagmentation::PROFILE_LENGTH {
+            for reference in *b"ACGT" {
+                let bases: u64 = match (position, reference) {
+                    (0, b'G') => 2_800_000,
+                    (0, b'T') => 175_000,
+                    (0, _) => 512_500,
+                    _ => 1_000_000,
+                };
+                for read in *b"ACGT" {
+                    let count = match (position, reference, read) {
+                        _ if read == reference => bases - 3 * bases / 1_000,
+                        (0, b'T', b'G') => 16 * bases / 1_000,
+                        _ => bases / 1_000,
+                    };
+                    profile.add(position, reference, read, Context::NonCpG, count);
+                }
+            }
+        }
+        let (mut reference, input, mut table) = tagmentation_fixture(
+            dir.path(),
+            &[(1004, "T", "G", with_alternates(b'T', b'G', &[0, 0]))],
+        );
+        table.set_ends(profile);
+        let output = dir.path().join("out.vcf");
+        let options = tagmentation_options(1.0);
+        filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
+        let (_, records) = read_records(&output);
+        assert!(unflagged(&records[0]));
+        assert!(records[0].info().as_ref().is_empty());
+    }
+
+    /// A C>T the library makes at the first base of a CpG is scored in the
+    /// CpG stratum, and a C>T outside a CpG is not scored.
+    #[test]
+    fn test_tagmentation_scores_a_c_to_t_by_its_cpg_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut spikes = vec![(0, b'C', b'T', Context::CpG, 4_000)];
+        for position in 0..tagmentation::PROFILE_LENGTH {
+            spikes.push((position, b'C', b'C', Context::CpG, 99_000));
+            spikes.push((position, b'C', b'T', Context::CpG, 1_000));
+        }
+        let (mut reference, input, mut table) = tagmentation_fixture(
+            dir.path(),
+            &[
+                (1002, "C", "T", with_alternates(b'C', b'T', &[0, 0])),
+                (1006, "C", "T", with_alternates(b'C', b'T', &[0, 0])),
+            ],
+        );
+        table.set_ends(end_profile(&spikes));
+        let output = dir.path().join("out.vcf");
+        let options = tagmentation_options(0.5);
+        let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
+        let (header, records) = read_records(&output);
+        let description = header.infos()[Tagmentation::INFO_POSTERIOR]
+            .description()
+            .to_string();
+        assert!(description.contains("C>T:CpG@1"), "{description}");
+        assert!(!description.contains("non-CpG@"), "{description}");
+        assert!(records[0].filters().as_ref().contains(Tagmentation::FILTER));
+        assert!(unflagged(&records[1]));
+        assert!(records[1].info().as_ref().is_empty());
+        let calls = |stratum: &str| rows.iter().find(|r| r.stratum == stratum).unwrap().calls;
+        assert_eq!((calls("C>T:CpG"), calls("C>T:non-CpG")), (1, 0));
+    }
+
+    /// A profile given to the run is scored with in place of the library's
+    /// own, which here shows no artifact.
+    #[test]
+    fn test_tagmentation_scores_with_a_borrowed_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut reference, input, mut table) = tagmentation_fixture(
+            dir.path(),
+            &[(1004, "T", "G", with_alternates(b'T', b'G', &[0, 0]))],
+        );
+        table.set_ends(end_profile(&[]));
+        let output = dir.path().join("out.vcf");
+        let own = tagmentation_options(0.5);
+        filter_vcf(&input, &output, &mut table, Some(&mut reference), &own).unwrap();
+        assert!(unflagged(&read_records(&output).1[0]));
+
+        let borrowed = FilterOptions {
+            tagmentation: Tagmentation {
+                profile: Some(t_to_g_at_the_first_base()),
+                profile_output: None,
+            },
+            ..own
+        };
+        filter_vcf(&input, &output, &mut table, Some(&mut reference), &borrowed).unwrap();
+        let (_, records) = read_records(&output);
+        assert!(records[0].filters().as_ref().contains(Tagmentation::FILTER));
+    }
+
+    /// Under the `fgbio` model, whose prior is near one, the filter does not
+    /// run.
+    #[test]
+    fn test_tagmentation_does_not_run_under_the_fgbio_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut reference, input, mut table) = tagmentation_fixture(
+            dir.path(),
+            &[(1004, "T", "G", with_alternates(b'T', b'G', &[0, 0]))],
+        );
+        table.set_ends(t_to_g_at_the_first_base());
+        let output = dir.path().join("out.vcf");
+        let options = FilterOptions {
+            model: Model::Fgbio,
+            ..tagmentation_options(1.0)
+        };
+        let rows = filter_vcf(&input, &output, &mut table, Some(&mut reference), &options).unwrap();
+        assert_eq!(rows, vec![]);
+        let (header, records) = read_records(&output);
+        assert!(!header.infos().contains_key(Tagmentation::INFO_POSTERIOR));
+        assert!(unflagged(&records[0]));
+    }
+
+    /// Unpaired 30 bp reads, one starting at each base of a 3,000 bp
+    /// reference, every third of those that start on a `T` reading a `G`
+    /// there, and the reads within `keep` of 1-based starts.
+    fn tagmented_bam(
+        dir: &Path,
+        name: &str,
+        sequence: &str,
+        keep: std::ops::Range<usize>,
+    ) -> PathBuf {
+        use streampile::testing::{Frag, SamBuilder};
+        let mut reads = SamBuilder::new().read_length(30);
+        let mut starts_on_t = 0;
+        for start in 1..=sequence.len() - 30 {
+            let mut bases = sequence.as_bytes()[start - 1..start + 29].to_vec();
+            if bases[0] == b'T' {
+                starts_on_t += 1;
+                if starts_on_t % 3 == 0 {
+                    bases[0] = b'G';
+                }
+            }
+            if keep.contains(&start) {
+                reads.add_frag(Frag::at(start).bases(String::from_utf8(bases).unwrap()));
+            }
+        }
+        let bam = dir.join(name);
+        reads.write_bam(&bam).unwrap();
+        bam
+    }
+
+    /// A BAM whose reads read a `T` as a `G` at their first base learns that
+    /// from its own records, flags the call that only such a read supports,
+    /// and writes its profile. A BAM of the few reads over the call is too
+    /// small to learn from, so it scores nothing alone, and flags the call
+    /// once it borrows the larger BAM's profile.
+    #[test]
+    fn test_a_bam_learns_its_profile_and_a_small_bam_borrows_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = 7u32;
+        let sequence: String = (0..3_030)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                b"ACGT"[(state >> 24) as usize % 4] as char
+            })
+            .collect();
+        let fasta = write_fasta(dir.path(), "chr1", &sequence);
+        let mut starts_on_t = 0;
+        let site = (1..=3_000)
+            .filter(|&start| sequence.as_bytes()[start - 1] == b'T')
+            .find(|&start| {
+                starts_on_t += 1;
+                starts_on_t % 3 == 0 && start > 1_500
+            })
+            .unwrap();
+        let mut vcf = VcfBuilder::new(&["tumor"]);
+        vcf.add(Variant::new(site, &["T", "G"], vec![gt("tumor", "0/1")]));
+        let input = vcf.write(&dir.path().join("in.vcf"));
+        let profile_path = dir.path().join("profile.tsv");
+        let run = |bam: PathBuf, tagmentation: Tagmentation| {
+            let args = FilterArgs {
+                input: input.clone(),
+                output: dir.path().join("out.vcf"),
+                bam,
+                reference: Some(fasta.clone()),
+                metrics: None,
+                spectrum: None,
+                pileup: PileupOptions::default(),
+                options: FilterOptions {
+                    tagmentation,
+                    ..tagmentation_options(0.5)
+                },
+            };
+            run_filter(&args).unwrap();
+            let (header, records) = read_records(&args.output);
+            let description = header.infos()[Tagmentation::INFO_POSTERIOR]
+                .description()
+                .to_string();
+            (description, records[0].clone())
+        };
+
+        let whole = tagmented_bam(dir.path(), "whole.bam", &sequence, 1..3_001);
+        let (description, record) = run(
+            whole,
+            Tagmentation {
+                profile: None,
+                profile_output: Some(profile_path.clone()),
+            },
+        );
+        assert!(description.contains("T>G@1"), "{description}");
+        assert!(record.filters().as_ref().contains(Tagmentation::FILTER));
+        assert_eq!(integers(&record, Tagmentation::INFO_ALT), Some(vec![1, 1]));
+        let profile = EndProfile::read(&profile_path).unwrap();
+        assert!(profile.count(0, b'T', b'G', Context::NonCpG) >= 200);
+
+        let small = tagmented_bam(dir.path(), "small.bam", &sequence, site - 29..site + 1);
+        let (description, record) = run(small.clone(), Tagmentation::default());
+        assert!(description.contains("no position"), "{description}");
+        assert!(unflagged(&record));
+        assert!(record.info().as_ref().is_empty());
+
+        let (description, record) = run(
+            small,
+            Tagmentation {
+                profile: Some(profile),
+                profile_output: None,
+            },
+        );
+        assert!(description.contains("T>G@1"), "{description}");
+        assert!(record.filters().as_ref().contains(Tagmentation::FILTER));
     }
 }

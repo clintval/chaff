@@ -71,6 +71,7 @@ What each filter can detect depends on the BAM, because a consensus removes arti
 | Reads | All three | Copied damage: lesions in its damage classes near the lesion strand's 5′ end, whether or not they were copied to the partner strand. End repair fill-in: bases misincorporated while a polymerase filled in a recessed 3′ end. A-tailing: a non-templated A at the last base of a 3′ end. |
 | Simplex consensus | All three | Same as reads. A simplex consensus collapses the reads of one strand, so single-strand artifacts survive it. |
 | Duplex consensus | Copied damage, and end repair fill-in as a fragment-end filter | Copied damage: lesions copied onto both strands before adapter ligation, which a duplex consensus keeps. This is the main filter for Duplex Sequencing. End repair fill-in: any substitution that both strands agree on and that clusters near either fragment end. A-tailing: nothing, unless trimming left the A-tail in place (see the note under [A-Tailing](#a-tailing)). |
+| Transposase (tagmentation) library, reads or consensus | Tagmentation, and copied damage | Tagmentation: substitutions at fixed positions from a fragment end, most often the first base, that the library makes more often than its own background and the transposase's base preference predict. Both strands can carry them, so a duplex consensus keeps them. End repair fill-in and A-tailing do not apply, since the library has neither step. |
 
 A CODEC consensus [[9]](#references) from fgbio's `CallCodecConsensusReads` or `fgumi codec` [[10]](#references) has one unpaired record per molecule with duplex tags.
 It is treated as a duplex consensus whose template ends are the record's outermost bases.
@@ -78,6 +79,7 @@ Each of its strands comes from a single raw read, below the minimum of 2 needed 
 
 By default every filter runs and only annotates calls.
 A filter applies its FILTER only once it has a threshold (see [Setting Thresholds](#setting-thresholds)).
+The tagmentation filter learns from the BAM whether the library has its artifact, and scores no call when it does not, so it is safe to leave on for a ligation library.
 
 ## Pooled Samples
 
@@ -274,6 +276,43 @@ On the forward strand it reads as an A near the template's higher-coordinate end
 > If read trimming leaves the A-tail in place, the non-templated A can appear on both strands and survive a duplex consensus, at the last base of a 3′ end.
 > Before dropping A-tailing for a Duplex Sequencing library, measure it as in [2. Measure](#2-measure). A small `asymmetry_p_value` in its metrics rows means the library has the artifact.
 
+### Tagmentation
+
+A transposase cuts a fragment and joins its adapters in one step, then a polymerase fills a short gap at each fragment end.
+The bases at fixed positions from a fragment end, most often the first, can then read as another base more often than the bases inside the fragment.
+The change can be on both strands, so a duplex consensus keeps it.
+Which positions and which substitutions differ between chemistries, so the filter learns them from the library and has no built-in position.
+
+- **Measured from:** both template ends, each read in its own orientation.
+- **Scored with:** the positions and substitutions learned from the BAM, written in the `TGAP` header line as, for example, `T>G@1`.
+- **Writes:** the posterior `TGAP`, the likelihood ratio `TGLR`, the molecule counts `TGAC` and `TGRC`, and the FILTER `TagmentationArtifact`.
+- **Use it when:** the library was made by tagmentation. It needs `--ref` and `--model chaff`.
+
+The filter reads every record of the BAM once and counts, at each of the first 20 bases from the record's 5′ end, the reference base against the base read.
+Three things keep it from flagging real variants:
+
+- **Base preference.** A transposase prefers some bases at each position near its cut, and it reads the sample's base, not the reference's. A real allele is therefore found at a position more often than the reference base it replaces, by the ratio of the two bases' shares there. The filter measures that ratio from the reference bases at each position and expects that many more real alleles, so only a rate beyond it counts as an excess.
+- **Shared sites.** A substitution counts once per site, so a germline allele that many molecules share weighs what one molecule's error does.
+- **CpG context.** A C>T at a CpG is far more common than elsewhere, so C>T and G>A are learned separately inside and outside a CpG.
+
+A position is learned for a substitution when it has at least 50 substitutions, at 1.5 times the expected rate or more, and well beyond chance.
+A call is then scored by where its alternate molecules are.
+Alternate molecules at a learned position favor the artifact, and one alternate molecule anywhere else outweighs them.
+A call with no alternate molecule at a learned position always gets a `TGAP` of 1, whatever the prior, so the prior alone never flags a call.
+A call of a substitution with no learned position gets no `TG` fields.
+
+A BAM with few records, as a duplex consensus often is, may not have the 50 substitutions a position needs.
+It can borrow the profile of a larger BAM of the same library, such as its single-strand consensus:
+
+```bash
+chaff --input calls.vcf.gz --bam simplex.bam --ref ref.fa --output simplex.chaff.vcf.gz \
+    --tagmentation-profile-output library.tagmentation.tsv
+chaff --input duplex.calls.vcf.gz --bam duplex.bam --ref ref.fa --output duplex.chaff.vcf.gz \
+    --tagmentation-profile library.tagmentation.tsv
+```
+
+A borrowed profile assumes the two BAMs share the artifact, which a duplex consensus may carry at a lower rate than its single-strand consensus.
+
 ## Setting Thresholds
 
 Every filter runs by default but only annotates calls until it has a threshold, so choosing a filter means setting its threshold.
@@ -320,7 +359,7 @@ In the spectrum, compare the expected real SNVs with all SNVs.
 Copied damage shows up as C>T at CpG, or C>A, that shrinks after weighting while the other channels keep their height.
 
 Each metrics row covers one filter and *stratum*, a group of calls that share an artifact rate.
-For copied damage a stratum is a damage class and CpG context, and for the other filters it is a substitution.
+For copied damage a stratum is a damage class and CpG context, for tagmentation a substitution with the CpG context of a C>T, and for the other filters a substitution.
 Every stratum a filter can score gets a row, with zero counts if it has no calls, so tables from different samples line up.
 The columns are:
 
@@ -329,6 +368,7 @@ The columns are:
 - **Distance:** the `distance` is the decay scale or window in bases, shared by all of a filter's strata. It is empty when the scale is learned and the filter has no call to learn it from.
 - **Molecules:** the `alt_molecules` and `ref_molecules` measured, and their `_congruent` counts and fractions, the molecules within `distance` of the artifact's end.
 - **Asymmetry:** the `expected_alt_congruent` count is the alternate molecules expected within `distance` from each call's reference molecules, and `asymmetry_p_value` is a one-sided test for more than that. A small value means the library has the artifact.
+- **Learned positions:** for tagmentation, `learned_positions` lists the substitutions and positions learned for the stratum, each substitution as a read from that end shows it. The `distance` column is empty, and congruent molecules are those at a learned position. The rows are written only when the BAM was profiled.
 - **Single strand:** for copied damage on a BAM with single-strand consensus, `change_rate` and `single_strand_rate` are the duplex and single-strand changes of the class per molecule, over positions with more than 10 molecules, whether or not a call falls in the stratum. The `conversion_ratio` is the first over the second, and `chance_fraction` is the mean prior of the stratum's calls. The `chance_excess` is the number of positions with two or more changes that chance predicts beyond those observed and their noise, as a share of those observed, and is zero when the model fits.
 
 To show only the strata with a call:
@@ -470,11 +510,16 @@ Each filter writes INFO fields to the calls it scores, and its FILTER to the cal
 | `CDRC` | Copied Damage Reference Counts | The same two counts for the reference molecules. |
 | `ERFAP` | End Repair Fill-in Artifact Posterior | The posterior probability that the call is a real mutation and not an end repair fill-in error. A low value means a likely error. |
 | `ATAP` | A-Tailing Artifact Posterior | The posterior probability that the call is a real mutation and not an A-tailing artifact. A low value means a likely artifact. |
+| `TGAP` | Tagmentation Artifact Posterior | The posterior probability that the call is a real mutation and not a tagmentation artifact. It is 1 for a call with no alternate molecule at a learned position. |
+| `TGLR` | Tagmentation Likelihood Ratio | The log10 likelihood ratio of a tagmentation artifact to a real mutation. A high value favors the artifact. |
+| `TGAC` | Tagmentation Alternate Counts | The alternate molecules at a learned position from a template end, and all alternate molecules measured. |
+| `TGRC` | Tagmentation Reference Counts | The same two counts for the reference molecules. |
 | `PA` | Parent Alleles | The bases the call was scored from, written when one is not REF: that base alone, or REF then that base. |
 | `CDPW` | Copied Damage Parent Weight | The weight in `CDAP` of the second base in `PA`, written when `PA` holds two. |
 | `CopiedDamageArtifact` | A FILTER | Applied when `CDAP` is at or below the copied damage threshold. |
 | `EndRepairFillInArtifact` | A FILTER | Applied when `ERFAP` is at or below the end repair fill-in threshold. |
 | `ATailingArtifact` | A FILTER | Applied when `ATAP` is at or below the A-tailing threshold. |
+| `TagmentationArtifact` | A FILTER | Applied when `TGAP` is at or below the tagmentation threshold. |
 
 The tool learns how common each artifact is and how far it reaches per sample, so most runs need only the filters and their thresholds.
 The model behind the posteriors is documented in [`src/lib/mod.rs`](src/lib/mod.rs).
@@ -486,7 +531,7 @@ The model behind the posteriors is documented in [`src/lib/mod.rs`](src/lib/mod.
 | `--input` | The coordinate-sorted VCF or BCF of somatic calls. It is read twice, so it must be a file, not standard input (short `-i`; required). |
 | `--output` | The output VCF or BCF, its format set by its extension: `.vcf`, `.vcf.gz`, `.bcf`, or `-` for plain VCF on standard output. A `.vcf.gz` gets a tabix index at `.vcf.gz.tbi`, and a `.bcf` a CSI index at `.bcf.csi` (short `-o`; required). |
 | `--bam` | The coordinate-sorted BAM of reads or consensus reads; no index is needed. Distances from template ends are counted through both mates' CIGARs, so each mate of a pair on one contig needs its mate's CIGAR in its `MC` tag. Insert size is never read (short `-b`; required). |
-| `--ref` | The reference FASTA, with its `.fai`, for CpG context. The copied damage filter and `--spectrum` need it, and giving it without either is an error (short `-r`). |
+| `--ref` | The reference FASTA, with its `.fai`, for CpG context. The copied damage filter, the tagmentation filter, and `--spectrum` need it, and giving it without any of them is an error (short `-r`). |
 | `--sample` | The sample the BAM holds, required when the VCF has more than one sample unless `--pooled` is given (short `-s`). |
 | `--pooled` | Score every SNV against the whole BAM as one sample, labelled `pooled`, regardless of genotype, and write every sample column back unchanged. For many samples that share one library and one BAM. A VCF without samples is always scored this way. Cannot be combined with `--sample` (default off). |
 | `--metrics` | The per-sample metrics TSV, one row per filter and stratum (default none). |
@@ -494,7 +539,7 @@ The model behind the posteriors is documented in [`src/lib/mod.rs`](src/lib/mod.
 | `--min-mapping-quality` | The minimum mapping quality of a read or consensus read (short `-m`; default 20). |
 | `--min-base-quality` | The minimum base quality at the call (short `-q`; default 20). |
 | `--paired-reads-only` | Use only paired reads or consensus reads whose mate is also mapped. Duplicate, secondary, and supplementary records are always excluded (short `-p`; default off). |
-| `--filters` | The filters to run, comma-separated, from `copied-damage`, `end-repair-fill-in`, and `a-tailing` (default `copied-damage,a-tailing,end-repair-fill-in`). |
+| `--filters` | The filters to run, comma-separated, from `copied-damage`, `end-repair-fill-in`, `a-tailing`, and `tagmentation` (default `copied-damage,a-tailing,end-repair-fill-in,tagmentation`). Under `--model fgbio` the default leaves `tagmentation` out. |
 | `--model` | The scoring model. With `chaff`, artifact fractions are learned per sample and stratum by EM, and end repair fill-in and copied damage use decays. With `fgbio`, calls get fgbio's per-call `(2 * maf)^2` prior and windows, for parity (default `chaff`). |
 | `--copied-damage-classes` | The damage classes as damaged base `>` read base, comma-separated, each matched on either strand. The class `C>T` is cytosine or 5-methylcytosine deamination and covers REF/ALT `C/T` and `G/A`; `G>T` is guanine oxidation to 8-oxoguanine (default `C>T,G>T`). |
 | `--copied-damage-distance` | The decay scale in bases from the lesion strand's 5′ end: the mean length over which a polymerase copies a lesion strand onto its partner. It is learned per library under either model unless set to a number. Molecules within it count as congruent in the metrics (default `learned`). |
@@ -504,6 +549,9 @@ The model behind the posteriors is documented in [`src/lib/mod.rs`](src/lib/mod.
 | `--end-repair-fill-in-threshold` | Apply `EndRepairFillInArtifact` at or below this posterior (default none). |
 | `--a-tailing-distance` | The window in bases from the template end, under either model (default 2). |
 | `--a-tailing-threshold` | Apply `ATailingArtifact` at or below this posterior (default none). |
+| `--tagmentation-threshold` | Apply `TagmentationArtifact` at or below this posterior (default none). |
+| `--tagmentation-profile` | A profile TSV from another run's `--tagmentation-profile-output`, scored with in place of the BAM's own, so a small BAM can borrow the profile of a larger BAM of its library (default none). |
+| `--tagmentation-profile-output` | Write the profile the run scored with: the BAM's bases by position from each record's 5′ end, as position, reference base, read base, CpG context, and count (default none). |
 
 The VCF/BCF and the BAM must be coordinate sorted with their contigs in the same order, and neither needs an index.
 The FASTA needs a `.fai`.
@@ -512,7 +560,7 @@ Each template counts once.
 Both template ends are measured for an FR pair, whose forward mate starts at or before its reverse mate's 5′ end, and for an unpaired duplex consensus, from its outermost bases.
 For any other pair, only each mate's own end is measured.
 
-These are usage errors: an option for a filter that `--filters` leaves out, `--ref` without `copied-damage` or `--spectrum`, and `--copied-damage-prior` or `--end-repair-fill-in-distance learned` given with `--model fgbio`.
+These are usage errors: an option for a filter that `--filters` leaves out, `--ref` without `copied-damage`, `tagmentation`, or `--spectrum`, and `--copied-damage-prior`, `--end-repair-fill-in-distance learned`, or `--filters` with `tagmentation` given with `--model fgbio`.
 A VCF that already declares an enabled filter's INFO or FILTER, such as from an earlier run, is rejected.
 Remove them first, for example with `bcftools annotate -x`.
 
